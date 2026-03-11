@@ -110,7 +110,7 @@ async function startServer() {
       } else if (mode === 'ctf') {
         rooms[code].globalState = { redScore: 0, blueScore: 0, redFlag: { x: 150, y: 750, carrier: null, base: {x: 150, y: 750} }, blueFlag: { x: 1850, y: 750, carrier: null, base: {x: 1850, y: 750} }, lasers: [] };
       } else if (mode === 'economy') {
-        rooms[code].globalState = { events: [] };
+        rooms[code].globalState = { events: [], collectibles: [], timeLimit: 300, worldSize: 4000 };
       } else if (mode === 'farm') {
         rooms[code].globalState = { asteroids: [], lasers: [] };
       }
@@ -141,7 +141,9 @@ async function startServer() {
         newPlayer.x = newPlayer.modeState.team === 'red' ? 200 : 1800;
         newPlayer.y = 750;
       } else if (room.mode === 'economy') {
-        newPlayer.modeState = { multiplier: 1, frozenUntil: 0 };
+        newPlayer.modeState = { multiplier: 1, frozenUntil: 0, energy: 100, maxEnergy: 100 };
+        newPlayer.x = 2000;
+        newPlayer.y = 2000;
       } else if (room.mode === 'farm') {
         newPlayer.modeState = { laserDamage: 25, magnetRange: 50, hasShield: false };
       } else if (room.mode === 'boss') {
@@ -182,6 +184,25 @@ async function startServer() {
             room.players[bossId].modeState.hp = playerIds.length * 2000;
           }
         }
+        if (room.mode === 'economy' && room.globalState.collectibles) {
+          const WORLD = 4000;
+          const CENTER = 2000;
+          for (let i = 0; i < 50; i++) {
+            const r = Math.random();
+            let type: string, value: number;
+            if (r < 0.25) { type = 'treasure_chest'; value = 40; }
+            else if (r < 0.55) { type = 'coin_pile'; value = 20; }
+            else { type = 'money_bills'; value = 10; }
+            const nearCenter = i < 15;
+            room.globalState.collectibles.push({
+              id: Math.random().toString(),
+              x: nearCenter ? CENTER + (Math.random() - 0.5) * 800 : 100 + Math.random() * (WORLD - 200),
+              y: nearCenter ? CENTER + (Math.random() - 0.5) * 800 : 100 + Math.random() * (WORLD - 200),
+              type,
+              value
+            });
+          }
+        }
 
         io.to(code).emit("gameStarted", room);
         persistRoom(room);
@@ -203,6 +224,22 @@ async function startServer() {
             p.x = Math.max(24, Math.min(1976, x));
             p.y = Math.max(24, Math.min(1476, y));
           }
+        } else if (room.mode === 'economy') {
+          const WORLD = 4000;
+          const energy = p.modeState.energy ?? 100;
+
+          if (energy <= 0) return;
+
+          const targetX = Math.max(50, Math.min(WORLD - 50, x));
+          const targetY = Math.max(50, Math.min(WORLD - 50, y));
+          const dist = Math.hypot(targetX - p.x, targetY - p.y);
+
+          if (dist < 0.5) return;
+
+          const energyCost = dist * 0.02;
+          p.modeState.energy = Math.max(0, energy - energyCost);
+          p.x = targetX;
+          p.y = targetY;
         } else {
           p.x = Math.max(15, Math.min(985, x));
           p.y = Math.max(15, Math.min(985, y));
@@ -221,7 +258,10 @@ async function startServer() {
 
       if (isCorrect) {
         let earned = 10;
-        if (room.mode === 'economy') earned *= (player.modeState.multiplier || 1);
+        if (room.mode === 'economy') {
+          earned *= (player.modeState.multiplier || 1);
+          player.modeState.energy = Math.min(player.modeState.maxEnergy || 100, (player.modeState.energy || 0) + 25);
+        }
         if (room.mode === 'ctf') earned = 50; // Energy
         if (room.mode === 'boss') earned = player.modeState.isBoss ? 20 : 50; // Boss gets shield points, heroes get damage points
         if (room.mode === 'farm') earned = 20; // Laser energy
@@ -351,8 +391,8 @@ async function startServer() {
       let winner = null;
       
       if (room.mode === 'economy') {
-        const p = Object.values(room.players).find(p => p.resources >= 10000);
-        if (p) winner = p.name;
+        const p = Object.values(room.players).find((p: any) => p.resources >= 5000);
+        if (p) winner = (p as any).name;
       } else if (room.mode === 'zombie') {
         if (room.globalState.baseHealth <= 0) winner = "הזומבים";
       } else if (room.mode === 'boss') {
@@ -550,22 +590,41 @@ async function startServer() {
 
       // --- ECONOMY MODE ---
       else if (room.mode === 'economy') {
-        if (!state.coins) state.coins = [];
-        if (state.coins.length < 20 && Math.random() < 0.05) {
-          state.coins.push({
+        if (!state.collectibles) {
+          state.collectibles = [];
+          if (state.coins && Array.isArray(state.coins)) {
+            state.collectibles = state.coins.map((c: any) => ({
+              id: c.id || Math.random().toString(),
+              x: c.x, y: c.y,
+              type: c.type || 'silver',
+              value: c.value || 20
+            }));
+            delete state.coins;
+          }
+        }
+        if (!state.timeLimit) state.timeLimit = 300;
+        const WORLD = 4000;
+        if (state.collectibles.length < 100 && Math.random() < 0.6) {
+          const r = Math.random();
+          let type: string, value: number;
+          if (r < 0.25) { type = 'treasure_chest'; value = 40; }
+          else if (r < 0.55) { type = 'coin_pile'; value = 20; }
+          else { type = 'money_bills'; value = 10; }
+          state.collectibles.push({
             id: Math.random().toString(),
-            x: 100 + Math.random() * 800,
-            y: 100 + Math.random() * 800,
-            value: 10 + Math.floor(Math.random() * 40)
+            x: 100 + Math.random() * (WORLD - 200),
+            y: 100 + Math.random() * (WORLD - 200),
+            type,
+            value
           });
         }
 
-        Object.values(room.players).forEach(p => {
+        Object.values(room.players).forEach((p: any) => {
           if (p.modeState.frozenUntil > now) return;
-          state.coins = state.coins.filter((c: any) => {
-            if (Math.hypot(p.x - c.x, p.y - c.y) < 30) {
+          state.collectibles = state.collectibles.filter((c: any) => {
+            if (Math.hypot(p.x - c.x, p.y - c.y) < 150) {
               p.resources += c.value * (p.modeState.multiplier || 1);
-              if (p.resources >= 10000) {
+              if (p.resources >= 5000) {
                 room.state = 'ended';
                 io.to(room.code).emit("gameOver", { winner: p.name });
                 persistGameResult(room, p.name);
@@ -575,6 +634,18 @@ async function startServer() {
             return true;
           });
         });
+
+        if (room.startTime && state.timeLimit) {
+          const elapsed = now - room.startTime;
+          state.timeLeft = Math.max(0, state.timeLimit - Math.floor(elapsed / 1000));
+          if (state.timeLeft <= 0) {
+            const sorted = Object.values(room.players).sort((a: any, b: any) => (b.resources || 0) - (a.resources || 0));
+            const winner = sorted[0]?.name || 'אף אחד';
+            room.state = 'ended';
+            io.to(room.code).emit("gameOver", { winner });
+            persistGameResult(room, winner);
+          }
+        }
       }
 
       // --- FARM MODE ---
@@ -608,9 +679,15 @@ async function startServer() {
         }
       }
 
-      io.to(room.code).emit('tick', { players: room.players, globalState: state });
+      io.to(room.code).emit('tick', {
+        players: Object.fromEntries(Object.entries(room.players).map(([k, v]) => [k, { ...v, modeState: { ...v.modeState } }])),
+        globalState: { ...state, collectibles: [...(state.collectibles || [])] }
+      });
     });
   }, 1000 / 30);
+
+  // Serve static assets from public (images, etc.) - before Vite in dev
+  app.use(express.static('public'));
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });

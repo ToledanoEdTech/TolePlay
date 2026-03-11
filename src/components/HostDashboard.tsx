@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { socket } from '../socket';
 import { Users, Play, Trophy, Shield, Rocket, Target, DollarSign, Upload, FileText, XCircle } from 'lucide-react';
-import { PlayerView } from './PlayerView';
 import { CTF_MAP } from '../engine/maps/ctfMap';
 
 const MODES = [
@@ -43,8 +42,8 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   const [gameState, setGameState] = useState<'setup' | 'lobby' | 'playing' | 'ended'>('setup');
   const [globalState, setGlobalState] = useState<any>({});
   const [winner, setWinner] = useState<string | null>(null);
-  const [showTestPlayer, setShowTestPlayer] = useState(false);
   const [customQuestions, setCustomQuestions] = useState<any[]>([]);
+  const showTestPlayer = false; // Legacy - kept to prevent ReferenceError from cached builds
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const latestTick = useRef<any>(null);
@@ -187,15 +186,18 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
             });
 
           } else if (mode === 'economy') {
-            gs?.coins?.forEach((c: any) => {
-              ctx.shadowBlur = 15; ctx.shadowColor = '#facc15';
-              ctx.fillStyle = '#facc15';
-              ctx.beginPath(); ctx.arc(c.x, c.y, 12, 0, Math.PI * 2); ctx.fill();
+            const econScale = 1000 / 4000;
+            (gs?.collectibles || []).forEach((c: any) => {
+              const px = c.x * econScale, py = c.y * econScale;
+              const isChest = c.type === 'treasure_chest';
+              const isCoins = c.type === 'coin_pile';
+              const r = isChest ? 14 : isCoins ? 10 : 8;
+              ctx.shadowBlur = 12; ctx.shadowColor = '#facc15';
+              ctx.fillStyle = isChest ? '#f59e0b' : isCoins ? '#facc15' : '#4ade80';
+              ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
               ctx.shadowBlur = 0;
-              ctx.fillStyle = '#92400e';
-              ctx.beginPath(); ctx.arc(c.x, c.y, 8, 0, Math.PI * 2); ctx.fill();
-              ctx.fillStyle = '#facc15'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
-              ctx.fillText('$', c.x, c.y + 4);
+              ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+              ctx.fillText('$', px, py);
             });
 
           } else if (mode === 'farm') {
@@ -284,10 +286,11 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
             ctx.restore();
           }
 
-          // Coordinate scaling for CTF (world coords → canvas coords)
+          // Coordinate scaling (world coords → canvas coords)
           const isCtf = mode === 'ctf';
-          const csx = isCtf ? 1000 / CTF_MAP.width : 1;
-          const csy = isCtf ? 1000 / CTF_MAP.height : 1;
+          const isEconomy = mode === 'economy';
+          const csx = isCtf ? 1000 / CTF_MAP.width : isEconomy ? 1000 / 4000 : 1;
+          const csy = isCtf ? 1000 / CTF_MAP.height : isEconomy ? 1000 / 4000 : 1;
 
           // Lasers (enhanced beam)
           gs?.lasers?.forEach((l: any) => {
@@ -536,14 +539,6 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                 </div>
                 
                 <div className="flex flex-col sm:flex-row items-center justify-center gap-6">
-                  {!showTestPlayer && (
-                    <button 
-                      onClick={() => setShowTestPlayer(true)}
-                      className="py-4 px-8 bg-slate-800 hover:bg-slate-700 rounded-2xl font-bold flex items-center gap-3 transition-all text-xl border border-slate-700"
-                    >
-                      בחן משחק (טסט)
-                    </button>
-                  )}
                   <button 
                     onClick={startGame}
                     disabled={players.length === 0}
@@ -606,14 +601,6 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                   </span>
                 </div>
                 <div className="flex items-center gap-6">
-                  {!showTestPlayer && (
-                    <button 
-                      onClick={() => setShowTestPlayer(true)}
-                      className="py-2 px-6 bg-slate-800 hover:bg-slate-700 rounded-xl font-bold text-sm transition-all border border-slate-700"
-                    >
-                      פתח מסך בדיקה
-                    </button>
-                  )}
                   <div className="text-2xl font-black font-mono bg-slate-950 px-8 py-3 rounded-2xl border-2 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.2)]">
                     קוד: <span className="text-indigo-400">{roomCode}</span>
                   </div>
@@ -712,17 +699,6 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
           )}
         </div>
       </div>
-      {showTestPlayer && roomCode && (
-        <div className="w-[400px] border-r border-slate-800/50 bg-[#0a0f1e] shadow-2xl flex-shrink-0 relative z-50">
-          <div className="absolute top-0 left-0 right-0 bg-indigo-600 text-white text-center py-2 text-sm font-bold z-50 shadow-md flex justify-between px-4">
-            <span>מצב בדיקה (תצוגת שחקן)</span>
-            <button onClick={() => setShowTestPlayer(false)} className="hover:text-indigo-200"><XCircle size={16}/></button>
-          </div>
-          <div className="h-full pt-10">
-            <PlayerView onBack={() => setShowTestPlayer(false)} initialCode={roomCode} initialName="מורה (טסט)" autoJoin={true} />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
