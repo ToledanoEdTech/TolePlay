@@ -113,6 +113,40 @@ body {
   50% { box-shadow: 0 0 50px rgba(139, 92, 246, 0.35); }
 }
 
+@keyframes game-scan-line {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+@keyframes warning-pulse {
+  0%, 100% { opacity: 0.05; }
+  50% { opacity: 0.2; }
+}
+
+@keyframes energy-flow {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes damage-flash {
+  0% { opacity: 0.3; }
+  100% { opacity: 0; }
+}
+
+.game-scan-line {
+  animation: game-scan-line 4s linear infinite;
+}
+
+.warning-pulse {
+  animation: warning-pulse 0.8s ease-in-out infinite;
+}
+
+.energy-flow {
+  background: linear-gradient(90deg, transparent 30%, rgba(255,255,255,0.15) 50%, transparent 70%);
+  background-size: 200% 100%;
+  animation: energy-flow 2s linear infinite;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

@@ -108,7 +108,7 @@ async function startServer() {
       } else if (mode === 'boss') {
         rooms[code].globalState = { bossId: null, timeLeft: 600, lasers: [] }; // 10 minutes
       } else if (mode === 'ctf') {
-        rooms[code].globalState = { redScore: 0, blueScore: 0, redFlag: { x: 100, y: 500, carrier: null, base: {x: 100, y: 500} }, blueFlag: { x: 900, y: 500, carrier: null, base: {x: 900, y: 500} }, lasers: [] };
+        rooms[code].globalState = { redScore: 0, blueScore: 0, redFlag: { x: 150, y: 750, carrier: null, base: {x: 150, y: 750} }, blueFlag: { x: 1850, y: 750, carrier: null, base: {x: 1850, y: 750} }, lasers: [] };
       } else if (mode === 'economy') {
         rooms[code].globalState = { events: [] };
       } else if (mode === 'farm') {
@@ -138,7 +138,8 @@ async function startServer() {
         const redCount = Object.values(room.players).filter(p => p.modeState.team === 'red').length;
         const blueCount = Object.values(room.players).filter(p => p.modeState.team === 'blue').length;
         newPlayer.modeState = { team: redCount <= blueCount ? 'red' : 'blue', hasFlag: false, hp: 100, maxHp: 100 };
-        newPlayer.x = newPlayer.modeState.team === 'red' ? 150 : 850;
+        newPlayer.x = newPlayer.modeState.team === 'red' ? 200 : 1800;
+        newPlayer.y = 750;
       } else if (room.mode === 'economy') {
         newPlayer.modeState = { multiplier: 1, frozenUntil: 0 };
       } else if (room.mode === 'farm') {
@@ -196,12 +197,11 @@ async function startServer() {
         if (room.mode === 'boss' && p.modeState.disabledUntil > Date.now()) return;
 
         if (room.mode === 'ctf') {
-          // Consume energy to move
           const dist = Math.hypot(p.x - x, p.y - y);
           if (p.resources >= dist * 0.1) {
             p.resources -= dist * 0.1;
-            p.x = Math.max(15, Math.min(985, x));
-            p.y = Math.max(15, Math.min(985, y));
+            p.x = Math.max(24, Math.min(1976, x));
+            p.y = Math.max(24, Math.min(1476, y));
           }
         } else {
           p.x = Math.max(15, Math.min(985, x));
@@ -325,7 +325,7 @@ async function startServer() {
         if (zombie && player.resources >= 5) {
           player.resources -= 5;
           zombie.hp -= player.modeState.damage || 20;
-          room.globalState.lasers.push({ x1: 500, y1: 500, x2: zombie.x, y2: zombie.y, color: '#ef4444' });
+          room.globalState.lasers.push({ x1: player.x ?? 500, y1: player.y ?? 500, x2: zombie.x, y2: zombie.y, color: '#ef4444' });
           
           if (zombie.hp <= 0) {
             player.score += 10;
@@ -382,15 +382,19 @@ async function startServer() {
 
       // --- ZOMBIE MODE ---
       if (room.mode === 'zombie') {
-        if (Math.random() < 0.02 + (state.wave * 0.005)) {
+        const playerCount = Math.max(1, Object.keys(room.players).length);
+        const baseRate = 0.002 + state.wave * 0.0008;
+        const singlePlayerBonus = playerCount === 1 ? 3 : 1;
+        const spawnChance = baseRate / (playerCount * singlePlayerBonus);
+        if (Math.random() < spawnChance) {
           let zx, zy;
           if (Math.random() < 0.5) { zx = Math.random() * 1000; zy = Math.random() < 0.5 ? -50 : 1050; }
           else { zx = Math.random() < 0.5 ? -50 : 1050; zy = Math.random() * 1000; }
           state.zombies.push({
             id: Math.random().toString(),
             x: zx, y: zy,
-            hp: 30 + (state.wave * 10), maxHp: 30 + (state.wave * 10),
-            speed: 1 + (state.wave * 0.1)
+            hp: 25 + (state.wave * 8), maxHp: 25 + (state.wave * 8),
+            speed: 0.4 + (state.wave * 0.05)
           });
         }
 
@@ -458,27 +462,23 @@ async function startServer() {
         
         playersList.forEach(p => {
           if (p.modeState.hp <= 0) {
-            // Respawn logic
             if (now > p.modeState.respawnAt) {
               p.modeState.hp = 100;
-              p.x = p.modeState.team === 'red' ? 150 : 850;
-              p.y = 500;
+              p.x = p.modeState.team === 'red' ? 200 : 1800;
+              p.y = 750;
             }
             return;
           }
 
-          // Regenerate energy slowly
-          if (p.resources < 100) {
-            p.resources += 0.5; // 15 energy per second at 30fps
+          if (p.resources < 200) {
+            p.resources += 0.5;
           }
 
-          // Tagging logic
           playersList.forEach(otherP => {
             if (otherP.id !== p.id && otherP.modeState.hp > 0 && otherP.modeState.team !== p.modeState.team) {
               if (Math.hypot(p.x - otherP.x, p.y - otherP.y) < 30) {
-                // If p is on their own side, they tag otherP
-                if ((p.modeState.team === 'red' && p.x < 500 && otherP.x < 500) || 
-                    (p.modeState.team === 'blue' && p.x > 500 && otherP.x > 500)) {
+                if ((p.modeState.team === 'red' && p.x < 1000 && otherP.x < 1000) || 
+                    (p.modeState.team === 'blue' && p.x > 1000 && otherP.x > 1000)) {
                   otherP.modeState.hp = 0;
                   otherP.modeState.respawnAt = now + 3000; // 3 seconds respawn
                   
