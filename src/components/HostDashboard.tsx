@@ -18,6 +18,21 @@ const MOCK_QUESTIONS = [
   { q: "איזה כוכב לכת הוא הקרוב ביותר לשמש?", opts: ["נוגה", "מאדים", "כדור הארץ", "חמה"], a: 3 },
   { q: "מי כתב את 'הארי פוטר'?", opts: ["ג'יי קיי רולינג", "סטיבן קינג", "ג'ורג' ר.ר. מרטין", "טולקין"], a: 0 },
   { q: "מהו היסוד הכימי בעל הסימול O?", opts: ["זהב", "חמצן", "פחמן", "ברזל"], a: 1 },
+  { q: "כמה זה 12 כפול 12?", opts: ["124", "132", "144", "156"], a: 2 },
+  { q: "מה השפה הנפוצה ביותר בעולם?", opts: ["אנגלית", "ספרדית", "סינית מנדרינית", "הינדית"], a: 2 },
+  { q: "כמה צלעות יש למשולש?", opts: ["2", "3", "4", "5"], a: 1 },
+  { q: "מהו בעל החיים הגדול ביותר בעולם?", opts: ["פיל אפריקאי", "לוויתן כחול", "כריש לוויתן", "ג'ירפה"], a: 1 },
+  { q: "באיזו שנה הוקמה מדינת ישראל?", opts: ["1945", "1948", "1950", "1952"], a: 1 },
+  { q: "מה שורש של 81?", opts: ["7", "8", "9", "10"], a: 2 },
+  { q: "כמה יבשות יש בעולם?", opts: ["5", "6", "7", "8"], a: 2 },
+  { q: "מי צייר את המונה ליזה?", opts: ["מיכלאנג'לו", "לאונרדו דה וינצ'י", "רפאל", "דאלי"], a: 1 },
+  { q: "מהי הנוסחה של מים?", opts: ["CO2", "H2O", "NaCl", "O2"], a: 1 },
+  { q: "כמה דקות יש בשעה?", opts: ["30", "45", "60", "90"], a: 2 },
+  { q: "מהו כוח הכבידה על פני כדור הארץ?", opts: ["8.9 m/s²", "9.8 m/s²", "10.2 m/s²", "7.5 m/s²"], a: 1 },
+  { q: "כמה זה 15% מ-200?", opts: ["25", "30", "35", "40"], a: 1 },
+  { q: "מהו האוקיינוס הגדול ביותר?", opts: ["האטלנטי", "ההודי", "השקט", "הארקטי"], a: 2 },
+  { q: "באיזו מדינה נמצא מגדל אייפל?", opts: ["אנגליה", "צרפת", "גרמניה", "איטליה"], a: 1 },
+  { q: "כמה שיניים יש לאדם בוגר?", opts: ["28", "30", "32", "34"], a: 2 },
 ];
 
 export function HostDashboard({ onBack }: { onBack: () => void }) {
@@ -35,13 +50,12 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   const particles = useRef<any[]>([]);
 
   useEffect(() => {
-    socket.on('roomUpdated', (room) => {
+    const onRoomUpdated = (room: any) => {
       setPlayers(Object.values(room.players));
-    });
-
-    socket.on('playerUpdated', ({ player }) => {
+    };
+    const onPlayerUpdated = ({ player }: any) => {
       setPlayers(prev => {
-        const idx = prev.findIndex(p => p.id === player.id);
+        const idx = prev.findIndex((p: any) => p.id === player.id);
         if (idx >= 0) {
           const newPlayers = [...prev];
           newPlayers[idx] = player;
@@ -49,27 +63,23 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
         }
         return [...prev, player];
       });
-    });
+    };
+    const onGlobalState = (state: any) => setGlobalState(state);
+    const onTick = (data: any) => { latestTick.current = data; };
+    const onGameOver = ({ winner }: any) => { setGameState('ended'); setWinner(winner); };
 
-    socket.on('globalStateUpdated', (state) => {
-      setGlobalState(state);
-    });
-
-    socket.on('tick', (data) => {
-      latestTick.current = data;
-    });
-
-    socket.on('gameOver', ({ winner }) => {
-      setGameState('ended');
-      setWinner(winner);
-    });
+    socket.on('roomUpdated', onRoomUpdated);
+    socket.on('playerUpdated', onPlayerUpdated);
+    socket.on('globalStateUpdated', onGlobalState);
+    socket.on('tick', onTick);
+    socket.on('gameOver', onGameOver);
 
     return () => {
-      socket.off('roomUpdated');
-      socket.off('playerUpdated');
-      socket.off('globalStateUpdated');
-      socket.off('tick');
-      socket.off('gameOver');
+      socket.off('roomUpdated', onRoomUpdated);
+      socket.off('playerUpdated', onPlayerUpdated);
+      socket.off('globalStateUpdated', onGlobalState);
+      socket.off('tick', onTick);
+      socket.off('gameOver', onGameOver);
     };
   }, []);
 
@@ -279,17 +289,23 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   };
 
   return (
-    <div className="flex h-screen w-full bg-slate-950 text-slate-100 overflow-hidden font-sans">
+    <div className="flex h-screen w-full bg-[#070b18] text-slate-100 overflow-hidden">
       <div className="flex-1 overflow-y-auto p-8">
         <div className="max-w-7xl mx-auto">
-          <button onClick={onBack} className="mb-8 text-slate-400 hover:text-white transition-colors flex items-center gap-2">
-            &rarr; חזור
-          </button>
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-3">
+              <img src="/logo.png" alt="TolePlay" className="w-9 h-9 object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+              <span className="text-xl font-black brand-text-sm">TolePlay</span>
+            </div>
+            <button onClick={onBack} className="text-slate-400 hover:text-white transition-colors flex items-center gap-2 text-sm font-bold hover:bg-slate-800/50 px-4 py-2 rounded-xl">
+              ← חזור
+            </button>
+          </div>
 
           {gameState === 'setup' && (
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-12">
               <div className="text-center">
-                <h2 className="text-5xl font-black bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent mb-4">בחר מצב משחק</h2>
+                <h2 className="text-5xl font-black brand-text mb-4">בחר מצב משחק</h2>
                 <p className="text-xl text-slate-400">בחר את החוויה המושלמת עבור התלמידים שלך</p>
               </div>
 
@@ -366,7 +382,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
 
           {gameState === 'lobby' && (
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="text-center max-w-4xl mx-auto">
-              <div className="bg-slate-900/80 backdrop-blur-xl rounded-[3rem] p-12 border border-slate-800 shadow-2xl mb-8">
+              <div className="bg-slate-900/60 backdrop-blur-xl rounded-[3rem] p-12 border border-slate-700/30 shadow-[0_0_80px_rgba(99,102,241,0.08)] mb-8">
                 <h2 className="text-2xl text-slate-400 mb-6 font-bold uppercase tracking-widest">קוד החדר שלך</h2>
                 <div className="text-9xl font-black tracking-widest text-indigo-400 mb-12 select-all drop-shadow-[0_0_40px_rgba(99,102,241,0.4)]">
                   {roomCode}
@@ -436,6 +452,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="h-[calc(100vh-8rem)] flex flex-col">
               <div className="flex justify-between items-center mb-6 bg-slate-900/80 p-6 rounded-3xl border border-slate-800 backdrop-blur-md">
                 <div className="flex items-center gap-4">
+                  <img src="/logo.png" alt="TolePlay" className="w-8 h-8 object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
                   <h2 className="text-3xl font-black text-indigo-400">המשחק פעיל</h2>
                   <span className="bg-slate-800 px-4 py-1 rounded-full text-sm font-bold border border-slate-700">
                     {MODES.find(m => m.id === mode)?.name}
@@ -533,7 +550,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                 <div className="absolute inset-0 bg-yellow-400 blur-[100px] opacity-20 rounded-full"></div>
                 <Trophy className="w-48 h-48 text-yellow-400 relative z-10 drop-shadow-[0_0_50px_rgba(250,204,21,0.5)]" />
               </div>
-              <h2 className="text-8xl font-black mb-6 text-transparent bg-clip-text bg-gradient-to-br from-yellow-300 via-yellow-500 to-orange-600">המשחק נגמר!</h2>
+              <h2 className="text-8xl font-black mb-6 text-transparent bg-clip-text bg-gradient-to-br from-yellow-300 via-amber-400 to-orange-500">המשחק נגמר!</h2>
               <p className="text-5xl text-indigo-200 mb-16 font-bold drop-shadow-lg">המנצח: {winner}</p>
               <button 
                 onClick={() => {
@@ -549,7 +566,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
         </div>
       </div>
       {showTestPlayer && roomCode && (
-        <div className="w-[400px] border-r border-slate-800 bg-slate-950 shadow-2xl flex-shrink-0 relative z-50">
+        <div className="w-[400px] border-r border-slate-800/50 bg-[#0a0f1e] shadow-2xl flex-shrink-0 relative z-50">
           <div className="absolute top-0 left-0 right-0 bg-indigo-600 text-white text-center py-2 text-sm font-bold z-50 shadow-md flex justify-between px-4">
             <span>מצב בדיקה (תצוגת שחקן)</span>
             <button onClick={() => setShowTestPlayer(false)} className="hover:text-indigo-200"><XCircle size={16}/></button>

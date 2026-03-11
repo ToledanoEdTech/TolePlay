@@ -1,7 +1,9 @@
+import 'dotenv/config';
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import { Server } from "socket.io";
 import http from "http";
+import { initFirebase, getDb } from './firebase-config.js';
 
 const PORT = 3000;
 
@@ -33,7 +35,47 @@ function generateRoomCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
+function persistRoom(room: GameRoom) {
+  const db = getDb();
+  if (!db) return;
+  db.ref(`rooms/${room.code}`).set({
+    code: room.code,
+    mode: room.mode,
+    state: room.state,
+    playerCount: Object.keys(room.players).length,
+    players: Object.values(room.players).map(p => ({
+      id: p.id, name: p.name, score: p.score, resources: p.resources
+    })),
+    createdAt: room.startTime || Date.now(),
+    updatedAt: Date.now()
+  }).catch(err => console.error('[Firebase] persistRoom failed:', err));
+}
+
+function persistGameResult(room: GameRoom, winner: string) {
+  const db = getDb();
+  if (!db) return;
+  db.ref('gameHistory').push({
+    roomCode: room.code,
+    mode: room.mode,
+    winner,
+    players: Object.values(room.players).map(p => ({
+      name: p.name, score: p.score, resources: p.resources
+    })),
+    startedAt: room.startTime || null,
+    endedAt: Date.now()
+  }).catch(err => console.error('[Firebase] persistGameResult failed:', err));
+  db.ref(`rooms/${room.code}`).remove().catch(() => {});
+}
+
+function removeRoomFromDb(code: string) {
+  const db = getDb();
+  if (!db) return;
+  db.ref(`rooms/${code}`).remove().catch(() => {});
+}
+
 async function startServer() {
+  initFirebase();
+
   const app = express();
   const server = http.createServer(app);
   const io = new Server(server, {
@@ -75,6 +117,7 @@ async function startServer() {
 
       socket.join(code);
       callback({ success: true, code });
+      persistRoom(rooms[code]);
     });
 
     socket.on("joinRoom", ({ code, name }, callback) => {
@@ -109,6 +152,7 @@ async function startServer() {
       
       io.to(code).emit("roomUpdated", room);
       callback({ success: true, playerId, room });
+      persistRoom(room);
     });
 
     socket.on("kickPlayer", ({ code, playerId }) => {
@@ -139,6 +183,7 @@ async function startServer() {
         }
 
         io.to(code).emit("gameStarted", room);
+        persistRoom(room);
       }
     });
 
@@ -206,10 +251,15 @@ async function startServer() {
 
       if (room.mode === 'zombie') {
         if (upgradeId === 'repair') room.globalState.baseHealth = Math.min(room.globalState.maxBaseHealth, room.globalState.baseHealth + 500);
-        if (upgradeId === 'turret') room.globalState.turrets.push({ x: player.x, y: player.y, lastShoot: 0 });
+        if (upgradeId === 'turret') {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = 120 + Math.random() * 150;
+          room.globalState.turrets.push({ x: 500 + Math.cos(angle) * dist, y: 500 + Math.sin(angle) * dist, lastShoot: 0 });
+        }
         if (upgradeId === 'heal') {
           Object.values(room.players).forEach(p => p.modeState.hp = p.modeState.maxHp);
         }
+        if (upgradeId === 'damage') player.modeState.damage = (player.modeState.damage || 20) + 10;
       } else if (room.mode === 'economy') {
         if (upgradeId === 'multiplier') player.modeState.multiplier += 1;
         if (upgradeId === 'freeze') {
@@ -263,7 +313,7 @@ async function startServer() {
         if (asteroid && player.resources >= 10) {
           player.resources -= 10;
           asteroid.hp -= player.modeState.laserDamage;
-          room.globalState.lasers.push({ x1: player.x, y1: player.y, x2: asteroid.x, y2: asteroid.y, color: '#a855f7' });
+          room.globalState.lasers.push({ x1: 500, y1: 950, x2: asteroid.x, y2: asteroid.y, color: '#a855f7' });
           
           if (asteroid.hp <= 0) {
             player.score += asteroid.value; // Use score for Space Ore
@@ -275,7 +325,7 @@ async function startServer() {
         if (zombie && player.resources >= 5) {
           player.resources -= 5;
           zombie.hp -= player.modeState.damage || 20;
-          room.globalState.lasers.push({ x1: player.x, y1: player.y, x2: zombie.x, y2: zombie.y, color: '#ef4444' });
+          room.globalState.lasers.push({ x1: 500, y1: 500, x2: zombie.x, y2: zombie.y, color: '#ef4444' });
           
           if (zombie.hp <= 0) {
             player.score += 10;
@@ -287,6 +337,12 @@ async function startServer() {
 
     socket.on("disconnect", () => {
       console.log("User disconnected:", socket.id);
+      for (const [code, room] of Object.entries(rooms)) {
+        if (room.hostId === socket.id && room.state === 'lobby') {
+          delete rooms[code];
+          removeRoomFromDb(code);
+        }
+      }
     });
 
     function checkWinCondition(code: string) {
@@ -311,6 +367,7 @@ async function startServer() {
       if (winner) {
         room.state = 'ended';
         io.to(code).emit("gameOver", { winner });
+        persistGameResult(room, winner);
       }
     }
   });
@@ -366,10 +423,19 @@ async function startServer() {
         });
 
         state.zombies = state.zombies.filter((z: any) => z.hp > 0);
-        if (Math.random() < 0.0005) state.wave += 1;
+        // Wave advances every 60 seconds
+        if (room.startTime && Math.floor((now - room.startTime) / 60000) >= state.wave) {
+          state.wave += 1;
+        }
+        if (state.wave > 5 && state.baseHealth > 0) {
+          room.state = 'ended';
+          io.to(room.code).emit("gameOver", { winner: "השחקנים!" });
+          persistGameResult(room, "השחקנים!");
+        }
         if (state.baseHealth <= 0) {
           room.state = 'ended';
           io.to(room.code).emit("gameOver", { winner: "הזומבים" });
+          persistGameResult(room, "הזומבים");
         }
       }
 
@@ -379,7 +445,9 @@ async function startServer() {
           state.timeLeft = Math.max(0, 600 - Math.floor((now - room.startTime) / 1000));
           if (state.timeLeft <= 0) {
             room.state = 'ended';
-            io.to(room.code).emit("gameOver", { winner: room.players[state.bossId]?.name || "הבוס" });
+            const bossWinner = room.players[state.bossId]?.name || "הבוס";
+            io.to(room.code).emit("gameOver", { winner: bossWinner });
+            persistGameResult(room, bossWinner);
           }
         }
       }
@@ -474,7 +542,9 @@ async function startServer() {
 
         if (state.redScore >= 3 || state.blueScore >= 3) {
           room.state = 'ended';
-          io.to(room.code).emit("gameOver", { winner: state.redScore >= 3 ? "קבוצה אדומה" : "קבוצה כחולה" });
+          const ctfWinner = state.redScore >= 3 ? "קבוצה אדומה" : "קבוצה כחולה";
+          io.to(room.code).emit("gameOver", { winner: ctfWinner });
+          persistGameResult(room, ctfWinner);
         }
       }
 
@@ -498,6 +568,7 @@ async function startServer() {
               if (p.resources >= 10000) {
                 room.state = 'ended';
                 io.to(room.code).emit("gameOver", { winner: p.name });
+                persistGameResult(room, p.name);
               }
               return false;
             }
@@ -531,7 +602,9 @@ async function startServer() {
         if (room.startTime && now - room.startTime > 7 * 60 * 1000) { // 7 minutes
           const winner = Object.values(room.players).sort((a,b) => b.score - a.score)[0];
           room.state = 'ended';
-          io.to(room.code).emit("gameOver", { winner: winner?.name });
+          const farmWinner = winner?.name || "unknown";
+          io.to(room.code).emit("gameOver", { winner: farmWinner });
+          persistGameResult(room, farmWinner);
         }
       }
 
