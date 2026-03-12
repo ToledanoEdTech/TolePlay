@@ -243,7 +243,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
 
             // Walls
             ctx.fillStyle = '#1e293b';
-            CTF_MAP.walls.forEach(w => ctx.fillRect(w.x, w.y, w.w, w.h));
+            CTF_MAP.obstacles.forEach(o => ctx.fillRect(o.x, o.y, o.w, o.h));
 
             // Center divider
             ctx.strokeStyle = 'rgba(148,163,184,0.15)'; ctx.lineWidth = 4;
@@ -560,6 +560,113 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                   שחקנים מחוברים ({players.length})
                 </h3>
                 
+                {mode === 'boss' && (
+                  <div className="mb-8 p-6 bg-slate-950/80 rounded-2xl border border-slate-700">
+                    <h4 className="text-lg font-bold text-slate-300 mb-4 flex items-center gap-2">
+                      <Trophy className="w-5 h-5 text-red-400" />
+                      בחר מי יהיה הבוס ומי גיבור
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="bg-red-950/40 rounded-xl p-5 border-2 border-red-500/30">
+                        <div className="text-red-400 font-bold mb-3 flex items-center gap-2">
+                          <div className="w-4 h-4 rounded-full bg-red-500" /> בוס
+                        </div>
+                        <div className="space-y-2 min-h-[60px]">
+                          {players.filter((p: any) => p.modeState?.isBoss).map((p: any) => (
+                            <div key={p.id} className="flex items-center justify-between bg-slate-800/80 px-4 py-2 rounded-lg group">
+                              <span className="font-bold">{p.name}</span>
+                              <div className="flex gap-2">
+                                <button onClick={() => socket.emit('assignBossRole', { code: roomCode, playerId: p.id, isBoss: false })}
+                                  className="text-xs px-3 py-1 rounded-lg bg-blue-600/60 hover:bg-blue-500 text-blue-200 font-bold transition-colors">
+                                  → גיבור
+                                </button>
+                                <button onClick={() => kickPlayer(p.id)} className="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="הוצא שחקן">
+                                  <XCircle size={18} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="bg-blue-950/40 rounded-xl p-5 border-2 border-blue-500/30">
+                        <div className="text-blue-400 font-bold mb-3 flex items-center gap-2">
+                          <div className="w-4 h-4 rounded-full bg-blue-500" /> גיבורים
+                        </div>
+                        <div className="space-y-2 min-h-[60px]">
+                          {players.filter((p: any) => !p.modeState?.isBoss).map((p: any) => (
+                            <div key={p.id} className="flex items-center justify-between bg-slate-800/80 px-4 py-2 rounded-lg group">
+                              <span className="font-bold">{p.name}</span>
+                              <div className="flex gap-2">
+                                <button onClick={() => socket.emit('assignBossRole', { code: roomCode, playerId: p.id, isBoss: true })}
+                                  className="text-xs px-3 py-1 rounded-lg bg-red-600/60 hover:bg-red-500 text-red-200 font-bold transition-colors">
+                                  → בוס
+                                </button>
+                                <button onClick={() => kickPlayer(p.id)} className="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="הוצא שחקן">
+                                  <XCircle size={18} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {mode === 'ctf' && (
+                  <div className="mb-8 p-6 bg-slate-950/80 rounded-2xl border border-slate-700">
+                    <h4 className="text-lg font-bold text-slate-300 mb-4 flex items-center gap-2">
+                      <Target className="w-5 h-5 text-indigo-400" />
+                      סידור קבוצות – גרור שחקנים בין הקבוצות
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="bg-red-950/40 rounded-xl p-5 border-2 border-red-500/30">
+                        <div className="text-red-400 font-bold mb-3 flex items-center gap-2">
+                          <div className="w-4 h-4 rounded-full bg-red-500" /> קבוצה אדומה
+                        </div>
+                        <div className="space-y-2 min-h-[60px]">
+                          {players.filter((p: any) => p.modeState?.team === 'red').map((p: any) => (
+                            <div key={p.id} className="flex items-center justify-between bg-slate-800/80 px-4 py-2 rounded-lg group">
+                              <span className="font-bold">{p.name}</span>
+                              <div className="flex gap-2">
+                                <button onClick={() => socket.emit('assignTeam', { code: roomCode, playerId: p.id, team: 'blue' })}
+                                  className="text-xs px-3 py-1 rounded-lg bg-blue-600/60 hover:bg-blue-500 text-blue-200 font-bold transition-colors">
+                                  → כחול
+                                </button>
+                                <button onClick={() => kickPlayer(p.id)} className="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="הוצא שחקן">
+                                  <XCircle size={18} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="bg-blue-950/40 rounded-xl p-5 border-2 border-blue-500/30">
+                        <div className="text-blue-400 font-bold mb-3 flex items-center gap-2">
+                          <div className="w-4 h-4 rounded-full bg-blue-500" /> קבוצה כחולה
+                        </div>
+                        <div className="space-y-2 min-h-[60px]">
+                          {players.filter((p: any) => p.modeState?.team === 'blue').map((p: any) => (
+                            <div key={p.id} className="flex items-center justify-between bg-slate-800/80 px-4 py-2 rounded-lg group">
+                              <span className="font-bold">{p.name}</span>
+                              <div className="flex gap-2">
+                                <button onClick={() => socket.emit('assignTeam', { code: roomCode, playerId: p.id, team: 'red' })}
+                                  className="text-xs px-3 py-1 rounded-lg bg-red-600/60 hover:bg-red-500 text-red-200 font-bold transition-colors">
+                                  → אדום
+                                </button>
+                                <button onClick={() => kickPlayer(p.id)} className="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="הוצא שחקן">
+                                  <XCircle size={18} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {mode !== 'ctf' && mode !== 'boss' && (
                 <div className="flex flex-wrap gap-4 justify-center">
                   {players.length === 0 ? (
                     <p className="text-slate-500 text-lg italic">ממתין לשחקנים שיצטרפו...</p>
@@ -586,6 +693,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                     </AnimatePresence>
                   )}
                 </div>
+                )}
               </div>
             </motion.div>
           )}

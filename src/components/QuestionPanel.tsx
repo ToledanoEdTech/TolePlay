@@ -111,31 +111,31 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
       setShowFloat(true);
       spawnConfetti();
       onCorrect();
-      setTimeout(() => { setShowFloat(false); next(); }, 700);
+      setTimeout(() => { setShowFloat(false); next(); }, 1400);
     } else {
       setFeedback('wrong');
       onWrong?.();
       setLocked(true);
       setLockTime(penaltySeconds);
-      setTimeout(next, 700);
+      setTimeout(next, 1200);
     }
   };
 
-  if (!questions.length) return <div className="p-6 text-center text-slate-500">אין שאלות זמינות</div>;
+  if (!questions.length) return <div className="p-6 text-center text-slate-300">אין שאלות זמינות</div>;
   const q = questions[qIndex % questions.length];
   if (!q) return null;
 
   return (
-    <div className={`relative ${compact ? 'p-3' : 'p-5'}`}>
-      {/* Confetti canvas overlay */}
+    <div className={`relative ${compact ? 'p-3' : 'p-5'} text-white`}>
+      {/* Confetti - fixed at top, doesn't cover question content */}
       <canvas
         ref={canvasRef}
         width={400}
-        height={300}
-        className="absolute inset-0 w-full h-full pointer-events-none z-50"
+        height={120}
+        className="absolute top-0 left-0 right-0 h-[120px] pointer-events-none z-0"
       />
 
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {showFloat && (
           <motion.div
             initial={{ opacity: 1, y: 0, scale: 1 }}
@@ -164,14 +164,16 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
       </AnimatePresence>
 
       <motion.div
-        animate={feedback === 'wrong' ? { x: [-8, 8, -8, 8, -4, 4, 0] } : {}}
-        transition={{ duration: 0.35 }}
-        className={`transition-colors duration-200 rounded-xl ${
+        key={`q-${qIndex}`}
+        initial={{ opacity: 0.85 }}
+        animate={{ opacity: 1, ...(feedback === 'wrong' ? { x: [-8, 8, -8, 8, -4, 4, 0] } : {}) }}
+        transition={{ duration: 0.3 }}
+        className={`relative z-20 transition-colors duration-300 rounded-xl ${
           feedback === 'wrong' ? 'bg-red-500/8 -m-2 p-2' :
           feedback === 'correct' ? 'bg-emerald-500/5 -m-2 p-2' : ''
         }`}
       >
-        <h3 className={`font-bold text-center mb-4 ${compact ? 'text-lg' : 'text-xl'}`}>{q.q}</h3>
+        <h3 className={`font-bold text-center mb-4 text-white drop-shadow-sm ${compact ? 'text-lg' : 'text-xl'}`} style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{q.q}</h3>
         <div className="grid grid-cols-2 gap-2">
           {q.opts.map((opt, i) => {
             const isCorrectOpt = feedback && i === q.a;
@@ -179,7 +181,7 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
 
             return (
               <motion.button
-                key={`${qIndex}-${i}`}
+                key={`question-${qIndex}-answer-${i}`}
                 whileTap={!feedback && !locked && !disabled ? { scale: 0.93 } : {}}
                 whileHover={!feedback && !locked && !disabled ? { scale: 1.02 } : {}}
                 disabled={!!feedback || locked || disabled}
@@ -188,10 +190,10 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
                   isCorrectOpt
                     ? 'bg-emerald-500 text-white ring-2 ring-emerald-300 shadow-[0_0_25px_rgba(16,185,129,0.4)] border-emerald-400'
                     : feedback
-                      ? 'bg-slate-800/50 text-slate-600 border-slate-700/30'
+                      ? 'bg-slate-700/80 text-slate-400 border-slate-600/50'
                       : locked || disabled
-                        ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed border-slate-700/30'
-                        : 'bg-slate-700/80 hover:bg-slate-600/80 text-white shadow-md hover:shadow-lg border-slate-600/30 active:shadow-sm'
+                        ? 'bg-slate-700/80 text-slate-400 cursor-not-allowed border-slate-600/50'
+                        : 'bg-slate-600 hover:bg-slate-500 text-white shadow-md hover:shadow-lg border-slate-500 active:shadow-sm'
                 }`}
               >
                 {opt}

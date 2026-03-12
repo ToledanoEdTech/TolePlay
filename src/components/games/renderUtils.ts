@@ -207,6 +207,10 @@ export function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w
   ctx.closePath();
 }
 
+export function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * Math.max(0, Math.min(1, t));
+}
+
 export function colorAlpha(color: string, alpha: number): string {
   if (color.startsWith('#')) {
     const r = parseInt(color.slice(1, 3), 16);
@@ -262,4 +266,125 @@ export function drawDust(ctx: CanvasRenderingContext2D, dust: DustMote[], w: num
     ctx.fill();
   });
   ctx.globalAlpha = 1;
+}
+
+// ── Parallax layers (deep space) ──
+
+export interface ParallaxLayer {
+  x: number; y: number; z: number;
+  r: number; color: string; phase: number;
+}
+
+export function createParallaxNebulas(count: number, w: number, h: number): ParallaxLayer[] {
+  const colors = ['#4c1d95', '#1e3a8a', '#0f766e', '#7c3aed', '#6366f1', '#0ea5e9'];
+  return Array.from({ length: count }, () => ({
+    x: Math.random() * w * 1.5 - w * 0.25,
+    y: Math.random() * h * 1.5 - h * 0.25,
+    z: Math.random() * 0.6 + 0.2,
+    r: 80 + Math.random() * 180,
+    color: colors[Math.floor(Math.random() * colors.length)],
+    phase: Math.random() * Math.PI * 2,
+  }));
+}
+
+export function drawParallaxNebulas(
+  ctx: CanvasRenderingContext2D,
+  layers: ParallaxLayer[],
+  w: number, h: number,
+  t: number, scrollY: number
+) {
+  layers.forEach(n => {
+    const driftX = Math.sin(t * 0.15 + n.phase) * 8;
+    const driftY = Math.cos(t * 0.12 + n.phase * 0.7) * 6;
+    const x = n.x + driftX - scrollY * 0.02 * n.z;
+    const y = n.y + driftY + scrollY * 0.05 * n.z;
+    const alpha = (0.03 + 0.02 * n.z) * (0.7 + 0.3 * Math.sin(t * 0.2 + n.phase));
+    ctx.globalAlpha = alpha;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, n.r);
+    g.addColorStop(0, colorAlpha(n.color, 0.6));
+    g.addColorStop(0.5, colorAlpha(n.color, 0.2));
+    g.addColorStop(1, 'transparent');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, n.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ── Asteroid explosion particles (rock chunks + energy) ──
+
+export function emitAsteroidExplosion(
+  x: number, y: number,
+  rockColor: string, glowColor: string,
+  count: number = 24
+): Particle[] {
+  const out: Particle[] = [];
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2 + Math.random() * 0.5;
+    const s = 2 + Math.random() * 6;
+    const useRock = Math.random() < 0.6;
+    out.push(createParticle(x, y, a, s, 0.4 + Math.random() * 0.4, useRock ? rockColor : glowColor, useRock ? 3 : 2, {
+      gravity: 0.02, friction: 0.96, type: useRock ? 'square' : 'circle',
+    }));
+  }
+  return out;
+}
+
+// ── Space Ore (collectible gem) ──
+
+export interface OreGem {
+  id: string;
+  x: number; y: number;
+  vx: number; vy: number;
+  value: number;
+  color: string;
+  phase: number;
+  collected: boolean;
+}
+
+export function drawOreGem(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, value: number, color: string,
+  t: number, scale: number = 1
+) {
+  const pulse = 0.8 + 0.2 * Math.sin(t * 4);
+  const size = (4 + value / 30) * scale * pulse;
+  drawGlow(ctx, x, y, size * 4, color, 0.2 * pulse);
+  ctx.fillStyle = color;
+  ctx.shadowBlur = 8;
+  ctx.shadowColor = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y - size);
+  ctx.lineTo(x + size * 0.7, y + size * 0.5);
+  ctx.lineTo(x, y + size * 0.3);
+  ctx.lineTo(x - size * 0.7, y + size * 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = colorAlpha('#fff', 0.5);
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+// ── Muzzle flash ──
+
+export function drawMuzzleFlash(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, angle: number,
+  intensity: number, color: string = '#60a5fa'
+) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = intensity;
+  const g = ctx.createLinearGradient(-15, 0, 15, 0);
+  g.addColorStop(0, 'transparent');
+  g.addColorStop(0.3, colorAlpha(color, 0.8));
+  g.addColorStop(0.5, colorAlpha('#fff', 0.9));
+  g.addColorStop(0.7, colorAlpha(color, 0.8));
+  g.addColorStop(1, 'transparent');
+  ctx.fillStyle = g;
+  ctx.fillRect(-15, -4, 30, 8);
+  ctx.restore();
 }
