@@ -5,7 +5,7 @@ import { Server } from "socket.io";
 import http from "http";
 import { initFirebase, getDb } from './firebase-config.js';
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 interface Player {
   id: string;
@@ -41,11 +41,19 @@ function checkWinCondition(io: Server, code: string) {
   } else if (room.mode === 'zombie') {
     if (room.globalState.baseHealth <= 0) winner = "הזומבים";
   } else if (room.mode === 'boss') {
+    const useAiBoss = room.globalState.useAiBoss;
+    const aiBoss = room.globalState.aiBoss;
     const bossIds = room.globalState.bossIds || [];
-    const bosses = bossIds.map((id: string) => room.players[id]).filter(Boolean);
-    const aliveBosses = bosses.filter((b: any) => (b.modeState?.hp ?? 0) > 0);
-    if (aliveBosses.length === 0) winner = "הגיבורים";
-    else if (room.globalState.timeLeft <= 0) winner = bosses[0]?.name || "הבוס";
+    const heroes = Object.values(room.players).filter((p: any) => !p.modeState?.isBoss && (p.modeState?.hp ?? 2) > 0);
+    if (useAiBoss && aiBoss) {
+      if (aiBoss.hp <= 0) winner = "הגיבורים";
+      else if (heroes.length === 0) winner = "המפלצת הענקית";
+    } else {
+      const bosses = bossIds.map((id: string) => room.players[id]).filter(Boolean);
+      const aliveBosses = bosses.filter((b: any) => (b.modeState?.hp ?? 0) > 0);
+      if (aliveBosses.length === 0) winner = "הגיבורים";
+      else if (room.globalState.timeLeft <= 0) winner = bosses[0]?.name || "הבוס";
+    }
   } else if (room.mode === 'ctf') {
     if (room.globalState.redScore >= 3) winner = "קבוצה אדומה";
     if (room.globalState.blueScore >= 3) winner = "קבוצה כחולה";
@@ -132,7 +140,7 @@ async function startServer() {
       if (mode === 'zombie') {
         rooms[code].globalState = { baseHealth: 2000, maxBaseHealth: 2000, wave: 1, zombies: [], lasers: [], turrets: [] };
       } else if (mode === 'boss') {
-        rooms[code].globalState = { bossIds: [], timeLeft: 600, lasers: [], projectiles: [], openedBoxes: [], weaponBoxes: [], worldSize: 3000 }; // 10 minutes
+        rooms[code].globalState = { bossIds: [], useAiBoss: true, aiBoss: null, timeLeft: 600, lasers: [], projectiles: [], openedBoxes: [], weaponBoxes: [], worldSize: 3000 };
       } else if (mode === 'ctf') {
         rooms[code].globalState = { redScore: 0, blueScore: 0, redFlag: { x: 400, y: 4200, carrier: null, base: {x: 400, y: 4200} }, blueFlag: { x: 5600, y: 800, carrier: null, base: {x: 5600, y: 800} }, lasers: [] };
       } else if (mode === 'economy') {
@@ -142,7 +150,7 @@ async function startServer() {
       }
 
       socket.join(code);
-      callback({ success: true, code });
+      callback({ success: true, code, room: rooms[code] });
       persistRoom(rooms[code]);
     });
 
@@ -216,11 +224,20 @@ async function startServer() {
 
     socket.on("assignBossRole", ({ code, playerId, isBoss }) => {
       const room = rooms[code];
-      if (room && room.hostId === socket.id && room.state === 'lobby' && room.players[playerId] && room.mode === 'boss') {
+      if (room && room.hostId === socket.id && room.state === 'lobby' && room.players[playerId] && room.mode === 'boss' && !room.globalState.useAiBoss) {
         const p = room.players[playerId];
+        p.modeState = p.modeState || {};
         p.modeState.isBoss = !!isBoss;
         io.to(code).emit("roomUpdated", room);
         io.to(p.socketId).emit("playerUpdated", { playerId, player: p });
+      }
+    });
+
+    socket.on("setBossUseAi", ({ code, useAiBoss }) => {
+      const room = rooms[code];
+      if (room && room.hostId === socket.id && room.state === 'lobby' && room.mode === 'boss') {
+        room.globalState.useAiBoss = !!useAiBoss;
+        io.to(code).emit("roomUpdated", room);
       }
     });
 
@@ -234,12 +251,37 @@ async function startServer() {
           const playerIds = Object.keys(room.players);
           const WORLD = room.globalState.worldSize || 3000;
           const CENTER = WORLD / 2;
-          const chosenBosses = playerIds.filter(id => room.players[id].modeState?.isBoss);
-          const numBosses = playerIds.length >= 6 ? 2 : 1;
-          const bossIds = chosenBosses.length >= 1
-            ? chosenBosses.slice(0, numBosses)
-            : [...playerIds].sort(() => Math.random() - 0.5).slice(0, numBosses);
-          room.globalState.bossIds = bossIds;
+          const useAiBoss = room.globalState.useAiBoss !== false;
+          let bossIds: string[] = [];
+          if (useAiBoss) {
+            room.globalState.bossIds = [];
+            const heroCount = playerIds.length;
+            const baseHp = 350;
+            const hpPerPlayer = 80;
+            room.globalState.aiBoss = {
+              x: CENTER, y: CENTER - 200,
+              hp: baseHp + hpPerPlayer * Math.max(0, heroCount - 1),
+              maxHp: baseHp + hpPerPlayer * Math.max(0, heroCount - 1),
+              facing: 0, lastShotTime: 0
+            };
+          } else {
+            const chosenBosses = playerIds.filter(id => room.players[id].modeState?.isBoss);
+            const numBosses = playerIds.length >= 6 ? 2 : 1;
+            bossIds = chosenBosses.length >= 1
+              ? chosenBosses.slice(0, numBosses)
+              : [...playerIds].sort(() => Math.random() - 0.5).slice(0, numBosses);
+            room.globalState.bossIds = bossIds;
+            room.globalState.aiBoss = null;
+            bossIds.forEach((bid, i) => {
+              const p = room.players[bid];
+              p.modeState = p.modeState || {};
+              p.modeState.isBoss = true;
+              p.modeState.maxHp = 10;
+              p.modeState.hp = 10;
+              p.x = CENTER + (i === 0 ? -200 : 200) + (Math.random() - 0.5) * 100;
+              p.y = CENTER - 150 + (Math.random() - 0.5) * 80;
+            });
+          }
           const WORLD_BOSS = room.globalState.worldSize || 3000;
           const BOX_SEED = 55555;
           const sr = (s: number) => { const x = Math.sin(s) * 10000; return x - Math.floor(x); };
@@ -256,17 +298,10 @@ async function startServer() {
           }
           room.globalState.weaponBoxes = weaponBoxes;
           room.globalState.openedBoxes = [];
-          bossIds.forEach((bid, i) => {
-            const p = room.players[bid];
-            p.modeState.isBoss = true;
-            p.modeState.maxHp = 10;
-            p.modeState.hp = 10;
-            p.x = CENTER + (i === 0 ? -200 : 200) + (Math.random() - 0.5) * 100;
-            p.y = CENTER - 150 + (Math.random() - 0.5) * 80;
-          });
-          const heroIds = playerIds.filter(id => !bossIds.includes(id));
+          const heroIds = useAiBoss ? playerIds : playerIds.filter(id => !bossIds.includes(id));
           heroIds.forEach((hid, i) => {
             const p = room.players[hid];
+            p.modeState = p.modeState || {};
             p.modeState.isBoss = false;
             p.modeState.hp = 2;
             p.modeState.maxHp = 2;
@@ -281,20 +316,27 @@ async function startServer() {
         }
         if (room.mode === 'economy' && room.globalState.collectibles) {
           const WORLD = 4000;
-          const CENTER = 2000;
-          for (let i = 0; i < 28; i++) {
+          const MARGIN = 150;
+          const playerCount = Object.keys(room.players).length;
+          const collectiblesPerPlayer = 10;
+          const totalCount = Math.max(12, Math.min(60, playerCount * collectiblesPerPlayer));
+          const gridSize = Math.ceil(Math.sqrt(totalCount));
+          const cellW = (WORLD - 2 * MARGIN) / gridSize;
+          const cellH = (WORLD - 2 * MARGIN) / gridSize;
+          for (let i = 0; i < totalCount; i++) {
             const r = Math.random();
             let type: string, value: number;
             if (r < 0.25) { type = 'treasure_chest'; value = 40; }
             else if (r < 0.55) { type = 'coin_pile'; value = 20; }
             else { type = 'money_bills'; value = 10; }
-            const nearCenter = i < 8;
+            const gx = i % gridSize;
+            const gy = Math.floor(i / gridSize);
+            const jitter = 0.35;
+            const x = MARGIN + (gx + 0.5 + (Math.random() - 0.5) * jitter) * cellW;
+            const y = MARGIN + (gy + 0.5 + (Math.random() - 0.5) * jitter) * cellH;
             room.globalState.collectibles.push({
               id: Math.random().toString(),
-              x: nearCenter ? CENTER + (Math.random() - 0.5) * 800 : 100 + Math.random() * (WORLD - 200),
-              y: nearCenter ? CENTER + (Math.random() - 0.5) * 800 : 100 + Math.random() * (WORLD - 200),
-              type,
-              value
+              x, y, type, value
             });
           }
         }
@@ -624,11 +666,50 @@ async function startServer() {
       // --- BOSS MODE ---
       else if (room.mode === 'boss') {
         const bossIds = state.bossIds || [];
+        const aiBoss = state.aiBoss;
         const WORLD = state.worldSize || 3000;
         const CENTER = WORLD / 2;
         const DT = 1 / 30;
         const PROJ_SPEED = 520;
         const PROJ_MAX_AGE = 2500;
+        const BOSS_PROJ_SPEED = 240;
+
+        if (aiBoss && aiBoss.hp > 0) {
+          const heroes = Object.values(room.players).filter((p: any) => !p.modeState?.isBoss && (p.modeState?.hp ?? 2) > 0);
+          if (heroes.length > 0) {
+            let target: any = null;
+            let minDistSq = Infinity;
+            for (const h of heroes) {
+              const dx = h.x - aiBoss.x, dy = h.y - aiBoss.y;
+              const d2 = dx * dx + dy * dy;
+              if (d2 < minDistSq) { minDistSq = d2; target = h; }
+            }
+            if (target) {
+              const dist = Math.sqrt(minDistSq);
+              const dirX = dist > 1 ? (target.x - aiBoss.x) / dist : 0;
+              const dirY = dist > 1 ? (target.y - aiBoss.y) / dist : 0;
+              aiBoss.facing = Math.atan2(dirY, dirX);
+              if (dist > 150) {
+                aiBoss.x = Math.max(50, Math.min(WORLD - 50, aiBoss.x + dirX * 60 * DT));
+                aiBoss.y = Math.max(50, Math.min(WORLD - 50, aiBoss.y + dirY * 60 * DT));
+              }
+              if (now - aiBoss.lastShotTime >= 2500) {
+                aiBoss.lastShotTime = now;
+                const projs = state.projectiles || [];
+                for (let i = 0; i < 6; i++) {
+                  const spread = (Math.random() - 0.5) * 0.8;
+                  const angle = aiBoss.facing + spread;
+                  projs.push({
+                    x: aiBoss.x, y: aiBoss.y,
+                    vx: Math.cos(angle) * BOSS_PROJ_SPEED, vy: Math.sin(angle) * BOSS_PROJ_SPEED,
+                    isBoss: true, spawnTime: now
+                  });
+                }
+                state.projectiles = projs;
+              }
+            }
+          }
+        }
 
         const projs = state.projectiles || [];
         state.projectiles = projs.filter((proj: any) => {
@@ -647,11 +728,24 @@ async function startServer() {
           }
 
           if (!proj.isBoss) {
+            const aiBoss = state.aiBoss;
+            if (aiBoss && aiBoss.hp > 0) {
+              const dist = Math.hypot(proj.x - aiBoss.x, proj.y - aiBoss.y);
+              const sweepDist = pointToSegmentDist(aiBoss.x, aiBoss.y, prevX, prevY, proj.x, proj.y);
+              const hitRadius = 90;
+              if (dist < hitRadius || sweepDist < hitRadius) {
+                aiBoss.hp -= 1;
+                state.lasers.push({ x1: proj.x, y1: proj.y, x2: aiBoss.x, y2: aiBoss.y, color: '#ef4444' });
+                io.to(room.code).emit("globalStateUpdated", state);
+                checkWinCondition(io, room.code);
+                return false;
+              }
+            }
             const bosses = bossIds.map((id: string) => room.players[id]).filter((b: any) => b && (b.modeState?.hp ?? 0) > 0);
             for (const boss of bosses) {
               const dist = Math.hypot(proj.x - boss.x, proj.y - boss.y);
               const sweepDist = pointToSegmentDist(boss.x, boss.y, prevX, prevY, proj.x, proj.y);
-              const hitRadius = 70;
+              const hitRadius = 90;
               if (dist < hitRadius || sweepDist < hitRadius) {
                 if (boss.modeState.shields > 0) {
                   boss.modeState.shields -= 1;
@@ -671,7 +765,7 @@ async function startServer() {
               if (hero.id === proj.shooterId) continue;
               const dist = Math.hypot(proj.x - hero.x, proj.y - hero.y);
               const sweepDist = pointToSegmentDist(hero.x, hero.y, prevX, prevY, proj.x, proj.y);
-              const hitRadius = 45;
+              const hitRadius = 55;
               if (dist < hitRadius || sweepDist < hitRadius) {
                 hero.modeState.hp = (hero.modeState.hp ?? 2) - 1;
                 if (hero.modeState.hp <= 0) hero.modeState.respawnAt = now + 15000;
@@ -699,7 +793,7 @@ async function startServer() {
           state.timeLeft = Math.max(0, 600 - Math.floor((now - room.startTime) / 1000));
           if (state.timeLeft <= 0) {
             room.state = 'ended';
-            const bossWinner = bossIds.length ? room.players[bossIds[0]]?.name || "הבוס" : "הבוס";
+            const bossWinner = state.useAiBoss ? "המפלצת הענקית" : (bossIds.length ? room.players[bossIds[0]]?.name || "הבוס" : "הבוס");
             io.to(room.code).emit("gameOver", { winner: bossWinner });
             persistGameResult(room, bossWinner);
           }
@@ -814,25 +908,34 @@ async function startServer() {
         }
         if (!state.timeLimit) state.timeLimit = 300;
         const WORLD = 4000;
-        if (state.collectibles.length < 55 && Math.random() < 0.4) {
+        const MARGIN = 150;
+        const playerCount = Object.keys(room.players).length;
+        const minPerPlayer = 4;
+        const targetMin = Math.max(8, playerCount * minPerPlayer);
+        if (state.collectibles.length < targetMin && Math.random() < 0.5) {
           const r = Math.random();
           let type: string, value: number;
           if (r < 0.25) { type = 'treasure_chest'; value = 40; }
           else if (r < 0.55) { type = 'coin_pile'; value = 20; }
           else { type = 'money_bills'; value = 10; }
+          const gridSize = Math.ceil(Math.sqrt(targetMin));
+          const cellW = (WORLD - 2 * MARGIN) / gridSize;
+          const cellH = (WORLD - 2 * MARGIN) / gridSize;
+          const gx = Math.floor(Math.random() * gridSize);
+          const gy = Math.floor(Math.random() * gridSize);
+          const jitter = 0.4;
+          const x = MARGIN + (gx + 0.5 + (Math.random() - 0.5) * jitter) * cellW;
+          const y = MARGIN + (gy + 0.5 + (Math.random() - 0.5) * jitter) * cellH;
           state.collectibles.push({
             id: Math.random().toString(),
-            x: 100 + Math.random() * (WORLD - 200),
-            y: 100 + Math.random() * (WORLD - 200),
-            type,
-            value
+            x, y, type, value
           });
         }
 
         Object.values(room.players).forEach((p: any) => {
           if (p.modeState.frozenUntil > now) return;
           state.collectibles = state.collectibles.filter((c: any) => {
-            if (Math.hypot(p.x - c.x, p.y - c.y) < 150) {
+            if (Math.hypot(p.x - c.x, p.y - c.y) < 85) {
               p.resources += c.value * (p.modeState.multiplier || 1);
               if (p.resources >= 5000) {
                 room.state = 'ended';

@@ -18,7 +18,7 @@ import { playShootSound } from '../../utils/shootSound';
 
 const WORLD_SIZE = 3000;
 const PLAYER_SPEED = 420;
-const MOVE_SYNC_MS = 25;
+const MOVE_SYNC_MS = 20;
 const CENTER = WORLD_SIZE / 2;
 
 interface Props {
@@ -87,9 +87,11 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
   allPlayersRef.current = allPlayers;
 
   const bossIds = globalState?.bossIds || [];
+  const aiBoss = globalState?.aiBoss;
   const bosses = bossIds.map((id: string) => allPlayers?.[id]).filter(Boolean);
   const heroes = Object.values(allPlayers || {}).filter((p: any) => !p.modeState?.isBoss && (p.modeState?.hp ?? 2) > 0);
   const aliveBosses = bosses.filter((b: any) => (b.modeState?.hp ?? 0) > 0);
+  const hasAiBoss = aiBoss && aiBoss.hp > 0;
 
   const isBoss = player?.modeState?.isBoss;
   const isDisabled = (player?.modeState?.disabledUntil || 0) > Date.now();
@@ -254,7 +256,7 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
         }
       }
 
-      const lerpSpeed = 12 * dt;
+      const lerpSpeed = 18 * dt;
       Object.entries(players).forEach(([id, p]) => {
         if (!p || (p.modeState?.hp ?? 2) <= 0) return;
         const tx = p.x ?? CENTER;
@@ -307,10 +309,17 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
       drawWeaponBoxes(ctx, weaponBoxes, cam, vpWorldW, vpWorldH, t);
       tryOpenNearbyBox(posRef.current, openedBoxes, weaponBoxes, roomCode, playerId, isBossRef.current, isDeadRef.current, lastOpenBoxRef, now);
       drawPlayers(ctx, players, playerId, cam, aimRef, lerpedPlayersRef, posRef, healthBarDisplayRef, inputRef, t, dt);
+      const aiBoss = gsRef.current?.aiBoss;
+      if (aiBoss && aiBoss.hp > 0) {
+        ctx.save();
+        ctx.translate(aiBoss.x, aiBoss.y);
+        drawBossCreature(ctx, 0, 0, t, aiBoss.hp / aiBoss.maxHp, 0, null);
+        ctx.restore();
+      }
       const bossIdsArr = gsRef.current?.bossIds || [];
       const bossesArr = bossIdsArr.map((id: string) => players[id]).filter(Boolean);
       const heroesArr = Object.values(players).filter((p: any) => !p.modeState?.isBoss && (p.modeState?.hp ?? 2) > 0);
-      drawProjectiles(ctx, projectilesRef, now, dt, particlesRef, bossesArr, heroesArr, WORLD_SIZE, ARENA_MARGIN);
+      drawProjectiles(ctx, projectilesRef, now, dt, particlesRef, bossesArr, heroesArr, aiBoss || null, WORLD_SIZE, ARENA_MARGIN);
       drawLasers(ctx, gs?.lasers || [], shakeRef, particlesRef, triggerShake, prevLasers, damageNumbersRef);
       drawMuzzleFlashes(ctx, muzzleFlashesRef, now);
       drawDamageNumbers(ctx, damageNumbersRef, now, particlesRef);
@@ -405,9 +414,26 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
             )}
           </div>
         </div>
-        {aliveBosses.length > 0 && (
+        {(aliveBosses.length > 0 || hasAiBoss) && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 w-full max-w-[520px] px-4">
-            {aliveBosses.map((b: any) => {
+            {hasAiBoss ? (
+              <div className="bg-black/60 backdrop-blur-sm px-6 py-3 rounded-2xl border-2 border-[#9b59b6] shadow-xl text-center">
+                <h2 className="text-lg font-black text-[#e056fd] mb-2 drop-shadow-[0_0_10px_rgba(224,86,253,0.8)]">
+                  המפלצת הענקית
+                </h2>
+                <div className="w-full h-6 bg-[#222] border-2 border-black rounded-[15px] overflow-hidden shadow-[inset_0_0_10px_rgba(0,0,0,1)]">
+                  <motion.div
+                    className="h-full rounded-[12px] transition-[width] duration-200 ease-out"
+                    style={{
+                      width: `${Math.max(0, aiBoss.hp / aiBoss.maxHp) * 100}%`,
+                      background: 'linear-gradient(90deg, #8e44ad, #9b59b6, #e056fd)'
+                    }}
+                    animate={{ width: `${Math.max(0, aiBoss.hp / aiBoss.maxHp) * 100}%` }}
+                    transition={{ duration: 0.2 }}
+                  />
+                </div>
+              </div>
+            ) : aliveBosses.map((b: any) => {
               const hp = b.modeState?.hp ?? 0;
               const maxHp = b.modeState?.maxHp ?? 10;
               const pct = Math.max(0, hp / maxHp);
@@ -609,6 +635,7 @@ function drawProjectiles(
   particlesRef: MutableRefObject<Particle[]>,
   bosses: any[],
   heroes: any[],
+  aiBoss: { x: number; y: number; hp: number } | null | undefined,
   worldSize: number,
   margin: number
 ) {
@@ -620,16 +647,20 @@ function drawProjectiles(
     if (age > PROJECTILE_MAX_AGE_MS) return false;
     if (proj.x < -margin || proj.x > worldSize + margin || proj.y < -margin || proj.y > worldSize + margin) return false;
 
-    const bossHit = !proj.isBoss && bosses.some((b: any) => {
-      if ((b.modeState?.hp ?? 0) <= 0) return false;
-      const bx = b.x ?? CENTER;
-      const by = b.y ?? CENTER;
-      return Math.hypot(proj.x - bx, proj.y - by) < 55;
-    });
+    let bossHit = false;
+    if (!proj.isBoss) {
+      if (aiBoss && aiBoss.hp > 0 && Math.hypot(proj.x - aiBoss.x, proj.y - aiBoss.y) < 90) bossHit = true;
+      if (!bossHit) bossHit = bosses.some((b: any) => {
+        if ((b.modeState?.hp ?? 0) <= 0) return false;
+        const bx = b.x ?? CENTER;
+        const by = b.y ?? CENTER;
+        return Math.hypot(proj.x - bx, proj.y - by) < 90;
+      });
+    }
     const heroHit = proj.isBoss && heroes.some((h: any) => {
       const hx = h.x ?? CENTER;
       const hy = h.y ?? CENTER;
-      return Math.hypot(proj.x - hx, proj.y - hy) < 25;
+      return Math.hypot(proj.x - hx, proj.y - hy) < 55;
     });
     if (bossHit || heroHit) {
       particlesRef.current.push(...emitBurst(proj.x, proj.y, 8, 6, 0.4, proj.isBoss ? '#ff00ff' : '#fbbf24', 2, { type: 'spark', friction: 0.92 }));

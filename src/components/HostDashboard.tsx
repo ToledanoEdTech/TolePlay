@@ -1,12 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { socket } from '../socket';
-import { Users, Play, Trophy, Shield, Rocket, Target, DollarSign, Upload, FileText, XCircle } from 'lucide-react';
+import { Users, Play, Trophy, Shield, Rocket, Target, DollarSign, Upload, FileText, XCircle, Plus, Trash2, Edit3, Save, LogIn, LogOut, BookOpen } from 'lucide-react';
 import { CTF_MAP } from '../engine/maps/ctfMap';
+import { useAuth } from '../contexts/AuthContext';
+import { AuthModal } from './AuthModal';
+import { saveQuiz, loadQuizzes, type SavedQuiz, type QuizQuestion } from '../utils/quizStorage';
 
 const MODES = [
   { id: 'zombie', name: 'הגנת זומבים', icon: Shield, desc: 'הגנו על הבסיס מגלי זומבים. ענו על שאלות כדי לקנות נשקים וצריחים.', color: 'from-slate-800 to-slate-900', accent: 'text-blue-400' },
-  { id: 'economy', name: 'מרתון כלכלי', icon: DollarSign, desc: 'אספו מטבעות במפה וענו על שאלות. הראשון שמגיע ל-10,000$ מנצח!', color: 'from-emerald-900 to-slate-900', accent: 'text-yellow-400' },
+  { id: 'economy', name: 'מרתון כלכלי', icon: DollarSign, desc: 'מי שאוסף הכי הרבה זהב מנצח! אספו מטבעות במפה וענו על שאלות.', color: 'from-emerald-900 to-slate-900', accent: 'text-yellow-400' },
   { id: 'boss', name: 'קרב בוס', icon: Trophy, desc: 'שחקן אחד הופך לבוס ענק! שאר השחקנים צריכים להביס אותו.', color: 'from-red-900 to-slate-900', accent: 'text-red-400' },
   { id: 'ctf', name: 'תפוס ת\'דגל', icon: Target, desc: 'קבוצה אדומה נגד כחולה. גנבו את הדגל של היריב והביאו לבסיס שלכם.', color: 'from-indigo-900 to-slate-900', accent: 'text-indigo-400' },
   { id: 'farm', name: 'ציד אסטרואידים', icon: Rocket, desc: 'פוצצו אסטרואידים בחלל כדי לאסוף משאבים יקרים.', color: 'from-purple-900 to-slate-900', accent: 'text-purple-400' },
@@ -35,7 +38,10 @@ const MOCK_QUESTIONS = [
   { q: "כמה שיניים יש לאדם בוגר?", opts: ["28", "30", "32", "34"], a: 2 },
 ];
 
+type QuizSourceTab = 'upload' | 'edit' | 'saved';
+
 export function HostDashboard({ onBack }: { onBack: () => void }) {
+  const { user, isAuthAvailable, signOut } = useAuth();
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [mode, setMode] = useState<string>('zombie');
   const [players, setPlayers] = useState<any[]>([]);
@@ -43,6 +49,11 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   const [globalState, setGlobalState] = useState<any>({});
   const [winner, setWinner] = useState<string | null>(null);
   const [customQuestions, setCustomQuestions] = useState<any[]>([]);
+  const [quizSourceTab, setQuizSourceTab] = useState<QuizSourceTab>('upload');
+  const [savedQuizzes, setSavedQuizzes] = useState<SavedQuiz[]>([]);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [saveQuizTitle, setSaveQuizTitle] = useState('');
+  const [savingQuiz, setSavingQuiz] = useState(false);
   const showTestPlayer = false; // Legacy - kept to prevent ReferenceError from cached builds
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -52,6 +63,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     const onRoomUpdated = (room: any) => {
       setPlayers(Object.values(room.players));
+      if (room.mode === 'boss' && room.globalState) setGlobalState(room.globalState);
     };
     const onPlayerUpdated = ({ player }: any) => {
       setPlayers(prev => {
@@ -396,27 +408,74 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
     return () => cancelAnimationFrame(animationFrameId);
   }, [gameState, mode]);
 
+  useEffect(() => {
+    if (user && isAuthAvailable) {
+      loadQuizzes(user.uid).then(setSavedQuizzes);
+    } else {
+      setSavedQuizzes([]);
+    }
+  }, [user, isAuthAvailable]);
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (evt) => {
       const text = evt.target?.result as string;
-      const lines = text.split('\n');
-      const parsed = lines.slice(1).map(line => {
-        const cols = line.split(',');
+      const lines = text.split('\n').filter(line => line.trim());
+      const parsed = lines.map(line => {
+        const cols = line.split(',').map(c => c.trim());
         if (cols.length >= 6) {
           return {
-            q: cols[0].trim(),
-            opts: [cols[1].trim(), cols[2].trim(), cols[3].trim(), cols[4].trim()],
-            a: parseInt(cols[5].trim()) - 1
+            q: cols[0],
+            opts: [cols[1], cols[2], cols[3], cols[4]],
+            a: Math.max(0, Math.min(3, parseInt(cols[5]) - 1))
           };
         }
         return null;
-      }).filter(Boolean);
-      if (parsed.length > 0) setCustomQuestions(parsed);
+      }).filter(Boolean) as QuizQuestion[];
+      if (parsed.length > 0) {
+        setCustomQuestions(parsed);
+        setQuizSourceTab('upload');
+      }
     };
     reader.readAsText(file);
+  };
+
+  const addQuestion = () => {
+    setCustomQuestions(prev => [...prev, { q: '', opts: ['', '', '', ''], a: 0 }]);
+    setQuizSourceTab('edit');
+  };
+
+  const updateQuestion = (idx: number, field: 'q' | 'opts' | 'a', value: any) => {
+    setCustomQuestions(prev => {
+      const next = [...prev];
+      if (field === 'q') next[idx] = { ...next[idx], q: value };
+      else if (field === 'opts') next[idx] = { ...next[idx], opts: value };
+      else next[idx] = { ...next[idx], a: value };
+      return next;
+    });
+  };
+
+  const removeQuestion = (idx: number) => {
+    setCustomQuestions(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const loadSavedQuiz = (quiz: SavedQuiz) => {
+    setCustomQuestions(quiz.questions);
+    setSaveQuizTitle(quiz.title);
+  };
+
+  const handleSaveQuiz = async () => {
+    if (!user || customQuestions.length === 0) return;
+    const title = saveQuizTitle.trim() || `חידון ${new Date().toLocaleDateString('he-IL')}`;
+    setSavingQuiz(true);
+    try {
+      await saveQuiz(user.uid, { title, questions: customQuestions });
+      setSavedQuizzes(prev => [...prev, { title, questions: customQuestions, createdAt: Date.now(), updatedAt: Date.now() }]);
+    } finally {
+      setSavingQuiz(false);
+    }
   };
 
   const createRoom = () => {
@@ -425,6 +484,8 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
       if (res.success) {
         setRoomCode(res.code);
         setGameState('lobby');
+        if (res.room?.globalState) setGlobalState(res.room.globalState);
+        if (res.room?.players) setPlayers(Object.values(res.room.players));
       }
     });
   };
@@ -487,35 +548,173 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
               </div>
 
               <div className="bg-slate-900/50 p-10 rounded-3xl border border-slate-800 backdrop-blur-sm">
-                <div className="flex flex-col md:flex-row items-center justify-between gap-8">
-                  <div>
-                    <h3 className="text-3xl font-bold mb-4 flex items-center gap-3">
-                      <FileText className="text-indigo-400 w-8 h-8" />
-                      העלאת שאלות (CSV)
-                    </h3>
-                    <p className="text-slate-400 text-lg mb-4 max-w-2xl">
-                      הכן קובץ CSV עם העמודות הבאות (ללא שורת כותרת):<br/>
-                      <code className="bg-slate-950 p-3 rounded-xl text-indigo-300 block mt-4 font-mono border border-slate-800">
-                        שאלה, תשובה 1, תשובה 2, תשובה 3, תשובה 4, מספר תשובה נכונה (1-4)
-                      </code>
-                    </p>
-                  </div>
-                  <div className="flex flex-col items-center gap-4">
-                    <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white py-4 px-8 rounded-2xl font-bold flex items-center gap-3 transition-all border border-slate-600 hover:border-indigo-500">
-                      <Upload size={24} />
-                      בחר קובץ CSV
-                      <input type="file" accept=".csv" className="hidden" onChange={handleFileUpload} />
-                    </label>
-                    <AnimatePresence>
-                      {customQuestions.length > 0 && (
-                        <motion.span initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="text-emerald-400 font-bold bg-emerald-500/10 px-6 py-2 rounded-xl border border-emerald-500/20">
-                          נטענו {customQuestions.length} שאלות בהצלחה!
-                        </motion.span>
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-3xl font-bold flex items-center gap-3">
+                    <FileText className="text-indigo-400 w-8 h-8" />
+                    שאלות לחידון
+                  </h3>
+                  {isAuthAvailable && (
+                    <div className="flex items-center gap-3">
+                      {user ? (
+                        <>
+                          <span className="text-slate-400 text-sm">{user.email || user.displayName}</span>
+                          <button onClick={() => signOut()} className="text-slate-400 hover:text-white flex items-center gap-2 text-sm">
+                            <LogOut size={18} /> התנתק
+                          </button>
+                        </>
+                      ) : (
+                        <button onClick={() => setShowAuthModal(true)} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-xl font-bold text-sm">
+                          <LogIn size={18} /> התחבר לשמירת חידונים
+                        </button>
                       )}
-                    </AnimatePresence>
-                  </div>
+                    </div>
+                  )}
                 </div>
+
+                <div className="flex gap-2 mb-6">
+                  <button
+                    onClick={() => setQuizSourceTab('upload')}
+                    className={`px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all ${quizSourceTab === 'upload' ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'}`}
+                  >
+                    <Upload size={20} /> העלאת קובץ CSV
+                  </button>
+                  <button
+                    onClick={() => setQuizSourceTab('edit')}
+                    className={`px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all ${quizSourceTab === 'edit' ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'}`}
+                  >
+                    <Edit3 size={20} /> כתיבת חידון
+                  </button>
+                  {user && (
+                    <button
+                      onClick={() => setQuizSourceTab('saved')}
+                      className={`px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all ${quizSourceTab === 'saved' ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'}`}
+                    >
+                      <BookOpen size={20} /> החידונים שלי ({savedQuizzes.length})
+                    </button>
+                  )}
+                </div>
+
+                {quizSourceTab === 'upload' && (
+                  <div className="flex flex-col md:flex-row items-center justify-between gap-8">
+                    <div>
+                      <p className="text-slate-400 text-lg mb-4 max-w-2xl">
+                        הכן קובץ CSV עם העמודות הבאות (ללא שורת כותרת):<br/>
+                        <code className="bg-slate-950 p-3 rounded-xl text-indigo-300 block mt-4 font-mono border border-slate-800">
+                          שאלה, תשובה 1, תשובה 2, תשובה 3, תשובה 4, מספר תשובה נכונה (1-4)
+                        </code>
+                      </p>
+                    </div>
+                    <div className="flex flex-col items-center gap-4">
+                      <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white py-4 px-8 rounded-2xl font-bold flex items-center gap-3 transition-all border border-slate-600 hover:border-indigo-500">
+                        <Upload size={24} />
+                        בחר קובץ CSV
+                        <input type="file" accept=".csv" className="hidden" onChange={handleFileUpload} />
+                      </label>
+                      <AnimatePresence>
+                        {customQuestions.length > 0 && (
+                          <motion.span initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="text-emerald-400 font-bold bg-emerald-500/10 px-6 py-2 rounded-xl border border-emerald-500/20">
+                            נטענו {customQuestions.length} שאלות בהצלחה!
+                          </motion.span>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </div>
+                )}
+
+                {quizSourceTab === 'edit' && (
+                  <div className="space-y-6">
+                    <div className="flex items-center justify-between">
+                      <button onClick={addQuestion} className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-xl font-bold">
+                        <Plus size={20} /> הוסף שאלה
+                      </button>
+                      {user && customQuestions.length > 0 && (
+                        <div className="flex items-center gap-3">
+                          <input
+                            type="text"
+                            value={saveQuizTitle}
+                            onChange={(e) => setSaveQuizTitle(e.target.value)}
+                            placeholder="שם החידון (לשמירה)"
+                            className="bg-slate-800 border border-slate-600 rounded-xl px-4 py-2 w-48"
+                          />
+                          <button onClick={handleSaveQuiz} disabled={savingQuiz} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-xl font-bold disabled:opacity-50">
+                            <Save size={18} /> שמור חידון
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="max-h-80 overflow-y-auto space-y-4 custom-scrollbar">
+                      {customQuestions.length === 0 ? (
+                        <p className="text-slate-500 text-center py-8">לחץ "הוסף שאלה" כדי להתחיל לכתוב חידון</p>
+                      ) : (
+                        customQuestions.map((q, idx) => (
+                          <div key={idx} className="bg-slate-800/80 p-5 rounded-2xl border border-slate-700">
+                            <div className="flex justify-between items-start gap-4 mb-3">
+                              <input
+                                value={q.q}
+                                onChange={(e) => updateQuestion(idx, 'q', e.target.value)}
+                                placeholder="טקסט השאלה"
+                                className="flex-1 bg-slate-950 border border-slate-600 rounded-xl px-4 py-2"
+                              />
+                              <button onClick={() => removeQuestion(idx)} className="text-red-400 hover:text-red-300 p-1">
+                                <Trash2 size={20} />
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 mb-3">
+                              {q.opts.map((opt, oi) => (
+                                <label key={oi} className="flex items-center gap-2 cursor-pointer">
+                                  <input
+                                    type="radio"
+                                    name={`correct-${idx}`}
+                                    checked={q.a === oi}
+                                    onChange={() => updateQuestion(idx, 'a', oi)}
+                                    className="accent-emerald-500"
+                                  />
+                                  <input
+                                    value={opt}
+                                    onChange={(e) => updateQuestion(idx, 'opts', q.opts.map((o, i) => i === oi ? e.target.value : o))}
+                                    placeholder={`תשובה ${oi + 1}`}
+                                    className="flex-1 bg-slate-950 border border-slate-600 rounded-lg px-3 py-1.5 text-sm"
+                                  />
+                                </label>
+                              ))}
+                            </div>
+                            <span className="text-slate-500 text-xs">✓ סימן את התשובה הנכונה</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {quizSourceTab === 'saved' && user && (
+                  <div className="space-y-3 max-h-60 overflow-y-auto custom-scrollbar">
+                    {savedQuizzes.length === 0 ? (
+                      <p className="text-slate-500 text-center py-8">אין לך חידונים שמורים. צור חידון ולחץ "שמור חידון"</p>
+                    ) : (
+                      savedQuizzes.map((quiz) => (
+                        <button
+                          key={quiz.id || quiz.title}
+                          onClick={() => loadSavedQuiz(quiz)}
+                          className="w-full text-right bg-slate-800 hover:bg-slate-700 p-4 rounded-xl border border-slate-700 flex justify-between items-center"
+                        >
+                          <span className="font-bold">{quiz.title}</span>
+                          <span className="text-slate-400 text-sm">{quiz.questions.length} שאלות</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                <AnimatePresence>
+                  {customQuestions.length > 0 && quizSourceTab !== 'edit' && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-4 text-emerald-400 font-bold">
+                      {customQuestions.length} שאלות מוכנות למשחק
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
+
+              {showAuthModal && <AuthModal onClose={() => setShowAuthModal(false)} onSuccess={() => { /* useEffect loads quizzes when user updates */ }} />}
               
               <div className="flex justify-center pt-8">
                 <motion.button 
@@ -564,6 +763,34 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                   <div className="mb-8 p-6 bg-slate-950/80 rounded-2xl border border-slate-700">
                     <h4 className="text-lg font-bold text-slate-300 mb-4 flex items-center gap-2">
                       <Trophy className="w-5 h-5 text-red-400" />
+                      מצב משחק
+                    </h4>
+                    <div className="flex flex-col gap-4 mb-6">
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="bossMode"
+                          checked={globalState?.useAiBoss !== false}
+                          onChange={() => socket.emit('setBossUseAi', { code: roomCode, useAiBoss: true })}
+                          className="w-4 h-4 accent-indigo-500"
+                        />
+                        <span className="font-bold">בוס בוט – כולם גיבורים נגד מפלצת AI</span>
+                      </label>
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="bossMode"
+                          checked={globalState?.useAiBoss === false}
+                          onChange={() => socket.emit('setBossUseAi', { code: roomCode, useAiBoss: false })}
+                          className="w-4 h-4 accent-indigo-500"
+                        />
+                        <span className="font-bold">בוס שחקן – שחקן אחד בוס נגד גיבורים</span>
+                      </label>
+                    </div>
+                    {globalState?.useAiBoss === false && (
+                    <>
+                    <h4 className="text-lg font-bold text-slate-300 mb-4 flex items-center gap-2">
+                      <Trophy className="w-5 h-5 text-red-400" />
                       בחר מי יהיה הבוס ומי גיבור
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -610,6 +837,8 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                         </div>
                       </div>
                     </div>
+                    </>
+                    )}
                   </div>
                 )}
 
