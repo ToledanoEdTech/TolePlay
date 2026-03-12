@@ -42,7 +42,7 @@ git push origin main
 | **Region** | בחר את האזור הקרוב אליך |
 | **Branch** | `main` |
 | **Runtime** | `Node` |
-| **Build Command** | `npm install && npm run build` |
+| **Build Command** | `npm run build` |
 | **Start Command** | `npm run start:prod` |
 | **Instance Type** | **Free** |
 
