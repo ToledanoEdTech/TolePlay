@@ -406,19 +406,25 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
           </div>
         </div>
         {aliveBosses.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 w-full max-w-[520px] px-4">
             {aliveBosses.map((b: any) => {
               const hp = b.modeState?.hp ?? 0;
               const maxHp = b.modeState?.maxHp ?? 10;
               const pct = Math.max(0, hp / maxHp);
               return (
-                <div key={b.id} className="flex-1 min-w-[100px] max-w-[180px]">
-                  <div className="text-[10px] text-red-400 font-bold mb-1">{b.name || 'בוס'}</div>
-                  <div className="h-3 bg-black/60 rounded-lg overflow-hidden border border-red-500/30 shadow-lg">
+                <div key={b.id} className="bg-black/60 backdrop-blur-sm px-6 py-3 rounded-2xl border-2 border-[#9b59b6] shadow-xl text-center">
+                  <h2 className="text-lg font-black text-[#e056fd] mb-2 drop-shadow-[0_0_10px_rgba(224,86,253,0.8)]">
+                    המפלצת הענקית
+                  </h2>
+                  <div className="w-full h-6 bg-[#222] border-2 border-black rounded-[15px] overflow-hidden shadow-[inset_0_0_10px_rgba(0,0,0,1)]">
                     <motion.div
-                      className="h-full rounded-lg bg-gradient-to-r from-red-500 via-red-600 to-red-700"
+                      className="h-full rounded-[12px] transition-[width] duration-200 ease-out"
+                      style={{
+                        width: `${pct * 100}%`,
+                        background: 'linear-gradient(90deg, #8e44ad, #9b59b6, #e056fd)'
+                      }}
                       animate={{ width: `${pct * 100}%` }}
-                      transition={{ duration: 0.15 }}
+                      transition={{ duration: 0.2 }}
                     />
                   </div>
                 </div>
@@ -626,31 +632,45 @@ function drawProjectiles(
       return Math.hypot(proj.x - hx, proj.y - hy) < 25;
     });
     if (bossHit || heroHit) {
-      particlesRef.current.push(...emitBurst(proj.x, proj.y, 8, 6, 0.4, proj.isBoss ? '#ef4444' : '#fbbf24', 2, { type: 'spark', friction: 0.92 }));
+      particlesRef.current.push(...emitBurst(proj.x, proj.y, 8, 6, 0.4, proj.isBoss ? '#ff00ff' : '#fbbf24', 2, { type: 'spark', friction: 0.92 }));
       return false;
     }
 
     if (Math.random() < 0.4) {
       const angle = Math.atan2(-proj.vy, -proj.vx);
-      particlesRef.current.push(...emitDirectional(proj.x, proj.y, angle, 0.4, 1, 2, 0.2, proj.isBoss ? '#ff6666' : '#ffdd44', 1.5, { type: 'spark', friction: 0.9 }));
+      particlesRef.current.push(...emitDirectional(proj.x, proj.y, angle, 0.4, 1, 2, 0.2, proj.isBoss ? '#ff00ff' : '#ffdd44', 1.5, { type: 'spark', friction: 0.9 }));
     }
 
-    const color = proj.isBoss ? '#ef4444' : '#fbbf24';
+    const color = proj.isBoss ? '#ff00ff' : '#fbbf24';
     ctx.save();
-    const angle = Math.atan2(proj.vy, proj.vx);
     ctx.translate(proj.x, proj.y);
-    ctx.rotate(angle);
-    const g = ctx.createLinearGradient(-12, 0, 12, 0);
-    g.addColorStop(0, colorAlpha(color, 0.4));
-    g.addColorStop(0.3, colorAlpha(color, 0.9));
-    g.addColorStop(0.7, color);
-    g.addColorStop(1, colorAlpha(color, 0.95));
-    ctx.fillStyle = g;
-    ctx.shadowBlur = 14;
-    ctx.shadowColor = color;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 10, 4, 0, 0, Math.PI * 2);
-    ctx.fill();
+    if (proj.isBoss) {
+      // Boss projectiles: sphere-like (circle) - like in example
+      const g = ctx.createRadialGradient(-3, -3, 0, 0, 0, 8);
+      g.addColorStop(0, colorAlpha(color, 0.9));
+      g.addColorStop(0.6, color);
+      g.addColorStop(1, colorAlpha(color, 0.6));
+      ctx.fillStyle = g;
+      ctx.shadowBlur = 18;
+      ctx.shadowColor = color;
+      ctx.beginPath();
+      ctx.arc(0, 0, 8, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      const angle = Math.atan2(proj.vy, proj.vx);
+      ctx.rotate(angle);
+      const g = ctx.createLinearGradient(-12, 0, 12, 0);
+      g.addColorStop(0, colorAlpha(color, 0.4));
+      g.addColorStop(0.3, colorAlpha(color, 0.9));
+      g.addColorStop(0.7, color);
+      g.addColorStop(1, colorAlpha(color, 0.95));
+      ctx.fillStyle = g;
+      ctx.shadowBlur = 14;
+      ctx.shadowColor = color;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 10, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.shadowBlur = 0;
     ctx.restore();
     return true;
@@ -684,6 +704,20 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
   ctx.beginPath();
   ctx.ellipse(baseX + w / 2, baseY + h / 2, w * 0.35, h * 0.35, 0, 0, Math.PI * 2);
   ctx.fill();
+
+  // Central plaza - boss arena (like in example)
+  const plazaRadius = 120;
+  const plazaGrad = ctx.createRadialGradient(CENTER, CENTER, 0, CENTER, CENTER, plazaRadius);
+  plazaGrad.addColorStop(0, '#a8a8a8');
+  plazaGrad.addColorStop(0.7, '#9e9e9e');
+  plazaGrad.addColorStop(1, '#757575');
+  ctx.fillStyle = plazaGrad;
+  ctx.beginPath();
+  ctx.arc(CENTER, CENTER, plazaRadius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
 
   drawPathsToCenter(ctx, cam, vpW, vpH);
 }
@@ -1135,9 +1169,10 @@ function drawLasers(
   prevLasers.current = lasers.length;
 }
 
+// Draw boss creature - styled like "המפלצת הענקית" from the example (dodecahedron body, red glowing eyes)
 function drawBossCreature(ctx: CanvasRenderingContext2D, x: number, y: number, t: number, hpPct: number, shields: number, aim: { x: number; y: number } | null = null) {
   const breathe = Math.sin(t * 1.8) * 3;
-  const scaleBreath = 1 + 0.025 * Math.sin(t * 1.5);
+  const scaleBreath = 1 + 0.04 * Math.sin(t * 0.003); // pulse/breathing like in example
   const isEnraged = hpPct < 0.3;
   const damageFlash = isEnraged && Math.sin(t * 12) > 0.7;
 
@@ -1145,15 +1180,12 @@ function drawBossCreature(ctx: CanvasRenderingContext2D, x: number, y: number, t
   ctx.translate(x, y + breathe);
   ctx.scale(scaleBreath, scaleBreath);
 
-  drawGlow(ctx, 0, 0, 90, isEnraged ? '#ef4444' : '#6d28d9', isEnraged ? 0.2 : 0.12);
+  drawGlow(ctx, 0, 0, 95, isEnraged ? '#ff0000' : '#8e44ad', isEnraged ? 0.25 : 0.15);
 
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.beginPath();
-  ctx.ellipse(0, 62, 60, 18, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.beginPath();
-  ctx.ellipse(0, 58, 55, 14, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 65, 62, 20, 0, 0, Math.PI * 2);
   ctx.fill();
 
   if (shields > 0) {
@@ -1161,119 +1193,84 @@ function drawBossCreature(ctx: CanvasRenderingContext2D, x: number, y: number, t
     ctx.lineWidth = 2.5;
     ctx.setLineDash([8, 5]);
     ctx.beginPath();
-    ctx.arc(0, 0, 70 + Math.sin(t * 2) * 4, 0, Math.PI * 2);
+    ctx.arc(0, 0, 72 + Math.sin(t * 2) * 4, 0, Math.PI * 2);
     ctx.stroke();
     ctx.setLineDash([]);
     drawGlow(ctx, 0, 0, 80, '#3b82f6', 0.08 + 0.04 * Math.sin(t * 2));
   }
 
-  if (isEnraged) drawGlow(ctx, 0, 0, 85, '#ef4444', 0.15 + 0.08 * Math.sin(t * 4));
+  if (isEnraged) drawGlow(ctx, 0, 0, 90, '#ff0000', 0.2 + 0.1 * Math.sin(t * 4));
 
-  const bodyColor = damageFlash ? '#ef4444' : (isEnraged ? '#7f1d1d' : '#4c1d95');
-  const bodyGrad = ctx.createRadialGradient(0, -5, 5, 0, 10, 50);
-  bodyGrad.addColorStop(0, damageFlash ? '#fca5a5' : (isEnraged ? '#991b1b' : '#7c3aed'));
-  bodyGrad.addColorStop(1, bodyColor);
+  // Body - dodecahedron-like shape (dark polygonal alien creature)
+  const bodyColor = damageFlash ? '#ff4444' : (isEnraged ? '#4a0000' : '#1a1a1a');
+  const bodyGrad = ctx.createRadialGradient(0, -10, 0, 0, 0, 55);
+  bodyGrad.addColorStop(0, damageFlash ? '#ff6666' : (isEnraged ? '#7a0000' : '#2a2a2a'));
+  bodyGrad.addColorStop(0.6, bodyColor);
+  bodyGrad.addColorStop(1, '#0a0a0a');
   ctx.fillStyle = bodyGrad;
 
+  // Pentagon/dodecahedron-inspired polygon (12 vertices)
+  const r = 48;
   ctx.beginPath();
-  ctx.moveTo(-38, -18);
-  ctx.quadraticCurveTo(-42, -38, -22, -42);
-  ctx.quadraticCurveTo(0, -50, 22, -42);
-  ctx.quadraticCurveTo(42, -38, 38, -18);
-  ctx.quadraticCurveTo(45, 22, 32, 42);
-  ctx.quadraticCurveTo(0, 58, -32, 42);
-  ctx.quadraticCurveTo(-45, 22, -38, -18);
+  for (let i = 0; i < 12; i++) {
+    const angle = (i / 12) * Math.PI * 2 - Math.PI / 2;
+    const px = Math.cos(angle) * r;
+    const py = Math.sin(angle) * r * 0.85;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
   ctx.closePath();
   ctx.fill();
-
-  ctx.strokeStyle = colorAlpha(isEnraged ? '#ef4444' : '#a78bfa', 0.5);
+  ctx.strokeStyle = colorAlpha(isEnraged ? '#ff0000' : '#8e44ad', 0.4);
   ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(-28, -12);
-  ctx.quadraticCurveTo(0, -8, 28, -12);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(-22, 18);
-  ctx.quadraticCurveTo(0, 22, 22, 18);
   ctx.stroke();
 
-  ctx.fillStyle = isEnraged ? '#991b1b' : '#1e1b4b';
-  ctx.beginPath();
-  ctx.moveTo(-20, -40);
-  ctx.quadraticCurveTo(-32, -62 + breathe * 0.5, -27, -68);
-  ctx.quadraticCurveTo(-16, -58, -14, -40);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(20, -40);
-  ctx.quadraticCurveTo(32, -62 + breathe * 0.5, 27, -68);
-  ctx.quadraticCurveTo(16, -58, 14, -40);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = isEnraged ? '#ef4444' : '#a78bfa';
-  ctx.shadowBlur = 10;
-  ctx.shadowColor = isEnraged ? '#ef4444' : '#a78bfa';
-  ctx.beginPath();
-  ctx.arc(-27, -66, 4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(27, -66, 4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-
-  const eyeGlow = isEnraged ? '#ef4444' : '#f59e0b';
-  const eyeOpen = 0.7 + 0.3 * Math.abs(Math.sin(t * 0.5));
-  ctx.fillStyle = '#0f0520';
-  ctx.beginPath();
-  ctx.ellipse(-14, -24, 9, 6 * eyeOpen, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 14;
+  // Red glowing eyes - prominent like in example
+  const eyeGlow = isEnraged ? '#ff0000' : '#ff0000';
+  const eyePulse = 0.9 + 0.2 * Math.sin(t * 3);
+  ctx.shadowBlur = 25;
   ctx.shadowColor = eyeGlow;
   ctx.fillStyle = eyeGlow;
   ctx.beginPath();
-  ctx.ellipse(-14, -24, 5, 3.5 * eyeOpen, 0, 0, Math.PI * 2);
+  ctx.arc(-18, -12, 12 * eyePulse, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = '#0f0520';
   ctx.beginPath();
-  ctx.ellipse(14, -24, 9, 6 * eyeOpen, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = eyeGlow;
-  ctx.beginPath();
-  ctx.ellipse(14, -24, 5, 3.5 * eyeOpen, 0, 0, Math.PI * 2);
+  ctx.arc(18, -12, 12 * eyePulse, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  const armSwing = Math.sin(t * 2) * 10;
-  ctx.strokeStyle = bodyColor;
-  ctx.lineWidth = 7;
-  ctx.lineCap = 'round';
+  // Inner eye glow
+  ctx.fillStyle = '#ff4444';
+  ctx.shadowBlur = 15;
+  ctx.shadowColor = '#ff0000';
   ctx.beginPath();
-  ctx.moveTo(-36, 6);
-  ctx.quadraticCurveTo(-55, 12 + armSwing, -50, 32 + armSwing);
-  ctx.stroke();
+  ctx.arc(-18, -12, 6 * eyePulse, 0, Math.PI * 2);
+  ctx.fill();
   ctx.beginPath();
-  ctx.moveTo(36, 6);
-  ctx.quadraticCurveTo(55, 12 - armSwing, 50, 32 - armSwing);
-  ctx.stroke();
+  ctx.arc(18, -12, 6 * eyePulse, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
 
+  // Gun/arm - like in example
   if (aim) {
     const angle = Math.atan2(aim.y, aim.x);
     ctx.save();
     ctx.rotate(angle);
-    ctx.strokeStyle = '#f87171';
-    ctx.lineWidth = 4;
-    ctx.shadowBlur = 10;
-    ctx.shadowColor = '#ef4444';
+    const gunGrad = ctx.createLinearGradient(35, 0, 75, 0);
+    gunGrad.addColorStop(0, '#333333');
+    gunGrad.addColorStop(1, '#1a1a1a');
+    ctx.fillStyle = gunGrad;
+    ctx.fillRect(35, -6, 35, 12);
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(35, -6, 35, 12);
+    ctx.fillStyle = '#ff00ff';
+    ctx.shadowBlur = 18;
+    ctx.shadowColor = '#ff00ff';
     ctx.beginPath();
-    ctx.moveTo(40, 0);
-    ctx.lineTo(70, 0);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#ef4444';
-    ctx.beginPath();
-    ctx.arc(75, 0, 5, 0, Math.PI * 2);
+    ctx.arc(78, 0, 6, 0, Math.PI * 2);
     ctx.fill();
+    ctx.shadowBlur = 0;
     ctx.restore();
   }
 
