@@ -25,7 +25,7 @@ export function initFirebaseClient(): { app: FirebaseApp; auth: Auth; db: Databa
     console.warn('[Firebase Client] Missing VITE_FIREBASE_* env vars. Auth and quiz save disabled.');
     return null;
   }
-  if (app) return { app, auth!, db! };
+  if (app && auth && db) return { app, auth, db };
   app = initializeApp(firebaseConfig);
   auth = getAuth(app);
   db = getDatabase(app);
