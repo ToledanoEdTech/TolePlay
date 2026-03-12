@@ -43,7 +43,7 @@ git push origin main
 | **Branch** | `main` |
 | **Runtime** | `Node` |
 | **Build Command** | `npm run build` |
-| **Start Command** | `npm run start:prod` |
+| **Start Command** | `npx tsx server.ts` |
 | **Instance Type** | **Free** |
 
 ---
@@ -66,13 +66,13 @@ git push origin main
 
 | Key | Value |
 |-----|-------|
-| `FIREBASE_DATABASE_URL` | `https://YOUR-PROJECT-default-rtdb.firebaseio.com` |
+| `REBASE_DATABASE_URL` | `https://YOUR-PROJECT-default-rtdb.firebaseio.com` |
 | `FIREBASE_SERVICE_ACCOUNT` | כל תוכן קובץ ה-JSON של ה-Service Account |
 
 **איך להשיג את FIREBASE_SERVICE_ACCOUNT:**
 1. Firebase Console → Project Settings → Service Accounts
 2. "Generate new private key" → הורד את הקובץ
-3. פתח את הקובץ והעתק **את כל התוכן** (מ-`{` עד `}`)
+3. פתח את הקובץ והעתק **את כל התוכן** (מ-`{` עד FI`}`)
 4. הדבק בשדה Value
 
 **אם לא תגדיר Firebase:** האתר יעבוד, אבל חדרים לא יישמרו ב-DB (רק בזיכרון).

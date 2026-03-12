@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: toleplay
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npx tsx server.ts
+    envVars:
+      - key: NODE_ENV
+        value: production
