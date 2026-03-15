@@ -518,7 +518,8 @@ async function startServer() {
         }
       }
 
-      io.to(code).emit("playerUpdated", { playerId, player });
+      const ownedCopy = [...(player.modeState?.ownedWeapons || [])];
+      io.to(code).emit("playerUpdated", { playerId, player: { ...player, modeState: { ...player.modeState, ownedWeapons: ownedCopy } } });
       io.to(code).emit("globalStateUpdated", room.globalState);
     });
 
@@ -528,14 +529,16 @@ async function startServer() {
       const player = room.players[playerId];
       if (!player) return;
       if (!player.modeState) player.modeState = {};
-      let owned = Array.isArray(player.modeState.ownedWeapons) ? player.modeState.ownedWeapons : [];
-      if (!owned.includes('pistol')) owned = ['pistol', ...owned];
+      let owned = Array.isArray(player.modeState.ownedWeapons) ? [...player.modeState.ownedWeapons] : [];
+      if (!owned.includes('pistol')) owned.unshift('pistol');
       if (player.modeState.weapon && !owned.includes(player.modeState.weapon)) owned.push(player.modeState.weapon);
-      owned = [...new Set(owned)];
-      player.modeState.ownedWeapons = owned;
-      if (!owned.includes(weaponId) || !ZOMBIE_WEAPONS[weaponId]) return;
+      player.modeState.ownedWeapons = [...new Set(owned)];
+      if (!player.modeState.ownedWeapons.includes(weaponId) || !ZOMBIE_WEAPONS[weaponId]) return;
       player.modeState.weapon = weaponId;
-      const payload = { playerId, player: { ...player, modeState: { ...player.modeState } } };
+      const payload = {
+        playerId,
+        player: { ...player, modeState: { ...player.modeState, ownedWeapons: [...player.modeState.ownedWeapons] } },
+      };
       io.to(code).emit("playerUpdated", payload);
     });
 
@@ -637,8 +640,14 @@ async function startServer() {
           const projX = x1 + t * dx, projY = y1 + t * dy;
           return Math.hypot(zx - projX, zy - projY);
         }
-        const SHOTGUN_HIT_RADIUS = 35;
-        const SINGLE_RAY_HIT_RADIUS = 10;
+        function segmentIntersectsCircle(
+          cx: number, cy: number, r: number,
+          x1: number, y1: number, x2: number, y2: number
+        ): boolean {
+          return distPointToSegment(cx, cy, x1, y1, x2, y2) <= r;
+        }
+        const SHOTGUN_HIT_RADIUS = 45;
+        const ZOMBIE_HITBOX_RADIUS = 28; // רדיוס פגיעה צמוד – גם ירי קרוב לזומבי מוריד חיים (לא רחוק)
 
         if (weapon === 'shotgun') {
           // Shotgun: 5 rays in a cone – only damage zombies that are hit by at least one ray (within hit radius of ray)
@@ -681,33 +690,34 @@ async function startServer() {
           player.resources = (player.resources || 0) + 50 * killed;
           player.score += 10 * killed;
         } else {
-          // Pistol, rifle, sniper: damage ONLY when the ray passes through the zombie (distance to ray <= 10)
+          // Pistol, Assault Rifle, Sniper: STRICTLY single-target. No cone, no AOE.
+          // Only one zombie takes damage: the one whose hitbox (circle) is intersected by the bullet segment.
+          // Bullet = segment from (px,py) to (endX,endY). Zombie hitbox = circle at (z.x,z.y) radius ZOMBIE_HITBOX_RADIUS.
           const endX = px + Math.cos(aimAngle) * weaponRange;
           const endY = py + Math.sin(aimAngle) * weaponRange;
-          const hitRadius = SINGLE_RAY_HIT_RADIUS;
-          let zombie: any = null;
-          let bestDistToRay = Infinity;
           const zombies = room.globalState.zombies || [];
+          let hitZombie: any = null;
+          let closestDist = Infinity;
           for (const z of zombies) {
             const d = Math.hypot(z.x - px, z.y - py);
-            if (d > maxHitRange || d < 3) continue;
-            const distToRay = distPointToSegment(z.x, z.y, px, py, endX, endY);
-            if (distToRay < bestDistToRay && distToRay <= hitRadius) {
-              bestDistToRay = distToRay;
-              zombie = z;
+            if (d > maxHitRange || d < 2) continue;
+            const intersects = segmentIntersectsCircle(z.x, z.y, ZOMBIE_HITBOX_RADIUS, px, py, endX, endY);
+            if (intersects && d < closestDist) {
+              closestDist = d;
+              hitZombie = z;
             }
           }
           player.modeState.ammo = ammo - 1;
           player.modeState.lastFire = now;
-          if (zombie) {
-            zombie.hp -= wpn.damage;
-            if (zombie.hp <= 0) {
+          if (hitZombie) {
+            hitZombie.hp -= wpn.damage;
+            if (hitZombie.hp <= 0) {
               player.resources = (player.resources || 0) + 50;
               player.score += 10;
             }
           }
           room.globalState.lasers.push({
-            x1: px, y1: py, x2: zombie ? zombie.x : endX, y2: zombie ? zombie.y : endY,
+            x1: px, y1: py, x2: hitZombie ? hitZombie.x : endX, y2: hitZombie ? hitZombie.y : endY,
             color: wpn.color, createdAt: now,
           });
         }
@@ -1221,7 +1231,10 @@ async function startServer() {
       }
 
       io.to(room.code).emit('tick', {
-        players: Object.fromEntries(Object.entries(room.players).map(([k, v]) => [k, { ...v, modeState: { ...v.modeState } }])),
+        players: Object.fromEntries(Object.entries(room.players).map(([k, v]) => {
+          const ms = v.modeState || {};
+          return [k, { ...v, modeState: { ...ms, ownedWeapons: [...(ms.ownedWeapons || [])] } }];
+        })),
         globalState: { ...state, collectibles: [...(state.collectibles || [])] }
       });
     });

@@ -769,18 +769,19 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         )}
       </AnimatePresence>
 
-      {/* Weapon switcher: bottom-left, all purchased weapon types – always show pistol + every owned + current */}
+      {/* Weapon switcher: list of ALL purchased weapons (not a binary toggle). Switch freely between any owned weapon. */}
       <div className="fixed left-2 bottom-24 z-[100] flex flex-row flex-wrap items-center gap-2 pointer-events-auto py-2" dir="ltr">
         <span className="text-[10px] text-slate-300 font-bold shrink-0">נשק:</span>
         {(() => {
-          const raw = player?.modeState?.ownedWeapons;
-          const fromServer = Array.isArray(raw) ? raw : [];
-          const current = player?.modeState?.weapon;
-          const withPistol = fromServer.includes('pistol') ? fromServer : ['pistol', ...fromServer];
-          const withCurrent = current && !withPistol.includes(current) ? [...withPistol, current] : withPistol;
-          const uniqueOwned = [...new Set(withCurrent)].filter((id): id is string => !!WEAPONS[id]);
-          if (uniqueOwned.length === 0) return null;
-          return uniqueOwned.map((id) => {
+          const owned = player?.modeState?.ownedWeapons;
+          const list = Array.isArray(owned) ? owned : [];
+          const withPistol = list.includes('pistol') ? list : ['pistol', ...list];
+          const withCurrent = player?.modeState?.weapon && !withPistol.includes(player.modeState.weapon)
+            ? [...withPistol, player.modeState.weapon]
+            : withPistol;
+          const allOwned = [...new Set(withCurrent)].filter((id): id is string => !!WEAPONS[id]);
+          if (allOwned.length === 0) return null;
+          return allOwned.map((id) => {
             const w = WEAPONS[id];
             const isActive = weaponId === id;
             return (

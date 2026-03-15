@@ -10,3 +10,6 @@ coverage/
 # Firebase service account key - NEVER commit this
 firebase-service-account.json
 *-service-account*.json
+
+# dev-fresh port counter (local only)
+.last-dev-port

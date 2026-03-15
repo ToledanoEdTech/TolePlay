@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "dev:fresh": "node dev-fresh.js",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
