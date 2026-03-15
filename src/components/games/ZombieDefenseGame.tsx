@@ -442,7 +442,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         ctx.strokeStyle = '#000';
         ctx.lineWidth = 3;
         const name = (p.name || 'שחקן').slice(0, 12);
-        const nameY = py - 32 * ENTITY_SCALE - 10;
+        const nameY = py - 14 * ENTITY_SCALE - 14;
         ctx.strokeText(name, px, nameY);
         ctx.fillText(name, px, nameY);
         ctx.restore();
@@ -954,57 +954,114 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   );
 }
 
-// ── Base: octagon + H (like exmpl.html) ──
+// ── Base: High-Tech Protected Defense Generator Core (hex armor, intense neon core, energy lines) ──
+const BASE_VISUAL_SCALE = 1.75;
 function drawBase(ctx: CanvasRenderingContext2D, x: number, y: number, hpPct: number, t: number) {
+  const R = BASE_RADIUS * BASE_VISUAL_SCALE;
+  const now = Date.now();
   ctx.save();
   ctx.translate(x, y);
-  ctx.beginPath();
-  ctx.arc(0, 0, BASE_RADIUS + 15, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fill();
-  ctx.beginPath();
-  for (let i = 0; i < 8; i++) {
-    const angle = (i * Math.PI) / 4 + Math.PI / 8;
-    const px = Math.cos(angle) * BASE_RADIUS;
-    const py = Math.sin(angle) * BASE_RADIUS;
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.fillStyle = '#334155';
-  ctx.fill();
-  ctx.strokeStyle = '#94a3b8';
-  ctx.lineWidth = 4;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(0, 0, BASE_RADIUS * 0.7, 0, Math.PI * 2);
-  ctx.fillStyle = '#1e293b';
-  ctx.fill();
+
+  // Outer armored ring: stylized hexagonal plates (grey / dark blue)
+  const hexCount = 14;
+  const hexRadius = 22;
+  ctx.strokeStyle = '#334155';
   ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.fillStyle = '#facc15';
-  ctx.font = 'bold 40px Arial';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('H', 0, 5);
-  ctx.shadowBlur = 30;
-  const coreColor = hpPct > 0.5 ? '#38bdf8' : hpPct > 0.2 ? '#facc15' : '#ef4444';
-  ctx.shadowColor = coreColor;
-  ctx.beginPath();
-  ctx.arc(0, 0, 25, 0, Math.PI * 2);
+  ctx.fillStyle = '#1e293b';
+  for (let i = 0; i < hexCount; i++) {
+    const baseAngle = (i / hexCount) * Math.PI * 2 - Math.PI / 2;
+    const cx = Math.cos(baseAngle) * (R + 12);
+    const cy = Math.sin(baseAngle) * (R + 12);
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(baseAngle);
+    ctx.beginPath();
+    for (let v = 0; v < 6; v++) {
+      const a = (v / 6) * Math.PI * 2 + Math.PI / 6;
+      const px = Math.cos(a) * hexRadius;
+      const py = Math.sin(a) * hexRadius;
+      if (v === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.fillStyle = '#0f172a';
-  ctx.fill();
+  ctx.strokeStyle = '#1e3a5f';
+  ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.arc(0, 0, 20, 0, Math.PI * 2);
-  ctx.fillStyle = coreColor;
+  ctx.arc(0, 0, R + 2, 0, Math.PI * 2);
   ctx.fill();
+  ctx.stroke();
+
+  // Inner armor band (dark metallic)
+  ctx.fillStyle = '#1e293b';
+  ctx.strokeStyle = '#475569';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.88, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Radiating energy lines from core (subtle)
+  ctx.strokeStyle = `rgba(34, 211, 238, ${0.15 + Math.sin(now / 250) * 0.08})`;
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 16; i++) {
+    const a = (i / 16) * Math.PI * 2 + (now / 2000) * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(a) * R * 0.75, Math.sin(a) * R * 0.75);
+    ctx.stroke();
+  }
+
+  // Core housing (dark)
+  ctx.fillStyle = '#0f172a';
+  ctx.strokeStyle = '#334155';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.42, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Central intensely glowing core: multiple concentric circles + strong neon cyan
+  const neonCyan = '#22d3ee';
+  const neonGlow = '#06b6d4';
+  ctx.shadowBlur = 55;
+  ctx.shadowColor = neonCyan;
+  ctx.fillStyle = `rgba(34, 211, 238, ${0.25 + Math.sin(now / 180) * 0.1})`;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 40;
+  ctx.shadowColor = neonGlow;
+  ctx.fillStyle = `rgba(34, 211, 238, ${0.5 + Math.sin(now / 220) * 0.15})`;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.26, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 30;
+  ctx.fillStyle = neonCyan;
+  ctx.globalAlpha = 0.95;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 20;
+  ctx.shadowColor = '#fff';
+  ctx.fillStyle = '#e0f7ff';
+  ctx.globalAlpha = 0.9 + Math.sin(now / 150) * 0.1;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.08, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
   ctx.shadowBlur = 0;
+
+  // Outer energy ring (pulse)
+  ctx.strokeStyle = `rgba(34, 211, 238, ${0.5 + Math.sin(now / 280) * 0.2})`;
+  ctx.lineWidth = 5;
   ctx.beginPath();
-  ctx.arc(0, 0, BASE_RADIUS + 10, 0, Math.PI * 2);
-  ctx.fillStyle = `rgba(56, 189, 248, ${0.1 + Math.sin(Date.now() / 300) * 0.05})`;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
-  ctx.lineWidth = 3;
+  ctx.arc(0, 0, R + 2, 0, Math.PI * 2);
   ctx.stroke();
   ctx.restore();
 }
@@ -1156,11 +1213,11 @@ function drawPlayerWithWeapon(
   // Drop shadow for depth (offset down-right in local “forward” frame)
   ctx.shadowBlur = 16 * s;
   ctx.shadowColor = 'rgba(0,0,0,0.45)';
-  ctx.shadowOffsetX = 6 * s;
-  ctx.shadowOffsetY = 8 * s;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 4 * s;
   ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath();
-  ctx.ellipse(6 * s, 2 * s, 28 * s, 22 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 20 * s, 28 * s, 22 * s, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
   ctx.shadowOffsetX = 0;
@@ -1171,16 +1228,16 @@ function drawPlayerWithWeapon(
   ctx.strokeStyle = '#0f172a';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.ellipse(-12 * s, 0, 10 * s, 18 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(-12 * s, 18 * s, 10 * s, 18 * s, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = vestMid;
   ctx.beginPath();
-  ctx.ellipse(-12 * s, 0, 6 * s, 12 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(-12 * s, 18 * s, 6 * s, 12 * s, 0, 0, Math.PI * 2);
   ctx.fill();
 
   // Tactical vest (body; front = right, +X)
-  const vestGrad = ctx.createLinearGradient(-26 * s, 0, 26 * s, 0);
+  const vestGrad = ctx.createLinearGradient(-26 * s, 18 * s, 26 * s, 18 * s);
   vestGrad.addColorStop(0, vestDark);
   vestGrad.addColorStop(0.35, camoGreen);
   vestGrad.addColorStop(0.5, vestMid);
@@ -1190,16 +1247,16 @@ function drawPlayerWithWeapon(
   ctx.strokeStyle = '#0f172a';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.ellipse(0, breathe * 0.5, 24 * s, 18 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 18 * s, 24 * s, 18 * s, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = vestDark;
-  ctx.fillRect(-4 * s, -10 * s, 8 * s, 20 * s);
+  ctx.fillRect(-4 * s, 8 * s, 8 * s, 20 * s);
   ctx.strokeStyle = vestLight;
   ctx.lineWidth = 1;
-  ctx.strokeRect(-4 * s, -10 * s, 8 * s, 20 * s);
+  ctx.strokeRect(-4 * s, 8 * s, 8 * s, 20 * s);
 
-  // Helmet (head, above body)
+  // Helmet (head) strictly centered at (0, headY) over torso for natural rotation
   const helmetGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 16 * s);
   helmetGrad.addColorStop(0, helmetMid);
   helmetGrad.addColorStop(0.6, helmetDark);
@@ -1208,20 +1265,20 @@ function drawPlayerWithWeapon(
   ctx.strokeStyle = '#0f172a';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(0, -18 * s, 14 * s, 0, Math.PI * 2);
+  ctx.arc(0, 0, 14 * s, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = 'rgba(30, 58, 95, 0.85)';
   ctx.beginPath();
-  ctx.arc(4 * s, -18 * s, 10 * s, -0.6, 0.6);
-  ctx.lineTo(0, -18 * s);
+  ctx.arc(0, 0, 10 * s, -0.6, 0.6);
+  ctx.lineTo(0, 0);
   ctx.closePath();
   ctx.fill();
   ctx.strokeStyle = '#1e3a5f';
   ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.beginPath();
-  ctx.arc(0, -18 * s, 12 * s, -Math.PI / 3, Math.PI / 3);
+  ctx.arc(0, 0, 12 * s, -Math.PI / 3, Math.PI / 3);
   ctx.strokeStyle = vestLight;
   ctx.lineWidth = 2.5;
   ctx.stroke();
@@ -1232,21 +1289,20 @@ function drawPlayerWithWeapon(
   ctx.strokeStyle = '#374151';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(10 * s, -8 * s + handOffset, 12 * s, 10 * s, 4);
-  else ctx.rect(10 * s, -8 * s + handOffset, 12 * s, 10 * s);
+  if (ctx.roundRect) ctx.roundRect(10 * s, 10 * s + handOffset, 12 * s, 10 * s, 4);
+  else ctx.rect(10 * s, 10 * s + handOffset, 12 * s, 10 * s);
   ctx.fill();
   ctx.stroke();
   ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(10 * s, -2 * s - handOffset, 12 * s, 10 * s, 4);
-  else ctx.rect(10 * s, -2 * s - handOffset, 12 * s, 10 * s);
+  if (ctx.roundRect) ctx.roundRect(10 * s, 16 * s - handOffset, 12 * s, 10 * s, 4);
+  else ctx.rect(10 * s, 16 * s - handOffset, 12 * s, 10 * s);
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = vestDark;
-  ctx.fillRect(14 * s, -5 * s, 8 * s, 10 * s);
-  ctx.strokeRect(14 * s, -5 * s, 8 * s, 10 * s);
+  ctx.fillRect(14 * s, 13 * s, 8 * s, 10 * s);
+  ctx.strokeRect(14 * s, 13 * s, 8 * s, 10 * s);
 
-  // Weapon barrel: drawn along +X (right). Tip at GUN_TIP_DISTANCE from origin.
-  ctx.translate(20 * s, 0);
+  ctx.translate(20 * s, 18 * s);
   if (weaponId === 'pistol') {
     ctx.fillStyle = '#334155';
     ctx.fillRect(0, -4 * s, 14 * s, 8 * s);
@@ -1287,7 +1343,7 @@ function drawPlayerWithWeapon(
 
   const pct = hp / maxHp;
   const barColor = pct > 0.5 ? '#22c55e' : pct > 0.25 ? '#eab308' : '#ef4444';
-  drawHPBar(ctx, x, y - 48 * s, 38 * s, 5 * s, pct, barColor);
+  drawHPBar(ctx, x, y - 28 * s, 38 * s, 5 * s, pct, barColor);
 }
 
 // ── Sprite: Turret ──
