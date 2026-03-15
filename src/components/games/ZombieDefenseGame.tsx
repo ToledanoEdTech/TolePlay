@@ -1409,22 +1409,27 @@ function drawZombieHtml(
   ctx.strokeRect(x - barW / 2, barY, barW, barH);
 }
 
-// ── Player: rebuilt – head at (0,0), body/arms symmetric, weapon along +X; tactical navy/grey ──
+// Futuristic soldier: helmet at (0,0), jetpack/vest/belt, walking animation, distinct colors, weapon by id
 function drawPlayerWithWeapon(
   ctx: CanvasRenderingContext2D, x: number, y: number, angle: number,
   hp: number, maxHp: number, weaponId: string, t: number, isMe: boolean, accentColor?: string, isMoving?: boolean
 ) {
   const s = ENTITY_SCALE;
-  const borderDark = '#0a0a0a';
-  const borderWidth = 3;
-  const greyDark = '#374151';
-  const greyMid = '#4b5563';
-  const greyLight = '#6b7280';
-  const breathe = isMoving ? Math.sin(Date.now() / 180) * 2 * s : Math.sin(Date.now() / 220) * 1 * s;
-  const vestColor = accentColor ? colorAlpha(accentColor, 1) : '#334155';
-  const vestColorDark = accentColor ? colorAlpha(accentColor, 0.75) : '#1e3a5f';
-  const helmetBright = accentColor ? colorAlpha(accentColor, 1) : '#475569';
-  const helmetMid = accentColor ? colorAlpha(accentColor, 0.85) : '#334155';
+  const now = Date.now() / 1000;
+  const phase = now * 4.5;
+  const BORDER = '#0d0d0d';
+  const BORDER_W = 2.5;
+  const metalDark = '#1f2937';
+  const metalMid = '#374151';
+  const metalLight = '#4b5563';
+  const playerColor = accentColor ? colorAlpha(accentColor, 1) : '#3b82f6';
+  const playerColorDim = accentColor ? colorAlpha(accentColor, 0.85) : '#2563eb';
+  const playerColorDark = accentColor ? colorAlpha(accentColor, 0.6) : '#1d4ed8';
+  const visorGlow = accentColor || '#06b6d4';
+  const torsoSwayX = isMoving ? Math.sin(phase) * 2.5 * s : 0;
+  const torsoSwayY = isMoving ? Math.cos(phase * 0.8) * 1.5 * s : 0;
+  const shoulderOppose = isMoving ? -Math.sin(phase) * 2 * s : 0;
+  const armSwing = isMoving ? Math.sin(phase + 0.3) * 1.5 * s : 0;
 
   ctx.save();
   ctx.translate(x, y);
@@ -1432,116 +1437,219 @@ function drawPlayerWithWeapon(
   // Head drawn at (0,0). No extra translate; breathe applied only to body/shadow positions.
 
   // 1. Shadow (offset down-right in local “forward” frame)
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
   ctx.beginPath();
-  ctx.ellipse(0, 18 * s + breathe, 22 * s, 16 * s, 0, 0, Math.PI * 2);
+  const torsoCy = 15 * s + torsoSwayY;
+  const torsoW = 24 * s;
+  const torsoH = 14 * s;
+  ctx.ellipse(torsoSwayX * 0.5, torsoCy + 2 * s, torsoW * 0.9, torsoH * 0.8, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // 2. Body/torso – PRIMARY player color (vest), thick dark border
-  const torsoCy = 14 * s + breathe;
-  const torsoW = 22 * s;
-  const torsoH = 16 * s;
-  const vestGrad = ctx.createLinearGradient(-torsoW, 0, torsoW, 0);
-  vestGrad.addColorStop(0, vestColorDark);
-  vestGrad.addColorStop(0.5, vestColor);
-  vestGrad.addColorStop(1, vestColorDark);
-  ctx.fillStyle = vestGrad;
-  ctx.strokeStyle = borderDark;
-  ctx.lineWidth = borderWidth;
+  ctx.save();
+  ctx.translate(-8 * s + torsoSwayX * 0.3, torsoCy);
+  const packGrad = ctx.createLinearGradient(-12 * s, 0, 12 * s, 0);
+  packGrad.addColorStop(0, '#0f172a');
+  packGrad.addColorStop(0.5, metalDark);
+  packGrad.addColorStop(1, '#0f172a');
+  ctx.fillStyle = packGrad;
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = BORDER_W;
   ctx.beginPath();
-  ctx.ellipse(0, torsoCy, torsoW, torsoH, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, 10 * s, 12 * s, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = greyDark;
-  ctx.fillRect(-3 * s, torsoCy - 4 * s, 6 * s, 10 * s);
-  ctx.strokeStyle = borderDark;
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(-3 * s, torsoCy - 4 * s, 6 * s, 10 * s);
+  ctx.fillStyle = playerColorDark;
+  ctx.strokeStyle = BORDER;
+  ctx.beginPath();
+  ctx.ellipse(-2 * s, 0, 4 * s, 6 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
 
-  // 3. Head (helmet) – PRIMARY player color, thick dark border
+  ctx.save();
+  ctx.translate(torsoSwayX, torsoCy);
+  const vestGrad = ctx.createLinearGradient(-torsoW, 0, torsoW, 0);
+  vestGrad.addColorStop(0, '#0f172a');
+  vestGrad.addColorStop(0.35, metalDark);
+  vestGrad.addColorStop(0.5, metalMid);
+  vestGrad.addColorStop(0.65, metalDark);
+  vestGrad.addColorStop(1, '#0f172a');
+  ctx.fillStyle = vestGrad;
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = BORDER_W;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, torsoW, torsoH, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = metalDark;
+  ctx.strokeStyle = BORDER;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 6 * s, 8 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+
+  const beltY = torsoCy + torsoH * 0.6;
+  ctx.fillStyle = playerColor;
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = BORDER_W;
+  ctx.beginPath();
+  ctx.ellipse(torsoSwayX, beltY, 20 * s, 5 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  const shoulderY = 6 * s + shoulderOppose * 0.5;
+  const shoulderLx = -14 * s + torsoSwayX * 0.4;
+  const shoulderRx = 12 * s + torsoSwayX * 0.4;
+  ctx.fillStyle = playerColor;
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = BORDER_W;
+  ctx.beginPath();
+  ctx.ellipse(shoulderLx, shoulderY - 8 * s, 6 * s, 9 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(shoulderRx, shoulderY - 8 * s, 6 * s, 9 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  const armY = shoulderY + armSwing;
+  ctx.fillStyle = metalMid;
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(shoulderLx - 2 * s, armY - 4 * s, 6 * s, 14 * s, 2);
+    ctx.roundRect(shoulderRx, armY - 3 * s, 20 * s, 6 * s, 2);
+  } else {
+    ctx.rect(shoulderLx - 2 * s, armY - 4 * s, 6 * s, 14 * s);
+    ctx.rect(shoulderRx, armY - 3 * s, 20 * s, 6 * s);
+  }
+  ctx.fill();
+  ctx.stroke();
+
   const headR = 12 * s;
   const helmetGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, headR);
-  helmetGrad.addColorStop(0, helmetBright);
-  helmetGrad.addColorStop(0.5, helmetMid);
-  helmetGrad.addColorStop(1, vestColorDark);
+  helmetGrad.addColorStop(0, metalLight);
+  helmetGrad.addColorStop(0.4, metalMid);
+  helmetGrad.addColorStop(0.8, metalDark);
+  helmetGrad.addColorStop(1, '#0f172a');
   ctx.fillStyle = helmetGrad;
-  ctx.strokeStyle = borderDark;
-  ctx.lineWidth = borderWidth;
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = BORDER_W;
   ctx.beginPath();
   ctx.arc(0, 0, headR, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = vestColorDark;
+  const visorGrad = ctx.createRadialGradient(-3 * s, -2 * s, 0, 0, 0, 10 * s);
+  visorGrad.addColorStop(0, visorGlow);
+  visorGrad.addColorStop(0.6, colorAlpha(visorGlow, 0.5));
+  visorGrad.addColorStop(1, colorAlpha(visorGlow, 0.15));
+  ctx.fillStyle = visorGrad;
   ctx.beginPath();
-  ctx.arc(0, 0, 8 * s, -0.5, 0.5);
+  ctx.arc(0, 0, 9 * s, -0.4, 0.4);
   ctx.lineTo(0, 0);
   ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = greyLight;
-  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = playerColor;
+  ctx.lineWidth = BORDER_W;
+  ctx.stroke();
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.arc(0, 0, 10 * s, -Math.PI / 3, Math.PI / 3);
+  ctx.arc(0, 0, 10 * s, -Math.PI / 2.5, Math.PI / 2.5);
   ctx.stroke();
 
-  // 4. Shoulders and arms – symmetric; left arm back, right arm forward holding weapon
-  const handOffset = isMoving ? Math.sin(Date.now() / 150) * 3 * s : 0;
-  const shoulderY = 6 * s + breathe * 0.5;
-  const armW = 8 * s;
-  const armH = 10 * s;
-  ctx.fillStyle = greyMid;
-  ctx.strokeStyle = greyDark;
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  if (ctx.roundRect) {
-    ctx.roundRect(-18 * s, shoulderY + handOffset, armW, armH, 3);
-    ctx.roundRect(10 * s, shoulderY - handOffset, armW, armH, 3);
-  } else {
-    ctx.rect(-18 * s, shoulderY + handOffset, armW, armH);
-    ctx.rect(10 * s, shoulderY - handOffset, armW, armH);
-  }
-  ctx.fill();
-  ctx.stroke();
-  ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(10 * s, shoulderY + 10 * s - handOffset, armW, armH, 3);
-  else ctx.rect(10 * s, shoulderY + 10 * s - handOffset, armW, armH);
-  ctx.fill();
-  ctx.stroke();
-
-  // 5. Weapon – at (18*s, 12*s), pointing along +X (forward)
+  const weaponX = 20 * s + armSwing;
+  const weaponY = armY + 2 * s;
   ctx.save();
-  ctx.translate(18 * s, 12 * s);
-  if (weaponId === 'pistol') {
-    ctx.fillStyle = greyDark;
-    ctx.fillRect(0, -3 * s, 12 * s, 6 * s);
-    ctx.fillStyle = '#06b6d4';
-    ctx.beginPath();
-    ctx.arc(12 * s, 0, 2.5 * s, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (weaponId === 'rifle') {
-    ctx.fillStyle = borderDark;
-    ctx.fillRect(0, -4 * s, 20 * s, 8 * s);
-    ctx.fillStyle = greyDark;
-    ctx.fillRect(12 * s, 2 * s, 6 * s, 4 * s);
-    ctx.fillStyle = '#eab308';
-    ctx.beginPath();
-    ctx.arc(20 * s, 0, 3 * s, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (weaponId === 'shotgun') {
-    ctx.fillStyle = '#451a03';
-    ctx.fillRect(0, -4 * s, 16 * s, 8 * s);
-    ctx.fillStyle = '#9a3412';
-    ctx.fillRect(8 * s, -5 * s, 6 * s, 10 * s);
-    ctx.fillStyle = '#f97316';
-    ctx.fillRect(16 * s, -3 * s, 3 * s, 6 * s);
-  } else if (weaponId === 'sniper') {
-    ctx.fillStyle = '#172554';
-    ctx.fillRect(0, -2.5 * s, 26 * s, 5 * s);
-    ctx.fillStyle = '#1e3a8a';
-    ctx.fillRect(6 * s, -4 * s, 10 * s, 2.5 * s);
-    ctx.fillStyle = '#38bdf8';
-    ctx.beginPath();
-    ctx.arc(26 * s, 0, 1.5 * s, 0, Math.PI * 2);
-    ctx.fill();
+  ctx.translate(weaponX, weaponY);
+  switch (weaponId) {
+    case 'pistol':
+      ctx.fillStyle = metalDark;
+      ctx.strokeStyle = BORDER;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(0, -2.5 * s, 14 * s, 5 * s, 1);
+      else ctx.rect(0, -2.5 * s, 14 * s, 5 * s);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = visorGlow;
+      ctx.beginPath();
+      ctx.arc(14 * s, 0, 3 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      break;
+    case 'rifle':
+      ctx.fillStyle = metalDark;
+      ctx.strokeStyle = BORDER;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(0, -3 * s, 28 * s, 6 * s, 1);
+      else ctx.rect(0, -3 * s, 28 * s, 6 * s);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = metalMid;
+      ctx.fillRect(12 * s, -4.5 * s, 8 * s, 3 * s);
+      ctx.strokeStyle = BORDER;
+      ctx.strokeRect(12 * s, -4.5 * s, 8 * s, 3 * s);
+      ctx.fillStyle = playerColorDim;
+      ctx.beginPath();
+      ctx.arc(28 * s, 0, 3.5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      break;
+    case 'shotgun':
+      ctx.fillStyle = metalDark;
+      ctx.strokeStyle = BORDER;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(0, -4 * s, 18 * s, 8 * s, 1);
+      else ctx.rect(0, -4 * s, 18 * s, 8 * s);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = metalMid;
+      ctx.fillRect(14 * s, -5 * s, 6 * s, 4 * s);
+      ctx.fillRect(14 * s, 2 * s, 6 * s, 4 * s);
+      ctx.strokeStyle = BORDER;
+      ctx.strokeRect(14 * s, -5 * s, 6 * s, 4 * s);
+      ctx.strokeRect(14 * s, 2 * s, 6 * s, 4 * s);
+      ctx.fillStyle = playerColorDim;
+      ctx.beginPath();
+      ctx.arc(20 * s, -2.5 * s, 2.5 * s, 0, Math.PI * 2);
+      ctx.arc(20 * s, 2.5 * s, 2.5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      break;
+    case 'sniper':
+      ctx.fillStyle = metalDark;
+      ctx.strokeStyle = BORDER;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(0, -2.5 * s, 38 * s, 5 * s, 1);
+      else ctx.rect(0, -2.5 * s, 38 * s, 5 * s);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = metalMid;
+      ctx.fillRect(8 * s, -5 * s, 14 * s, 4 * s);
+      ctx.strokeStyle = BORDER;
+      ctx.strokeRect(8 * s, -5 * s, 14 * s, 4 * s);
+      ctx.fillStyle = playerColorDim;
+      ctx.beginPath();
+      ctx.arc(22 * s, -2.5 * s, 5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = visorGlow;
+      ctx.beginPath();
+      ctx.arc(38 * s, 0, 2.5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      break;
+    default:
+      ctx.fillStyle = metalDark;
+      ctx.fillRect(0, -2.5 * s, 14 * s, 5 * s);
+      ctx.fillStyle = visorGlow;
+      ctx.beginPath();
+      ctx.arc(14 * s, 0, 2.5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      break;
   }
   ctx.restore();
 
@@ -1549,7 +1657,7 @@ function drawPlayerWithWeapon(
 
   const pct = hp / maxHp;
   const barColor = pct > 0.5 ? '#22c55e' : pct > 0.25 ? '#eab308' : '#ef4444';
-  drawHPBar(ctx, x, y - 26 * s, 36 * s, 5 * s, pct, barColor);
+  drawHPBar(ctx, x, y - 28 * s, 38 * s, 5 * s, pct, barColor);
 }
 
 // ── Sprite: Turret – high-tech automated sentry (1.5x scale, heavy base, double-barrel, red LED) ──
