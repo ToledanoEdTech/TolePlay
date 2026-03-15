@@ -12,7 +12,7 @@ import {
   createDust, drawDust,
   drawBeam, drawHPBar, drawGlow, colorAlpha, roundRect,
 } from './renderUtils';
-import { playShootSound, playHitSound, playErrorSound, playSuccessSound } from '../../utils/gameSounds';
+import { playShootSound, playLaserSound, playHitSound, playErrorSound, playSuccessSound } from '../../utils/gameSounds';
 
 const WORLD_SIZE = 4000;
 const ZOMBIE_BASE_X = 2000;
@@ -397,6 +397,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       const playerList = Object.values(players || {}).filter(Boolean);
       const sortedIds = [...playerList].map((p: any) => p.id).sort();
       const playerColors = ['#22d3ee', '#a855f7', '#f97316', '#22c55e', '#ec4899', '#eab308', '#06b6d4', '#84cc16'];
+      const isLocalMoving = dir.x !== 0 || dir.y !== 0;
       playerList.forEach((p: any) => {
         const px = p.id === playerId ? posRef.current.x : (p.x ?? ZOMBIE_BASE_X);
         const py = p.id === playerId ? posRef.current.y : (p.y ?? ZOMBIE_BASE_Y);
@@ -408,7 +409,8 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
           : (Math.atan2(ZOMBIE_BASE_Y - py, ZOMBIE_BASE_X - px));
         const colorIndex = sortedIds.indexOf(p.id);
         const color = playerColors[colorIndex % playerColors.length];
-        drawPlayerWithWeapon(ctx, px, py, angle, hp, maxHp, weapon, t, p.id === playerId, color);
+        const isMoving = p.id === playerId ? isLocalMoving : false;
+        drawPlayerWithWeapon(ctx, px, py, angle, hp, maxHp, weapon, t, p.id === playerId, color, isMoving);
         ctx.save();
         ctx.font = 'bold 14px Arial';
         ctx.textAlign = 'center';
@@ -504,7 +506,9 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     const worldY = playerY + (screenY - canvas.height / 2) / CAMERA_ZOOM;
     const weapon = player?.modeState?.weapon ?? 'pistol';
     const wpn = WEAPONS[weapon];
-    const range = wpn ? (weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000) : 1000;
+    const weaponRange = wpn ? (weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000) : 1000;
+    const toScreenEdge = Math.hypot(canvas.width / 2, canvas.height / 2) / CAMERA_ZOOM;
+    const range = Math.max(weaponRange, toScreenEdge);
     const aimAngle = Math.atan2(worldY - playerY, worldX - playerX);
     const endX = playerX + Math.cos(aimAngle) * range;
     const endY = playerY + Math.sin(aimAngle) * range;
@@ -535,6 +539,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     });
     triggerShake(shakeRef.current, 3);
     playShootSound();
+    playLaserSound();
     if (targetId) playHitSound();
   }, [roomCode, playerId, player?.modeState?.ammo, player?.modeState?.weapon, updateMouse]);
 
@@ -849,10 +854,10 @@ function drawZombieHtml(
   ctx.fillRect(x - 15, y - 30, 30 * (Math.max(0, hp) / maxHp), 6);
 }
 
-// ── Player with weapon (like exmpl.html); accentColor for different players ──
+// ── Player with weapon (like exmpl.html); accentColor for different players; legs move only when isMoving ──
 function drawPlayerWithWeapon(
   ctx: CanvasRenderingContext2D, x: number, y: number, angle: number,
-  hp: number, maxHp: number, weaponId: string, t: number, isMe: boolean, accentColor?: string
+  hp: number, maxHp: number, weaponId: string, t: number, isMe: boolean, accentColor?: string, isMoving?: boolean
 ) {
   const bodyColor = accentColor || '#22d3ee';
   const bodyDark = accentColor ? colorAlpha(accentColor, 0.7) : '#0369a1';
@@ -867,7 +872,7 @@ function drawPlayerWithWeapon(
   ctx.fillStyle = colorAlpha(bodyColor, 0.15);
   ctx.fill();
   ctx.rotate(angle);
-  const wC = Math.sin(Date.now() / 150) * 10;
+  const wC = isMoving ? Math.sin(Date.now() / 150) * 10 : 0;
   ctx.fillStyle = '#1e293b';
   ctx.strokeStyle = '#94a3b8';
   ctx.lineWidth = 2;

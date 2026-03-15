@@ -608,16 +608,17 @@ async function startServer() {
         const px = player.x ?? 2000;
         const py = player.y ?? 2150;
         const aimAngle = typeof clientAimAngle === 'number' ? clientAimAngle : Math.atan2(0, 1);
-        const range = weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000;
-        let endX = px + Math.cos(aimAngle) * range;
-        let endY = py + Math.sin(aimAngle) * range;
+        const weaponRange = weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000;
+        const maxHitRange = 3000;
+        let endX = px + Math.cos(aimAngle) * weaponRange;
+        let endY = py + Math.sin(aimAngle) * weaponRange;
         let zombie = targetId ? room.globalState.zombies.find((z: any) => String(z.id) === String(targetId)) : null;
         if (!zombie && room.globalState.zombies.length > 0) {
           let best: any = null;
           let bestScore = -1;
           room.globalState.zombies.forEach((z: any) => {
             const d = Math.hypot(z.x - px, z.y - py);
-            if (d > range) return;
+            if (d > maxHitRange) return;
             const angleToZ = Math.atan2(z.y - py, z.x - px);
             const angleDiff = Math.abs((angleToZ - aimAngle + Math.PI * 2) % (Math.PI * 2));
             const score = d < 1 ? 1e6 : 1 / (d * (0.1 + Math.min(angleDiff, Math.PI * 2 - angleDiff)));

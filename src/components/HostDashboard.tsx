@@ -422,7 +422,17 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
     const reader = new FileReader();
     reader.onload = (evt) => {
       const text = evt.target?.result as string;
-      const lines = text.split('\n').filter(line => line.trim());
+      let lines = text.split('\n').filter(line => line.trim());
+      const isHeaderRow = (cols: string[]) =>
+        cols.length >= 2 &&
+        (cols[0].trim() === 'שאלה' || cols[0].toLowerCase() === 'question') &&
+        (cols[1].includes('תשובה') || cols[1].toLowerCase().includes('answer'));
+      if (lines.length > 0) {
+        const firstCols = lines[0].split(',').map(c => c.trim());
+        if (firstCols.length >= 6 && isHeaderRow(firstCols)) {
+          lines = lines.slice(1);
+        }
+      }
       const parsed = lines.map(line => {
         const cols = line.split(',').map(c => c.trim());
         if (cols.length >= 6) {

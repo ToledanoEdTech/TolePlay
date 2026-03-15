@@ -25,6 +25,24 @@ export function playShootSound() {
   osc.stop(ctx.currentTime + 0.08);
 }
 
+export function playLaserSound() {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') ctx.resume();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  const now = ctx.currentTime;
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(1200, now);
+  osc.frequency.exponentialRampToValueAtTime(400, now + 0.06);
+  gain.gain.setValueAtTime(0.12, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+  osc.start(now);
+  osc.stop(now + 0.06);
+}
+
 export function playHitSound() {
   const ctx = getAudioContext();
   if (!ctx) return;
