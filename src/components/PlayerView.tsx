@@ -21,9 +21,12 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
   const [winner, setWinner] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [lobbyCount, setLobbyCount] = useState(0);
+  const [ctfHudSnapshot, setCtfHudSnapshot] = useState<{ redScore: number; blueScore: number; gameOver: any; myPlayer: any } | null>(null);
 
   const playerIdRef = useRef<string>('');
   const roomRef = useRef<any>(null);
+  const gameStateRef = useRef<{ players: Record<string, any>; globalState: any }>({ players: {}, globalState: {} });
+  const lastCtfHudUpdate = useRef(0);
 
   useEffect(() => {
     if (autoJoin && initialCode && initialName && gameState === 'join') {
@@ -60,11 +63,24 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
     const onGameStarted = (r: any) => {
       roomRef.current = r;
       setRoom(r);
-      setAllPlayers(r.players || {});
-      setGlobalState(r.globalState || {});
+      const players = r.players || {};
+      const gs = r.globalState || {};
+      gameStateRef.current = { players, globalState: gs };
+      if (r.mode === 'ctf') {
+        const myId = playerIdRef.current;
+        setCtfHudSnapshot({
+          redScore: gs.redScore ?? 0,
+          blueScore: gs.blueScore ?? 0,
+          gameOver: gs.gameOver ?? null,
+          myPlayer: myId && players[myId] ? { ...players[myId], id: myId } : null,
+        });
+      } else {
+        setAllPlayers(players);
+        setGlobalState(gs);
+      }
       const myId = playerIdRef.current;
-      if (myId && r.players[myId]) {
-        setPlayer({ ...r.players[myId], id: myId });
+      if (myId && players[myId]) {
+        setPlayer({ ...players[myId], id: myId });
       }
       setGameState('playing');
     };
@@ -76,13 +92,31 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
     };
     const onGlobalState = (state: any) => setGlobalState(state);
     const onTick = (data: any) => {
-      setAllPlayers(data.players || {});
-      setGlobalState(data.globalState || {});
+      const players = data.players || {};
+      const globalState = data.globalState || {};
+      gameStateRef.current = { players, globalState };
+      const mode = roomRef.current?.mode;
+      if (mode === 'ctf') {
+        const now = Date.now();
+        if (now - lastCtfHudUpdate.current >= 250) {
+          lastCtfHudUpdate.current = now;
+          const myId = playerIdRef.current;
+          setCtfHudSnapshot({
+            redScore: globalState.redScore ?? 0,
+            blueScore: globalState.blueScore ?? 0,
+            gameOver: globalState.gameOver ?? null,
+            myPlayer: myId && players[myId] ? { ...players[myId], id: myId } : null,
+          });
+        }
+        return;
+      }
+      setAllPlayers(players);
+      setGlobalState(globalState);
       const myId = playerIdRef.current;
-      if (myId && data.players[myId]) {
+      if (myId && players[myId]) {
         setPlayer((prev: any) => {
           if (!prev) return prev;
-          return { ...data.players[myId], id: myId };
+          return { ...players[myId], id: myId };
         });
       }
     };
@@ -255,6 +289,11 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
     allPlayers,
     startTime: room?.startTime,
   };
+  const ctfGameProps = {
+    ...gameProps,
+    gameStateRef,
+    hudSnapshot: ctfHudSnapshot,
+  };
 
   return (
     <div className="h-screen w-full overflow-hidden bg-[#070b18]" dir="rtl">
@@ -262,7 +301,7 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
       {mode === 'economy' && <EconomyMarathonGame {...gameProps} />}
       {mode === 'boss' && <BossBattleGame {...gameProps} />}
       {mode === 'farm' && <AsteroidHuntGame {...gameProps} />}
-      {mode === 'ctf' && <CTFGame {...gameProps} />}
+      {mode === 'ctf' && <CTFGame {...ctfGameProps} />}
       {!mode && (
         <div className="flex items-center justify-center h-full bg-[#070b18] text-white">
           <p className="text-slate-400">טוען משחק...</p>

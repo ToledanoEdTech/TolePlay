@@ -262,3 +262,18 @@ input:focus {
     flex-shrink: 0;
   }
 }
+
+/* CTF game: mobile viewport and touch controls */
+@media (max-width: 768px) {
+  .ctf-game-container {
+    min-height: 100dvh;
+    min-height: 100vh;
+    width: 100%;
+    position: relative;
+  }
+  .ctf-game-container canvas {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain;
+  }
+}

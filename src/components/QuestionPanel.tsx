@@ -111,7 +111,7 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
       setShowFloat(true);
       spawnConfetti();
       onCorrect();
-      setTimeout(() => { setShowFloat(false); next(); }, 1400);
+      setTimeout(() => { setShowFloat(false); next(); }, 1200);
     } else {
       setFeedback('wrong');
       onWrong?.();
@@ -126,29 +126,30 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
   if (!q) return null;
 
   return (
-    <div className={`relative ${compact ? 'p-3' : 'p-5'} text-white`}>
-      {/* Confetti - fixed at top, doesn't cover question content */}
-      <canvas
-        ref={canvasRef}
-        width={400}
-        height={120}
-        className="absolute top-0 left-0 right-0 h-[120px] pointer-events-none z-0"
-      />
-
-      <AnimatePresence mode="wait">
+    <div className={`relative ${compact ? 'p-3' : 'p-5'} text-white flex flex-col`}>
+      {/* Correct feedback: fixed banner at top, never overlaps question */}
+      <AnimatePresence>
         {showFloat && (
           <motion.div
-            initial={{ opacity: 1, y: 0, scale: 1 }}
-            animate={{ opacity: 0, y: -60, scale: 2.2 }}
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.7 }}
-            className="absolute top-2 left-1/2 -translate-x-1/2 text-2xl font-black text-emerald-400 z-50 pointer-events-none"
-            style={{ filter: 'drop-shadow(0 0 12px rgba(16,185,129,0.8))' }}
+            className="w-full mb-4 py-3 px-4 rounded-xl bg-emerald-600/90 border-2 border-emerald-400 text-center z-10 shrink-0"
+            style={{ color: '#fff', fontWeight: 'bold', boxShadow: '0 0 20px rgba(16,185,129,0.4)' }}
           >
-            {earnLabel}
+            <span className="text-lg md:text-xl">נכון!</span>
+            <span className="block text-sm md:text-base mt-1 text-emerald-100">{earnLabel}</span>
           </motion.div>
         )}
       </AnimatePresence>
+
+      <canvas
+        ref={canvasRef}
+        width={400}
+        height={80}
+        className="absolute top-0 left-0 right-0 h-[80px] pointer-events-none z-0 opacity-0"
+        aria-hidden
+      />
 
       <AnimatePresence>
         {locked && (

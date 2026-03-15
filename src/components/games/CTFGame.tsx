@@ -1,17 +1,38 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Trophy, Heart, ShieldAlert, BookOpen, CheckCircle, XCircle, ShoppingCart, Coins } from 'lucide-react';
 import { QuestionPanel } from '../QuestionPanel';
 import { socket } from '../../socket';
-import { CTF_MAP } from '../../engine/maps/ctfMap';
-import { createCamera, updateCamera, isInView, isRectInView } from '../../engine/camera';
-import { resolveCircleWallCollisions } from '../../engine/physics';
-import { createInputState, getMoveDirection, setupKeyboardListeners } from '../../engine/input';
-import { VirtualJoystick } from '../../engine/VirtualJoystick';
 import {
-  type Particle, type ShakeState,
-  tickParticles, tickShake, drawGlow, colorAlpha, emitBurst, triggerShake,
-} from './renderUtils';
-import type { CameraState, Rect } from '../../engine/types';
+  WORLD_W,
+  WORLD_H,
+  RED_BASE_X,
+  RED_BASE_Y,
+  BLUE_BASE_X,
+  BLUE_BASE_Y,
+  BASE_RADIUS,
+  PLAYER_RADIUS,
+  FLAG_RADIUS,
+  MAX_ENERGY,
+  MAX_HEALTH,
+  MAX_AMMO,
+  MOVEMENT_SPEED,
+  SPRINT_MULTIPLIER,
+  CTF_WEAPONS,
+  CTF_WEAPON_LIST,
+  type CTFTeam,
+  type CTFObstacle,
+  type CTFTerrainPatch,
+  type CTFFlagState,
+  type CTFBullet,
+} from '../../constants/ctfConstants';
+import {
+  getCachedAssets,
+  buildSpatialGrid,
+  getVisibleTrees,
+  TREE_TRUNK_HALF,
+  TREE_CANOPY_HALF,
+  BASE_CANVAS_HALF,
+} from './ctfRenderCache';
 
 interface Props {
   roomCode: string;
@@ -20,731 +41,1191 @@ interface Props {
   questions: any[];
   globalState: any;
   allPlayers: Record<string, any>;
+  gameStateRef?: React.MutableRefObject<{ players: Record<string, any>; globalState: any }>;
+  hudSnapshot?: { redScore: number; blueScore: number; gameOver: any; myPlayer: any } | null;
 }
 
-const PLAYER_RADIUS = 18;
-const PLAYER_SPEED = 280;
-const MAP = CTF_MAP;
+interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  maxLife: number;
+  color: string;
+  size: number;
+}
 
-export function CTFGame({ roomCode, playerId, player, questions, globalState, allPlayers }: Props) {
-  const [showQuestions, setShowQuestions] = useState(false);
+// ── Sound engine (Web Audio) ──
+class CTFSoundEngine {
+  private ctx: AudioContext | null = null;
+  init() {
+    if (!this.ctx) this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  }
+  playTone(freq: number, type: OscillatorType, duration: number, vol: number = 0.1, sweep: boolean = false) {
+    if (!this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+    if (sweep) osc.frequency.exponentialRampToValueAtTime(freq / 2, this.ctx.currentTime + duration);
+    gain.gain.setValueAtTime(vol, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start();
+    osc.stop(this.ctx.currentTime + duration);
+  }
+  playShoot(wId: string) {
+    this.init();
+    if (wId === 'shotgun') this.playTone(300, 'square', 0.2, 0.1, true);
+    else if (wId === 'ar') this.playTone(900, 'sawtooth', 0.08, 0.05);
+    else if (wId === 'sniper') this.playTone(150, 'square', 0.4, 0.2, true);
+    else if (wId === 'rocket') this.playTone(100, 'sine', 0.8, 0.3, true);
+    else this.playTone(600, 'square', 0.1, 0.05, true);
+  }
+  playHit() {
+    this.init();
+    this.playTone(200, 'sawtooth', 0.1, 0.1);
+  }
+  playEmpty() {
+    this.init();
+    this.playTone(150, 'square', 0.05, 0.05);
+  }
+  playBuy() {
+    this.init();
+    this.playTone(1200, 'sine', 0.1, 0.1);
+    setTimeout(() => this.playTone(1600, 'sine', 0.2, 0.1), 100);
+  }
+  playCorrect() {
+    this.init();
+    this.playTone(600, 'sine', 0.1, 0.1);
+    setTimeout(() => this.playTone(800, 'sine', 0.2, 0.1), 100);
+  }
+  playWrong() {
+    this.init();
+    this.playTone(300, 'sawtooth', 0.3, 0.1, true);
+  }
+  playCapture() {
+    this.init();
+    this.playTone(400, 'sine', 0.1);
+    setTimeout(() => this.playTone(600, 'sine', 0.1), 100);
+    setTimeout(() => this.playTone(800, 'sine', 0.3), 200);
+  }
+  playDie() {
+    this.init();
+    this.playTone(150, 'sawtooth', 0.4, 0.2, true);
+  }
+}
+const ctfSounds = new CTFSoundEngine();
 
-  const team = player?.modeState?.team || 'red';
-  const energy = Math.floor(player?.resources || 0);
-  const hasFlag = player?.modeState?.hasFlag;
-  const isDead = (player?.modeState?.hp || 100) <= 0;
-  const redScore = globalState?.redScore || 0;
-  const blueScore = globalState?.blueScore || 0;
+function resolveMovement(
+  x: number,
+  y: number,
+  dx: number,
+  dy: number,
+  speed: number,
+  dt: number,
+  obstacles: CTFObstacle[]
+): { x: number; y: number } {
+  const safe = (n: number, fallback: number) => (typeof n === 'number' && isFinite(n) ? n : fallback);
+  const minX = PLAYER_RADIUS;
+  const maxX = WORLD_W - PLAYER_RADIUS;
+  const minY = PLAYER_RADIUS;
+  const maxY = WORLD_H - PLAYER_RADIUS;
+  x = safe(x, minX);
+  y = safe(y, minY);
+  x = Math.max(minX, Math.min(maxX, x));
+  y = Math.max(minY, Math.min(maxY, y));
+  if (!speed || !dt || (dx === 0 && dy === 0)) return { x, y };
+  let nx = x + dx * speed * dt;
+  let ny = y + dy * speed * dt;
+  nx = Math.max(minX, Math.min(maxX, nx));
+  ny = Math.max(minY, Math.min(maxY, ny));
+  const list = Array.isArray(obstacles) ? obstacles : [];
+  const EMBEDDED_THRESH = 1e-6;
+  const MAX_PASSES = 3;
+  for (let pass = 0; pass < MAX_PASSES; pass++) {
+    for (const obs of list) {
+      const ox = safe(obs.x, 0);
+      const oy = safe(obs.y, 0);
+      const rad = safe(obs.radius, 0);
+      if (!isFinite(ox) || !isFinite(oy) || rad <= 0) continue;
+      const minDist = PLAYER_RADIUS + rad;
+      let dist = Math.hypot(nx - ox, ny - oy);
+      if (dist >= minDist) continue;
+      if (dist <= EMBEDDED_THRESH) {
+        nx = ox + minDist;
+        ny = oy;
+        dist = minDist;
+      } else {
+        const overlap = minDist - dist;
+        const nxNorm = (nx - ox) / dist;
+        const nyNorm = (ny - oy) / dist;
+        nx += nxNorm * overlap;
+        ny += nyNorm * overlap;
+      }
+      const moveX = nx - x;
+      const moveY = ny - y;
+      const normalX = (nx - ox) / dist;
+      const normalY = (ny - oy) / dist;
+      const dot = moveX * normalX + moveY * normalY;
+      if (dot < 0) {
+        nx -= dot * normalX;
+        ny -= dot * normalY;
+      }
+      nx = Math.max(minX, Math.min(maxX, nx));
+      ny = Math.max(minY, Math.min(maxY, ny));
+    }
+  }
+  if (!isFinite(nx) || !isFinite(ny)) return { x, y };
+  nx = Math.max(minX, Math.min(maxX, nx));
+  ny = Math.max(minY, Math.min(maxY, ny));
+  return { x: nx, y: ny };
+}
+
+const LERP_MS = 50;
+const VIEWPORT_BUFFER = 120;
+const HUD_THROTTLE_MS = 250;
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * Math.max(0, Math.min(1, t));
+}
+
+export function CTFGame({ roomCode, playerId, player, questions, globalState, allPlayers, gameStateRef: externalGameStateRef, hudSnapshot }: Props) {
+  const [messages, setMessages] = useState<{ id: number; text: string }[]>([]);
+  const [showQuestion, setShowQuestion] = useState(false);
+  const [showShop, setShowShop] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const gsRef = useRef(globalState);
-  const playersRef = useRef(allPlayers);
-  const posRef = useRef({
-    x: player?.x || (team === 'red' ? MAP.redSpawn.x : MAP.blueSpawn.x),
-    y: player?.y || (team === 'red' ? MAP.redSpawn.y : MAP.blueSpawn.y),
-  });
-  const inputRef = useRef(createInputState());
-  const cameraRef = useRef<CameraState>(createCamera());
-  const camInitRef = useRef(false);
-  const lastSyncRef = useRef(0);
+  const stateRef = useRef({ globalState, allPlayers });
   const particlesRef = useRef<Particle[]>([]);
-  const shakeRef = useRef<ShakeState>({ intensity: 0, offsetX: 0, offsetY: 0 });
-  const timeRef = useRef(0);
-  const trailRef = useRef<Array<{ x: number; y: number; life: number; color: string }>>([]);
-  const captureFxRef = useRef<{ team: string; x: number; y: number; t: number } | null>(null);
-  const showQRef = useRef(false);
-  const isDeadRef = useRef(false);
-  const teamRef = useRef(team);
-  const energyRef = useRef(energy);
-  const movingRef = useRef(false);
+  const cameraRef = useRef({ x: WORLD_W / 2, y: WORLD_H / 2, shake: 0 });
+  const posRef = useRef({
+    x: player?.x ?? (player?.modeState?.team === 'blue' ? BLUE_BASE_X : RED_BASE_X),
+    y: player?.y ?? (player?.modeState?.team === 'blue' ? BLUE_BASE_Y : RED_BASE_Y),
+  });
+  const inputRef = useRef({
+    up: false,
+    down: false,
+    left: false,
+    right: false,
+    angle: 0,
+    sprint: false,
+    shoot: false,
+  });
+  const msgIdCounter = useRef(0);
+  const serverSnapshotsRef = useRef<{ prev: { t: number; players: Record<string, any>; globalState: any }; curr: { t: number; players: Record<string, any>; globalState: any } }>({ prev: { t: 0, players: {}, globalState: {} }, curr: { t: 0, players: {}, globalState: {} } });
+  const staticMapCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const staticMapDirtyRef = useRef(true);
+  const spatialGridRef = useRef<Map<string, CTFObstacle[]>>(new Map());
+  const cachedAssetsRef = useRef<ReturnType<typeof getCachedAssets> | null>(null);
+  const trailRef = useRef<Record<string, { x: number; y: number; t: number }[]>>({});
+  const TRAIL_LEN = 5;
+  const TRAIL_DECAY = 0.22;
+  const serverTargetRef = useRef<{ x: number; y: number } | null>(null);
+  const DESYNC_IGNORE_PX = 25;
+  const RECONCILE_LERP_SPEED = 8;
+  const VISUAL_LERP = 0.3;
+  const lastSendRef = useRef(0);
+  const lastShootRef = useRef(0);
+  const modalBlockRef = useRef(false);
+  const visualPosRef = useRef({ x: posRef.current.x, y: posRef.current.y });
+  const visualPlayersRef = useRef<Record<string, { x: number; y: number }>>({});
+  const bulletsRef = useRef<CTFBullet[]>([]);
+  const joystickRef = useRef({ dx: 0, dy: 0 });
+  const joystickBaseRef = useRef<HTMLDivElement>(null);
+  if (!cachedAssetsRef.current) cachedAssetsRef.current = getCachedAssets();
 
-  showQRef.current = showQuestions;
-  isDeadRef.current = isDead;
-  teamRef.current = team;
-  energyRef.current = energy;
-  useEffect(() => { gsRef.current = globalState; }, [globalState]);
-  useEffect(() => { playersRef.current = allPlayers; }, [allPlayers]);
+  if (!externalGameStateRef) {
+    stateRef.current = { globalState, allPlayers };
+  }
+
+  if (externalGameStateRef) {
+    stateRef.current = externalGameStateRef.current;
+  }
 
   useEffect(() => {
-    if (player?.x !== undefined && player?.y !== undefined) {
-      const dx = Math.abs(posRef.current.x - player.x);
-      const dy = Math.abs(posRef.current.y - player.y);
-      if (dx > 80 || dy > 80) posRef.current = { x: player.x, y: player.y };
-    }
-  }, [player?.x, player?.y]);
-
-  useEffect(() => setupKeyboardListeners(inputRef.current), []);
+    if (!externalGameStateRef) return;
+    const onTick = (data: any) => {
+      const t = Date.now();
+      const prev = serverSnapshotsRef.current.curr;
+      serverSnapshotsRef.current = {
+        prev: { t: prev.t, players: prev.players, globalState: prev.globalState },
+        curr: { t, players: data.players || {}, globalState: data.globalState || {} },
+      };
+      const me = data.players?.[playerId];
+      if (me && me.x != null && me.y != null) {
+        serverTargetRef.current = { x: me.x, y: me.y };
+      }
+    };
+    socket.on('tick', onTick);
+    return () => { socket.off('tick', onTick); };
+  }, [externalGameStateRef, playerId]);
 
   useEffect(() => {
-    const onTagged = (data: { x: number; y: number }) => {
-      particlesRef.current.push(...emitBurst(data.x, data.y, 24, 120, 0.8, '#f59e0b', 4, { gravity: 0.3, friction: 0.92 }));
-      triggerShake(shakeRef.current, 12);
+    const onMsg = (msg: { text: string }) => {
+      const id = msgIdCounter.current++;
+      setMessages((prev) => [...prev.slice(-3), { id, text: msg.text }]);
+      setTimeout(() => setMessages((prev) => prev.filter((m) => m.id !== id)), 4000);
     };
     const onScored = (data: { team: string; x: number; y: number }) => {
-      captureFxRef.current = { team: data.team, x: data.x, y: data.y, t: 0 };
-      const color = data.team === 'red' ? '#ef4444' : '#3b82f6';
-      particlesRef.current.push(...emitBurst(data.x, data.y, 45, 160, 1.2, color, 5, { gravity: 0.12, friction: 0.95 }));
-      particlesRef.current.push(...emitBurst(data.x, data.y, 20, 100, 0.9, '#fbbf24', 4, { gravity: 0.2, friction: 0.93 }));
-      triggerShake(shakeRef.current, 8);
+      ctfSounds.playCapture();
+      cameraRef.current.shake = 25;
+      const color = data.team === 'red' ? '#ff4444' : '#4444ff';
+      for (let i = 0; i < 150; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 250 + 50;
+        particlesRef.current.push({
+          x: data.x,
+          y: data.y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1,
+          maxLife: 0.5 + Math.random(),
+          color,
+          size: Math.random() * 6 + 2,
+        });
+      }
     };
-    socket.on('ctfTagged', onTagged);
+    const onTagged = () => {
+      ctfSounds.playDie();
+      cameraRef.current.shake = 15;
+    };
+    socket.on('ctfMessage', onMsg);
     socket.on('ctfScored', onScored);
-    return () => { socket.off('ctfTagged', onTagged); socket.off('ctfScored', onScored); };
+    socket.on('ctfTagged', onTagged);
+    return () => {
+      socket.off('ctfMessage', onMsg);
+      socket.off('ctfScored', onScored);
+      socket.off('ctfTagged', onTagged);
+    };
   }, []);
 
-  const onJoystickMove = useCallback((dx: number, dy: number) => {
-    inputRef.current.joystickDir = { x: dx, y: dy };
-    inputRef.current.joystickActive = true;
-  }, []);
-  const onJoystickRelease = useCallback(() => {
-    inputRef.current.joystickDir = { x: 0, y: 0 };
-    inputRef.current.joystickActive = false;
-  }, []);
+  const onCorrect = useCallback(() => {
+    socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: true });
+    ctfSounds.playCorrect();
+  }, [roomCode, playerId]);
+  const onWrong = useCallback(() => {
+    socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: false });
+    ctfSounds.playWrong();
+  }, [roomCode, playerId]);
 
-  // ══════════════════════════════════════════════════════
-  // MAIN GAME LOOP — movement, camera, rendering @ 60fps
-  // ══════════════════════════════════════════════════════
+  const toggleShop = useCallback(() => {
+    if (showQuestion) return;
+    setShowShop((s) => !s);
+    inputRef.current.shoot = false;
+  }, [showQuestion]);
+
+  const openTrivia = useCallback(() => {
+    if (showQuestion || showShop) return;
+    setShowQuestion(true);
+    inputRef.current.shoot = false;
+  }, [showQuestion, showShop]);
+
+  const buyOrEquipWeapon = useCallback(
+    (wId: string) => {
+      const p = stateRef.current.allPlayers?.[playerId] || player;
+      if (!p) return;
+      const inv = p.modeState?.inventory || ['pistol'];
+      const coins = p.modeState?.coins ?? 0;
+      const w = CTF_WEAPONS[wId];
+      if (!w) return;
+      if (inv.includes(wId)) {
+        socket.emit('action', { code: roomCode, playerId, actionType: 'equipWeapon', weaponId: wId });
+        ctfSounds.playBuy();
+      } else if (coins >= w.cost) {
+        socket.emit('buyUpgrade', { code: roomCode, playerId, upgradeId: wId, cost: w.cost });
+        ctfSounds.playBuy();
+      } else {
+        ctfSounds.playWrong();
+      }
+    },
+    [roomCode, playerId, player]
+  );
+
+  // Keyboard & mouse
+  useEffect(() => {
+    const i = inputRef.current;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (showQuestion || showShop) {
+        if (e.code === 'KeyB' || e.key === 'ב') {
+          setShowShop((s) => !s);
+        }
+        return;
+      }
+      if (e.code === 'KeyW' || e.code === 'ArrowUp') i.up = true;
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') i.down = true;
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') i.left = true;
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') i.right = true;
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') i.sprint = true;
+      if (e.code === 'KeyQ' || e.code === 'Slash') openTrivia();
+      if (['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].includes(e.code)) {
+        const idx = parseInt(e.code.replace('Digit', ''), 10) - 1;
+        if (idx < CTF_WEAPON_LIST.length) {
+          const wId = CTF_WEAPON_LIST[idx].id;
+          const inv = (stateRef.current.allPlayers?.[playerId] || player)?.modeState?.inventory || ['pistol'];
+          if (inv.includes(wId)) socket.emit('action', { code: roomCode, playerId, actionType: 'equipWeapon', weaponId: wId });
+        }
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'KeyW' || e.code === 'ArrowUp') i.up = false;
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') i.down = false;
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') i.left = false;
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') i.right = false;
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') i.sprint = false;
+    };
+    const handleMouseMove = (e: MouseEvent) => {
+      if (showQuestion || showShop) return;
+      const cx = window.innerWidth / 2;
+      const cy = window.innerHeight / 2;
+      i.angle = Math.atan2(e.clientY - cy, e.clientX - cx);
+    };
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button === 0 && !showQuestion && !showShop) i.shoot = true;
+    };
+    const handleMouseUp = (e: MouseEvent) => {
+      if (e.button === 0) i.shoot = false;
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [showQuestion, showShop, roomCode, playerId, player, openTrivia]);
+
+  useEffect(() => {
+    modalBlockRef.current = showQuestion || showShop;
+  }, [showQuestion, showShop]);
+
+  // Map questions format: optional { options, ans } -> { opts, a }
+  const mappedQuestions = (questions || []).map((q: any) =>
+    q.opts != null ? q : { q: q.q, opts: q.options || q.opts || [], a: q.ans ?? q.a ?? 0 }
+  );
+
+  const myPlayer = hudSnapshot?.myPlayer ?? allPlayers?.[playerId] ?? player;
+  const team = (myPlayer?.modeState?.team || 'red') as CTFTeam;
+  const energy = Math.floor(myPlayer?.resources ?? 0);
+  const hasFlag = myPlayer?.modeState?.hasFlag;
+  const isDead = myPlayer?.modeState?.dead;
+  const redScore = hudSnapshot?.redScore ?? globalState?.redScore ?? 0;
+  const blueScore = hudSnapshot?.blueScore ?? globalState?.blueScore ?? 0;
+  const gameOver = hudSnapshot?.gameOver ?? globalState?.gameOver;
+
+  // Render loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    let lastTime = performance.now();
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) return;
     let raf: number;
+    let lastTime = performance.now();
 
-    const loop = (now: number) => {
-      const dt = Math.min((now - lastTime) / 1000, 0.05);
-      lastTime = now;
-      timeRef.current += dt;
-      const t = timeRef.current;
+    const resize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
+    window.addEventListener('resize', resize);
+    resize();
 
-      const parent = canvas.parentElement;
-      if (parent) {
-        const pw = parent.clientWidth;
-        const ph = parent.clientHeight;
-        if (canvas.width !== pw || canvas.height !== ph) {
-          canvas.width = pw;
-          canvas.height = ph;
-        }
-      }
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { raf = requestAnimationFrame(loop); return; }
-
-      const vpW = canvas.width;
-      const vpH = canvas.height;
-      if (vpW === 0 || vpH === 0) { raf = requestAnimationFrame(loop); return; }
-      const gs = gsRef.current;
-      const players = playersRef.current;
-      const cam = cameraRef.current;
-
-      // ── UPDATE ── (block movement when no energy)
-      const canMove = energyRef.current > 0;
-      if (!isDeadRef.current && !showQRef.current && canMove) {
-        const dir = getMoveDirection(inputRef.current);
-        if (dir.x !== 0 || dir.y !== 0) {
-          const resolved = resolveCircleWallCollisions(
-            { x: posRef.current.x + dir.x * PLAYER_SPEED * dt, y: posRef.current.y + dir.y * PLAYER_SPEED * dt },
-            PLAYER_RADIUS, MAP.obstacles,
-          );
-          posRef.current.x = resolved.x;
-          posRef.current.y = resolved.y;
-          movingRef.current = true;
-
-          if (Math.random() > 0.35) {
-            trailRef.current.push({ x: posRef.current.x, y: posRef.current.y, life: 1, color: teamRef.current === 'red' ? '#ef4444' : '#3b82f6' });
-          }
-          if (now - lastSyncRef.current > 50) {
-            socket.emit('updatePosition', { code: roomCode, playerId, x: posRef.current.x, y: posRef.current.y });
-            lastSyncRef.current = now;
-          }
-        } else {
-          movingRef.current = false;
-        }
+    const render = (time: number) => {
+      try {
+      const dt = (time - lastTime) / 1000;
+      lastTime = time;
+      const now = Date.now();
+      let gs: any;
+      let players: Record<string, any>;
+      const snap = serverSnapshotsRef.current;
+      const useLerp = externalGameStateRef && snap.curr.t > 0 && snap.prev.t > 0;
+      if (useLerp) {
+        const denom = snap.curr.t - snap.prev.t || LERP_MS;
+        const alpha = Math.min(1, (now - snap.prev.t) / denom);
+        gs = snap.curr.globalState;
+        const prevP = snap.prev.players;
+        const currP = snap.curr.players;
+        players = {};
+        const allIds = new Set([...Object.keys(prevP), ...Object.keys(currP)]);
+        allIds.forEach((id) => {
+          const a = prevP[id];
+          const b = currP[id];
+          if (!b) return;
+          if (!a) { players[id] = b; return; }
+          players[id] = { ...b, x: lerp(a.x, b.x, alpha), y: lerp(a.y, b.y, alpha) };
+        });
       } else {
-        movingRef.current = false;
+        const src = stateRef.current;
+        gs = src.globalState;
+        players = src.allPlayers || {};
+      }
+      if (!gs) {
+        raf = requestAnimationFrame(render);
+        return;
       }
 
-      if (!camInitRef.current) {
-        cam.x = posRef.current.x - vpW / 2;
-        cam.y = posRef.current.y - vpH / 2;
-        camInitRef.current = true;
-      }
-      updateCamera(cam, posRef.current, vpW, vpH, MAP.width, MAP.height, 0.06);
+      const myP = players?.[playerId] || player;
+      const obstacles = gs?.obstacles || [];
+      const dead = myP?.modeState?.dead ?? false;
+      const energy = myP?.resources ?? 0;
 
-      // ── RENDER ──
-      const shake = tickShake(shakeRef.current);
+      if (playerId) {
+        if (dead && serverTargetRef.current) {
+          posRef.current.x = serverTargetRef.current.x;
+          posRef.current.y = serverTargetRef.current.y;
+          visualPosRef.current.x = serverTargetRef.current.x;
+          visualPosRef.current.y = serverTargetRef.current.y;
+          serverTargetRef.current = null;
+        } else if (!dead && serverTargetRef.current) {
+          const tx = serverTargetRef.current.x;
+          const ty = serverTargetRef.current.y;
+          const desync = Math.hypot(posRef.current.x - tx, posRef.current.y - ty);
+          if (desync < DESYNC_IGNORE_PX) {
+            serverTargetRef.current = null;
+          } else {
+            const k = Math.min(1, RECONCILE_LERP_SPEED * dt);
+            posRef.current.x += (tx - posRef.current.x) * k;
+            posRef.current.y += (ty - posRef.current.y) * k;
+            if (Math.hypot(posRef.current.x - tx, posRef.current.y - ty) < 5) serverTargetRef.current = null;
+          }
+        }
+
+        if (!dead && !modalBlockRef.current) {
+          const i = inputRef.current;
+          let dx = 0, dy = 0;
+          if (i.up) dy -= 1;
+          if (i.down) dy += 1;
+          if (i.left) dx -= 1;
+          if (i.right) dx += 1;
+          dx += joystickRef.current.dx;
+          dy += joystickRef.current.dy;
+          if (dx !== 0 || dy !== 0) {
+            const len = Math.sqrt(dx * dx + dy * dy);
+            dx /= len;
+            dy /= len;
+            const speed = MOVEMENT_SPEED * (i.sprint && energy > 0 ? SPRINT_MULTIPLIER : 1);
+            const resolved = resolveMovement(posRef.current.x, posRef.current.y, dx, dy, speed, dt, obstacles);
+            if (isFinite(resolved.x) && isFinite(resolved.y)) {
+              posRef.current.x = resolved.x;
+              posRef.current.y = resolved.y;
+            }
+          }
+          if (now - lastSendRef.current > 50) {
+            socket.emit('updatePosition', {
+              code: roomCode,
+              playerId,
+              x: posRef.current.x,
+              y: posRef.current.y,
+              angle: i.angle,
+            });
+            lastSendRef.current = now;
+          }
+          if (i.shoot && (myP?.modeState?.ammo ?? 0) > 0 && now - lastShootRef.current > 100) {
+            socket.emit('action', { code: roomCode, playerId, actionType: 'shoot', aimAngle: i.angle });
+            lastShootRef.current = now;
+            const wId = myP.modeState?.currentWeapon || 'pistol';
+            ctfSounds.playShoot(wId);
+            if (myP.modeState.ammo === 1) ctfSounds.playEmpty();
+          } else if (i.shoot && (myP?.modeState?.ammo ?? 0) <= 0 && now - lastShootRef.current > 500) {
+            lastShootRef.current = now;
+            ctfSounds.playEmpty();
+          }
+        }
+      }
+
+      const k = Math.min(1, VISUAL_LERP);
+      if (playerId) {
+        visualPosRef.current.x += (posRef.current.x - visualPosRef.current.x) * k;
+        visualPosRef.current.y += (posRef.current.y - visualPosRef.current.y) * k;
+      }
+      const vp = visualPlayersRef.current;
+      Object.keys(players || {}).forEach((id) => {
+        if (id === playerId) return;
+        const p = players[id];
+        if (!p || p.modeState?.dead) return;
+        const tx = p.x ?? 0;
+        const ty = p.y ?? 0;
+        if (!vp[id]) vp[id] = { x: tx, y: ty };
+        vp[id].x += (tx - vp[id].x) * k;
+        vp[id].y += (ty - vp[id].y) * k;
+      });
+
+      const cam = cameraRef.current;
+      if (myP && !myP.modeState?.dead) {
+        const camX = playerId ? visualPosRef.current.x : myP.x;
+        const camY = playerId ? visualPosRef.current.y : myP.y;
+        cam.x += (camX - cam.x) * 8 * dt;
+        cam.y += (camY - cam.y) * 8 * dt;
+      }
+      let shakeX = 0, shakeY = 0;
+      if (cam.shake > 0) {
+        shakeX = (Math.random() - 0.5) * cam.shake;
+        shakeY = (Math.random() - 0.5) * cam.shake;
+        cam.shake -= dt * 40;
+      }
+
+      ctx.fillStyle = '#1e3f20';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.save();
-      ctx.translate(shake.x, shake.y);
+      ctx.translate(canvas.width / 2 - cam.x + shakeX, canvas.height / 2 - cam.y + shakeY);
 
-      ctx.fillStyle = '#060a14';
-      ctx.fillRect(0, 0, vpW, vpH);
+      const vLeft = cam.x - canvas.width / 2 - VIEWPORT_BUFFER;
+      const vRight = cam.x + canvas.width / 2 + VIEWPORT_BUFFER;
+      const vTop = cam.y - canvas.height / 2 - VIEWPORT_BUFFER;
+      const vBottom = cam.y + canvas.height / 2 + VIEWPORT_BUFFER;
 
-      ctx.save();
-      ctx.scale(cam.zoom, cam.zoom);
-      ctx.translate(-cam.x, -cam.y);
-
-      drawFloor(ctx, cam, vpW, vpH);
-      drawDivider(ctx, t);
-
-      for (const obs of MAP.obstacles) {
-        if (!isRectInView(obs, cam, vpW, vpH, 100)) continue;
-        const type = (obs as any).type || 'wall';
-        if (type === 'house') drawHouse(ctx, obs, t);
-        else if (type === 'crate') drawCrate(ctx, obs, t);
-        else if (type === 'bush') drawBushShape(ctx, obs, t);
-        else drawWallRect(ctx, obs);
+      if (staticMapDirtyRef.current && gs) {
+        const off = document.createElement('canvas');
+        off.width = WORLD_W;
+        off.height = WORLD_H;
+        const octx = off.getContext('2d');
+        if (octx) {
+          octx.fillStyle = '#1e3f20';
+          octx.fillRect(0, 0, WORLD_W, WORLD_H);
+          (gs.terrain || []).forEach((patch: CTFTerrainPatch) => {
+            octx.beginPath();
+            octx.arc(patch.x, patch.y, patch.radius, 0, Math.PI * 2);
+            octx.fillStyle = patch.type === 'dirt' ? '#3a2e1d' : '#18331a';
+            octx.fill();
+          });
+          octx.lineCap = 'round';
+          octx.lineJoin = 'round';
+          octx.beginPath();
+          octx.moveTo(RED_BASE_X, RED_BASE_Y);
+          octx.bezierCurveTo(WORLD_W * 0.3, WORLD_H * 0.2, WORLD_W * 0.7, WORLD_H * 0.8, BLUE_BASE_X, BLUE_BASE_Y);
+          octx.strokeStyle = '#2a2e33';
+          octx.lineWidth = 140;
+          octx.stroke();
+          octx.beginPath();
+          octx.moveTo(RED_BASE_X, RED_BASE_Y);
+          octx.bezierCurveTo(WORLD_W * 0.3, WORLD_H * 0.2, WORLD_W * 0.7, WORLD_H * 0.8, BLUE_BASE_X, BLUE_BASE_Y);
+          octx.strokeStyle = '#eab308';
+          octx.lineWidth = 4;
+          octx.setLineDash([30, 30]);
+          octx.stroke();
+          octx.setLineDash([]);
+          const gridStep = 150;
+          octx.strokeStyle = 'rgba(0, 0, 0, 0.1)';
+          octx.lineWidth = 2;
+          for (let x = 0; x <= WORLD_W; x += gridStep) {
+            octx.beginPath();
+            octx.moveTo(x, 0);
+            octx.lineTo(x, WORLD_H);
+            octx.stroke();
+          }
+          for (let y = 0; y <= WORLD_H; y += gridStep) {
+            octx.beginPath();
+            octx.moveTo(0, y);
+            octx.lineTo(WORLD_W, y);
+            octx.stroke();
+          }
+          octx.strokeStyle = '#ef4444';
+          octx.lineWidth = 10;
+          octx.strokeRect(0, 0, WORLD_W, WORLD_H);
+          (gs.obstacles || []).forEach((obs: CTFObstacle) => {
+            if (obs.type === 'tree') return;
+            octx.fillStyle = 'rgba(0,0,0,0.4)';
+            octx.beginPath();
+            if (obs.type === 'crate') octx.rect(obs.x - obs.radius + 15, obs.y - obs.radius + 15, obs.radius * 2, obs.radius * 2);
+            else octx.arc(obs.x + 15, obs.y + 15, obs.visualRadius, 0, Math.PI * 2);
+            octx.fill();
+            if (obs.type === 'rock') {
+              octx.fillStyle = '#64748b';
+              octx.beginPath();
+              for (let j = 0; j < 6; j++) {
+                const a = (j / 6) * Math.PI * 2 + obs.seed;
+                const r = obs.radius * (0.8 + ((obs.seed * j) % 0.4));
+                octx.lineTo(obs.x + Math.cos(a) * r, obs.y + Math.sin(a) * r);
+              }
+              octx.fill();
+            } else if (obs.type === 'crate') {
+              octx.fillStyle = '#d97706';
+              octx.fillRect(obs.x - obs.radius, obs.y - obs.radius, obs.radius * 2, obs.radius * 2);
+              octx.strokeStyle = '#92400e';
+              octx.lineWidth = 4;
+              octx.strokeRect(obs.x - obs.radius, obs.y - obs.radius, obs.radius * 2, obs.radius * 2);
+            }
+          });
+        }
+        staticMapCanvasRef.current = off;
+        spatialGridRef.current = buildSpatialGrid(gs.obstacles || []);
+        staticMapDirtyRef.current = false;
+      }
+      if (staticMapCanvasRef.current) {
+        ctx.drawImage(staticMapCanvasRef.current, 0, 0, WORLD_W, WORLD_H, 0, 0, WORLD_W, WORLD_H);
       }
 
-      drawBaseHex(ctx, MAP.redFlag.x, MAP.redFlag.y, 'red', t);
-      drawBaseHex(ctx, MAP.blueFlag.x, MAP.blueFlag.y, 'blue', t);
+      const assets = cachedAssetsRef.current!;
+      const visibleTrees = getVisibleTrees(spatialGridRef.current, vLeft, vRight, vTop, vBottom);
 
-      if (gs?.redFlag && !gs.redFlag.carrier) {
-        drawFlagZone(ctx, gs.redFlag.x, gs.redFlag.y, t);
-        drawFlagPole(ctx, gs.redFlag.x, gs.redFlag.y, '#ef4444', t);
-      }
-      if (gs?.blueFlag && !gs.blueFlag.carrier) {
-        drawFlagZone(ctx, gs.blueFlag.x, gs.blueFlag.y, t);
-        drawFlagPole(ctx, gs.blueFlag.x, gs.blueFlag.y, '#3b82f6', t);
+      // Layer 2: Bases (cached), dropped flags, tree trunks (cached)
+      ctx.drawImage(assets.baseRed, RED_BASE_X - BASE_CANVAS_HALF, RED_BASE_Y - BASE_CANVAS_HALF);
+      ctx.drawImage(assets.baseBlue, BLUE_BASE_X - BASE_CANVAS_HALF, BLUE_BASE_Y - BASE_CANVAS_HALF);
+      const drawDroppedFlag = (flag: CTFFlagState, color: string) => {
+        if (flag.carrier) return;
+        if (flag.x < vLeft - 50 || flag.x > vRight + 50 || flag.y < vTop - 50 || flag.y > vBottom + 50) return;
+        const pulse = 1 + Math.sin(time / 200) * 0.1;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(flag.x, flag.y, FLAG_RADIUS * pulse, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(flag.x - 12, flag.y + 18);
+        ctx.lineTo(flag.x - 12, flag.y - 30);
+        ctx.stroke();
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(flag.x - 10, flag.y - 28);
+        ctx.lineTo(flag.x + 20, flag.y - 15);
+        ctx.lineTo(flag.x - 10, flag.y - 2);
+        ctx.fill();
+      };
+      drawDroppedFlag(gs.redFlag || { x: RED_BASE_X, y: RED_BASE_Y, team: 'red', carrier: null }, '#ef4444');
+      drawDroppedFlag(gs.blueFlag || { x: BLUE_BASE_X, y: BLUE_BASE_Y, team: 'blue', carrier: null }, '#3b82f6');
+      for (let i = 0; i < visibleTrees.length; i++) {
+        const obs = visibleTrees[i];
+        ctx.drawImage(assets.treeTrunk, obs.x - TREE_TRUNK_HALF, obs.y - TREE_TRUNK_HALF);
       }
 
-      trailRef.current = trailRef.current.filter(tr => {
-        tr.life -= dt * 1.8;
-        if (tr.life <= 0) return false;
-        ctx.globalAlpha = tr.life * 0.5;
-        ctx.fillStyle = tr.color;
-        ctx.shadowBlur = 4;
-        ctx.shadowColor = tr.color;
-        ctx.beginPath(); ctx.arc(tr.x, tr.y, 4, 0, Math.PI * 2); ctx.fill();
-        ctx.shadowBlur = 0;
+      // Layer 3: Bullets — sync from server (add/remove only), extrapolate position every frame
+      const serverBullets = gs.bullets || [];
+      const bulletList = bulletsRef.current;
+      serverBullets.forEach((sb: CTFBullet) => {
+        if (!bulletList.find((b) => b.id === sb.id)) {
+          bulletList.push({
+            id: sb.id,
+            x: sb.x,
+            y: sb.y,
+            vx: sb.vx,
+            vy: sb.vy,
+            team: sb.team,
+            ownerId: sb.ownerId,
+            damage: sb.damage,
+            color: sb.color,
+          });
+        }
+      });
+      bulletsRef.current = bulletList.filter((b) => serverBullets.some((s: CTFBullet) => s.id === b.id));
+      bulletsRef.current.forEach((b) => {
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+      });
+      bulletsRef.current.forEach((b: CTFBullet) => {
+        if (b.x < vLeft - 20 || b.x > vRight + 20 || b.y < vTop - 20 || b.y > vBottom + 20) return;
+        ctx.fillStyle = b.color;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.damage > 50 ? 8 : 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = b.color;
+        ctx.lineWidth = b.damage > 50 ? 5 : 3;
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(b.x - b.vx * 0.04, b.y - b.vy * 0.04);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      });
+
+      // Particles
+      particlesRef.current = particlesRef.current.filter((p) => {
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt;
+        if (p.life <= 0) return false;
+        ctx.globalAlpha = p.life / p.maxLife;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
         return true;
       });
-      ctx.globalAlpha = 1;
 
-      Object.values(players || {}).forEach((p: any) => {
-        const isMe = p.id === playerId;
-        const px = isMe ? posRef.current.x : p.x;
-        const py = isMe ? posRef.current.y : p.y;
-        if (!isInView(cam, { x: px, y: py }, 50, vpW, vpH)) return;
-        const alive = (p.modeState?.hp || 100) > 0;
-        if (!alive) { drawGhost(ctx, px, py); return; }
-        const moving = isMe ? movingRef.current : false;
-        drawCharacter(ctx, px, py, p.modeState?.team, isMe, t, p.modeState?.hasFlag, p.name, moving);
+      // Layer 3 (continued): Motion trails then players (bobbing, helmet, vest, weapon)
+      const playersList = Object.values(players || {});
+      if (!trailRef.current) trailRef.current = {};
+      playersList.forEach((p: any) => {
+        if (p.modeState?.dead) return;
+        const px = p.id === playerId ? visualPosRef.current.x : (vp[p.id]?.x ?? p.x);
+        const py = p.id === playerId ? visualPosRef.current.y : (vp[p.id]?.y ?? p.y);
+        if (!trailRef.current[p.id]) trailRef.current[p.id] = [];
+        const trail = trailRef.current[p.id];
+        const last = trail[trail.length - 1];
+        const dist = last ? Math.hypot(px - last.x, py - last.y) : 10;
+        if (dist > 3 || trail.length === 0) {
+          trail.push({ x: px, y: py, t: time });
+          if (trail.length > TRAIL_LEN) trail.shift();
+        }
       });
+      playersList
+        .sort((a: any, b: any) => (a.y ?? 0) - (b.y ?? 0))
+        .forEach((p: any) => {
+          if (p.modeState?.dead) return;
+          const px = p.id === playerId ? visualPosRef.current.x : (vp[p.id]?.x ?? p.x);
+          const py = p.id === playerId ? visualPosRef.current.y : (vp[p.id]?.y ?? p.y);
+          if (px < vLeft - 80 || px > vRight + 80 || py < vTop - 80 || py > vBottom + 80) return;
 
-      particlesRef.current = tickParticles(ctx, particlesRef.current);
+          const angle = p.modeState?.angle ?? 0;
+          const trail = trailRef.current[p.id] || [];
+          const vel = trail.length >= 2 ? Math.hypot(trail[trail.length - 1].x - trail[0].x, trail[trail.length - 1].y - trail[0].y) / Math.max(1, trail.length) : 0;
 
-      if (captureFxRef.current) {
-        captureFxRef.current.t += dt;
-        const cf = captureFxRef.current;
-        if (cf.t < 1.5) {
-          const yOff = cf.t * 80;
-          const alpha = cf.t < 0.4 ? cf.t * 2.5 : cf.t > 1.2 ? (1.5 - cf.t) / 0.3 : 1;
-          ctx.globalAlpha = alpha;
-          ctx.fillStyle = cf.team === 'red' ? '#ef4444' : '#3b82f6';
-          ctx.strokeStyle = '#fff';
-          ctx.lineWidth = 5;
-          ctx.font = 'bold 32px sans-serif';
+          const bob = Math.sin(time * 0.008) * 1.5 + (vel > 5 ? Math.sin(time * 0.02) * 3 : 0);
+          const sway = vel > 5 ? Math.sin(time * 0.015) * 4 : Math.sin(time * 0.006) * 2;
+          const pColor = p.modeState?.team === 'red' ? '#ef4444' : '#3b82f6';
+          const pDark = p.modeState?.team === 'red' ? '#991b1b' : '#1e40af';
+          const visorGlow = p.modeState?.team === 'red' ? 'rgba(239,68,68,0.7)' : 'rgba(96,165,250,0.7)';
+
+          for (let ti = 0; ti < trail.length; ti++) {
+            const pt = trail[ti];
+            const age = (time - pt.t) * 0.002;
+            const alpha = Math.max(0, 1 - age - ti * TRAIL_DECAY);
+            if (alpha <= 0) continue;
+            ctx.save();
+            ctx.translate(pt.x, pt.y);
+            ctx.globalAlpha = alpha * 0.5;
+            ctx.fillStyle = p.modeState?.team === 'red' ? '#ef4444' : '#3b82f6';
+            ctx.beginPath();
+            ctx.ellipse(0, 0, PLAYER_RADIUS * 1.1, PLAYER_RADIUS * 0.95, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.restore();
+          }
+
+          ctx.save();
+          ctx.translate(px, py + bob);
+          ctx.rotate(angle);
+
+          ctx.fillStyle = '#1e293b';
+          ctx.beginPath();
+          ctx.ellipse(-4, 14 + sway * 0.3, 10, 12, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(-4, -14 - sway * 0.3, 10, 12, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = pDark;
+          ctx.strokeStyle = '#0f172a';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, PLAYER_RADIUS * 1.05, PLAYER_RADIUS * 0.9, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = '#334155';
+          ctx.beginPath();
+          ctx.moveTo(-18, 8);
+          ctx.lineTo(-18, -8);
+          ctx.lineTo(-8, -12);
+          ctx.lineTo(PLAYER_RADIUS + 4, 0);
+          ctx.lineTo(-8, 12);
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = '#475569';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          const wLen = p.modeState?.currentWeapon === 'sniper' ? 42 : p.modeState?.currentWeapon === 'rocket' ? 38 : 28;
+          const gunX = PLAYER_RADIUS + 14 + Math.sin(sway * 0.05) * 2;
+          const gunY = sway * 0.4;
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(gunX, gunY - 4, wLen, 8);
+          ctx.strokeStyle = '#334155';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.fillStyle = CTF_WEAPONS[p.modeState?.currentWeapon || 'pistol']?.color || '#fff';
+          ctx.fillRect(gunX + wLen - 14, gunY - 3, 10, 6);
+          ctx.fillStyle = '#64748b';
+          ctx.fillRect(gunX + 2, gunY - 2, 8, 4);
+
+          ctx.beginPath();
+          ctx.arc(0, -2, PLAYER_RADIUS * 0.85, 0, Math.PI * 2);
+          ctx.fillStyle = '#1e293b';
+          ctx.fill();
+          ctx.strokeStyle = '#0f172a';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(0, -2, PLAYER_RADIUS * 0.6, 0, Math.PI * 2);
+          ctx.fillStyle = pColor;
+          ctx.fill();
+          ctx.strokeStyle = pDark;
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.ellipse(PLAYER_RADIUS * 0.25, -2, PLAYER_RADIUS * 0.4, PLAYER_RADIUS * 0.32, 0, -Math.PI / 2.2, Math.PI / 2.2);
+          ctx.fillStyle = visorGlow;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          ctx.restore();
+          ctx.save();
+          ctx.translate(px, py + bob);
+          ctx.fillStyle = 'white';
+          ctx.font = 'bold 14px "Segoe UI", Arial';
           ctx.textAlign = 'center';
-          ctx.strokeText('+1 נקודה!', cf.x, cf.y - yOff);
-          ctx.fillText('+1 נקודה!', cf.x, cf.y - yOff);
-          ctx.globalAlpha = 1;
-        } else captureFxRef.current = null;
-      }
-      ctx.restore(); // camera
+          ctx.fillText(`${p.name} [${p.modeState?.ammo ?? 0}]`, 0, -52);
+          const barW = 40;
+          ctx.fillStyle = '#ef4444';
+          ctx.fillRect(-barW / 2, -45, barW, 5);
+          ctx.fillStyle = '#22c55e';
+          ctx.fillRect(-barW / 2, -45, barW * ((p.modeState?.hp ?? 100) / MAX_HEALTH), 5);
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(-barW / 2, -45, barW, 5);
+          if (gs.redFlag?.carrier === p.id || gs.blueFlag?.carrier === p.id) {
+            const flagColor = gs.redFlag?.carrier === p.id ? '#ef4444' : '#3b82f6';
+            ctx.fillStyle = flagColor;
+            ctx.beginPath();
+            ctx.moveTo(0, -78);
+            ctx.lineTo(15, -68);
+            ctx.lineTo(0, -58);
+            ctx.fill();
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+          ctx.restore();
+        });
 
-      drawMinimap(ctx, vpW, vpH, cam, players, gs, playerId);
-
-      if (captureFxRef.current && captureFxRef.current.t < 0.2) {
-        ctx.globalAlpha = (1 - captureFxRef.current.t / 0.2) * 0.35;
-        ctx.fillStyle = captureFxRef.current.team === 'red' ? '#ef4444' : '#3b82f6';
-        ctx.fillRect(0, 0, vpW, vpH);
-        ctx.globalAlpha = 1;
+      // Layer 4: Tree canopies (drawn last so players under trees are hidden)
+      for (let i = 0; i < visibleTrees.length; i++) {
+        const obs = visibleTrees[i];
+        ctx.drawImage(assets.treeCanopy, obs.x - TREE_CANOPY_HALF, obs.y - TREE_CANOPY_HALF);
       }
-      ctx.restore(); // shake
-      raf = requestAnimationFrame(loop);
+
+      ctx.restore();
+
+      // Minimap
+      const mapW = 240;
+      const mapH = 144;
+      const mapX = canvas.width - mapW - 20;
+      const mapY = canvas.height - mapH - 20;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+      ctx.beginPath();
+      (ctx as any).roundRect?.(mapX, mapY, mapW, mapH, 12);
+      ctx.fill();
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
+      ctx.beginPath();
+      ctx.arc(mapX + (RED_BASE_X / WORLD_W) * mapW, mapY + (RED_BASE_Y / WORLD_H) * mapH, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.3)';
+      ctx.beginPath();
+      ctx.arc(mapX + (BLUE_BASE_X / WORLD_W) * mapW, mapY + (BLUE_BASE_Y / WORLD_H) * mapH, 8, 0, Math.PI * 2);
+      ctx.fill();
+      playersList.forEach((p: any) => {
+        if (p.modeState?.dead) return;
+        const px = mapX + (p.id === playerId ? visualPosRef.current.x : (vp[p.id]?.x ?? p.x)) / WORLD_W * mapW;
+        const py = mapY + (p.id === playerId ? visualPosRef.current.y : (vp[p.id]?.y ?? p.y)) / WORLD_H * mapH;
+        ctx.fillStyle = p.id === playerId ? '#ffffff' : (p.modeState?.team === 'red' ? '#ef4444' : '#3b82f6');
+        ctx.beginPath();
+        ctx.arc(px, py, p.id === playerId ? 4 : 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      const drawMapFlag = (f: CTFFlagState, c: string) => {
+        const px = mapX + (f.x / WORLD_W) * mapW;
+        const py = mapY + (f.y / WORLD_H) * mapH;
+        ctx.fillStyle = c;
+        ctx.fillRect(px - 3, py - 3, 6, 6);
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(px - 3, py - 3, 6, 6);
+      };
+      drawMapFlag(gs.redFlag || { x: RED_BASE_X, y: RED_BASE_Y, team: 'red', carrier: null }, '#ef4444');
+      drawMapFlag(gs.blueFlag || { x: BLUE_BASE_X, y: BLUE_BASE_Y, team: 'blue', carrier: null }, '#3b82f6');
+      } catch (err) {
+        console.error('Render error:', err);
+      }
+      raf = requestAnimationFrame(render);
     };
+    raf = requestAnimationFrame(render);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', resize);
+    };
+  }, [playerId, player]);
 
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [roomCode, playerId]);
-
-  const onCorrect = () => socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: true });
-  const onWrong = () => socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: false });
-
-  const teamBorder = team === 'red' ? 'rgba(239,68,68,0.3)' : 'rgba(59,130,246,0.3)';
+  const handleJoystickStart = (e: React.TouchEvent) => {
+    e.preventDefault();
+  };
+  const handleJoystickMove = (e: React.TouchEvent) => {
+    e.preventDefault();
+    const el = joystickBaseRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const t = e.touches[0];
+    if (!t) return;
+    let dx = (t.clientX - cx) / (rect.width / 2);
+    let dy = (t.clientY - cy) / (rect.height / 2);
+    const len = Math.hypot(dx, dy);
+    if (len > 1) {
+      dx /= len;
+      dy /= len;
+    }
+    joystickRef.current = { dx, dy };
+  };
+  const handleJoystickEnd = () => {
+    joystickRef.current = { dx: 0, dy: 0 };
+  };
+  const handleShootTouchStart = (e: React.TouchEvent) => {
+    e.preventDefault();
+    inputRef.current.shoot = true;
+  };
+  const handleShootTouchEnd = (e: React.TouchEvent) => {
+    e.preventDefault();
+    inputRef.current.shoot = false;
+  };
 
   return (
-    <div className="fixed inset-0 flex flex-col bg-[#060a14] text-white overflow-hidden">
-      {/* ── Score HUD (Brawl Stars style) ── */}
-      <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between p-3 px-5 bg-gradient-to-b from-black/70 via-black/30 to-transparent pointer-events-none">
-        <div className="flex items-center gap-4 pointer-events-auto">
-          <div className="flex items-center gap-4 bg-black/60 backdrop-blur-xl rounded-2xl px-6 py-3 border-2 border-slate-600/40 shadow-[0_4px_20px_rgba(0,0,0,0.4)]">
-            <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-red-400 to-red-600 shadow-[0_0_12px_rgba(239,68,68,0.6)] ring-2 ring-red-500/50" />
-              <span className="text-2xl font-black text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]">{redScore}</span>
+    <div className="relative w-screen h-screen overflow-hidden bg-slate-950 select-none font-sans ctf-game-container" dir="rtl" onContextMenu={(e) => e.preventDefault()}>
+      <canvas ref={canvasRef} className="absolute inset-0 z-0 w-full h-full" style={{ width: '100%', height: '100%' }} />
+      {/* Mobile: virtual joystick (bottom-left) and shoot button (bottom-right) — visible only @ max-width: 768px */}
+      <div
+        ref={joystickBaseRef}
+        className="md:hidden fixed bottom-6 left-6 w-28 h-28 rounded-full bg-white/20 border-2 border-white/50 touch-none flex items-center justify-center z-30 cursor-pointer select-none"
+        style={{ touchAction: 'none' }}
+        onTouchStart={handleJoystickStart}
+        onTouchMove={handleJoystickMove}
+        onTouchEnd={handleJoystickEnd}
+        onTouchCancel={handleJoystickEnd}
+      >
+        <div className="w-10 h-10 rounded-full bg-white/50" />
+      </div>
+      <div
+        className="md:hidden fixed bottom-6 right-6 w-20 h-20 rounded-full bg-red-500/80 border-2 border-white flex items-center justify-center text-3xl touch-none z-30 cursor-pointer select-none"
+        style={{ touchAction: 'none' }}
+        onTouchStart={handleShootTouchStart}
+        onTouchEnd={handleShootTouchEnd}
+        onTouchCancel={handleShootTouchEnd}
+      >
+        🔫
+      </div>
+
+      {/* HUD */}
+      <div className="absolute top-0 left-0 right-0 p-4 z-10 flex justify-between items-start pointer-events-none">
+        <div className="flex items-center gap-8 bg-slate-900/90 backdrop-blur-md border-b-2 border-slate-700/50 px-8 py-4 rounded-b-3xl shadow-2xl pointer-events-auto transform -translate-y-4 hover:translate-y-0 transition-transform">
+          <div className="flex flex-col items-center">
+            <span className="text-blue-400 font-bold text-sm tracking-widest uppercase">צוות כחול</span>
+            <span className="text-5xl font-black text-white drop-shadow-md">{blueScore}</span>
+          </div>
+          <div className="text-slate-600 font-black text-3xl italic">VS</div>
+          <div className="flex flex-col items-center">
+            <span className="text-red-400 font-bold text-sm tracking-widest uppercase">צוות אדום</span>
+            <span className="text-5xl font-black text-white drop-shadow-md">{redScore}</span>
+          </div>
+        </div>
+
+        {myPlayer && (
+          <div className="flex flex-col gap-3 items-end pointer-events-auto w-72">
+            <div className="bg-slate-900/90 backdrop-blur-md border border-slate-700/50 px-5 py-2 rounded-2xl flex flex-col w-full shadow-lg">
+              <div className="flex items-center justify-between border-b border-slate-700 pb-2 mb-2">
+                <div className="flex items-center gap-2">
+                  <div className={`w-3 h-3 rounded-full ${team === 'red' ? 'bg-red-500' : 'bg-blue-500'}`} />
+                  <span className="text-white font-bold text-lg">{myPlayer.name}</span>
+                </div>
+                <div className="flex items-center gap-1 text-yellow-400 font-black text-xl">
+                  {myPlayer.modeState?.coins ?? 0} <Coins className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-sm font-bold">תחמושת:</span>
+                <div className="font-mono font-black text-xl">
+                  <span className={(myPlayer.modeState?.ammo ?? 0) === 0 ? 'text-red-500 animate-pulse' : 'text-white'}>
+                    {myPlayer.modeState?.ammo ?? 0}
+                  </span>
+                  <span className="text-sm text-slate-500">/{MAX_AMMO}</span>
+                </div>
+              </div>
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-slate-400 text-sm font-bold">נשק:</span>
+                <span className="text-emerald-400 font-bold" style={{ color: CTF_WEAPONS[myPlayer.modeState?.currentWeapon || 'pistol']?.color }}>
+                  {CTF_WEAPONS[myPlayer.modeState?.currentWeapon || 'pistol']?.name}
+                </span>
+              </div>
             </div>
-            <span className="text-slate-500 font-black text-sm mx-1">VS</span>
-            <div className="flex items-center gap-2">
-              <span className="text-2xl font-black text-blue-400 drop-shadow-[0_0_8px_rgba(59,130,246,0.5)]">{blueScore}</span>
-              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 shadow-[0_0_12px_rgba(59,130,246,0.6)] ring-2 ring-blue-500/50" />
+            <div className="bg-slate-900/90 backdrop-blur-md border border-slate-700/50 p-3 rounded-2xl flex items-center gap-3 w-full shadow-lg">
+              <Heart className="w-6 h-6 text-red-500 drop-shadow" fill="currentColor" />
+              <div className="flex-1 h-4 bg-slate-800 rounded-full overflow-hidden relative shadow-inner">
+                <div
+                  className="absolute top-0 bottom-0 right-0 bg-gradient-to-l from-green-400 to-green-600 transition-all duration-200"
+                  style={{ width: `${((myPlayer.modeState?.hp ?? 100) / MAX_HEALTH) * 100}%` }}
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 w-full mt-2">
+              <button
+                onClick={openTrivia}
+                className="flex-1 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-slate-900 font-black py-3 rounded-2xl flex items-center justify-center gap-2 shadow-lg hover:scale-105 transition-transform"
+              >
+                <BookOpen className="w-5 h-5" />
+                +תחמושת
+              </button>
+              <button
+                onClick={toggleShop}
+                className="flex-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white font-black py-3 rounded-2xl flex items-center justify-center gap-2 shadow-lg hover:scale-105 transition-transform"
+              >
+                <ShoppingCart className="w-5 h-5" />
+                חנות
+              </button>
+            </div>
+            {isDead && (
+              <div className="text-red-500 font-black text-xl animate-bounce bg-slate-900/95 border-2 border-red-500/50 px-6 py-3 rounded-2xl shadow-[0_0_30px_rgba(239,68,68,0.3)] flex items-center gap-3 mt-4">
+                <ShieldAlert className="w-8 h-8" />
+                חזרה בעוד {Math.ceil(myPlayer.modeState?.respawnTimer ?? 0)}...
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Messages */}
+      <div className="absolute top-40 left-1/2 -translate-x-1/2 flex flex-col items-center gap-3 z-20 pointer-events-none w-full max-w-lg">
+        {messages.map((msg) => (
+          <div key={msg.id} className="bg-slate-800/95 text-white px-8 py-3 rounded-full shadow-2xl border border-slate-600/50 font-bold text-lg animate-in fade-in duration-300">
+            {msg.text}
+          </div>
+        ))}
+      </div>
+
+      {/* Shop */}
+      {showShop && myPlayer && (
+        <div className="absolute inset-0 bg-slate-950/90 z-40 flex items-center justify-center backdrop-blur-md pointer-events-auto">
+          <div className="bg-slate-900 p-8 rounded-3xl border-2 border-indigo-500 shadow-[0_0_50px_rgba(99,102,241,0.2)] max-w-4xl w-full flex flex-col max-h-[90vh]">
+            <div className="flex justify-between items-center mb-6 border-b border-slate-700 pb-4">
+              <div className="flex items-center gap-3">
+                <ShoppingCart className="w-8 h-8 text-indigo-400" />
+                <h2 className="text-3xl font-black text-white">חנות נשקים</h2>
+              </div>
+              <div className="flex items-center gap-2 bg-slate-800 px-4 py-2 rounded-xl border border-slate-700">
+                <span className="text-slate-400 font-bold">יתרה:</span>
+                <span className="text-yellow-400 font-black text-2xl">
+                  {myPlayer.modeState?.coins ?? 0} <Coins className="inline w-5 h-5" />
+                </span>
+              </div>
+              <button onClick={toggleShop} className="text-slate-400 hover:text-white">
+                <XCircle className="w-8 h-8" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 overflow-y-auto pr-2 pb-4">
+              {CTF_WEAPON_LIST.map((w, idx) => {
+                const isOwned = (myPlayer.modeState?.inventory || []).includes(w.id);
+                const isEquipped = myPlayer.modeState?.currentWeapon === w.id;
+                const canAfford = (myPlayer.modeState?.coins ?? 0) >= w.cost;
+                return (
+                  <div
+                    key={w.id}
+                    className={`bg-slate-800 p-5 rounded-2xl border-2 flex flex-col ${
+                      isEquipped ? 'border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.3)]' : 'border-slate-700'
+                    }`}
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <h3 className="text-xl font-black" style={{ color: w.color }}>
+                        {w.name}
+                      </h3>
+                      <span className="text-slate-500 font-bold text-sm bg-slate-900 px-2 py-1 rounded">נשק {idx + 1}</span>
+                    </div>
+                    <p className="text-slate-400 text-sm mb-4 h-10">{w.desc}</p>
+                    <div className="space-y-2 mb-4 bg-slate-900/50 p-3 rounded-xl text-sm font-mono">
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">נזק:</span> <span className="text-red-400 font-bold">{w.damage}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">קצב אש:</span>{' '}
+                        <span className="text-yellow-400 font-bold">{(1 / w.fireRate).toFixed(1)}/s</span>
+                      </div>
+                      {w.pellets > 1 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">כדורים:</span> <span className="text-orange-400 font-bold">{w.pellets} לירייה</span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="mt-auto">
+                      {isEquipped ? (
+                        <button disabled className="w-full py-3 bg-emerald-600/20 text-emerald-400 border border-emerald-500/50 rounded-xl font-bold flex justify-center items-center gap-2">
+                          <CheckCircle className="w-5 h-5" /> מצויד
+                        </button>
+                      ) : isOwned ? (
+                        <button
+                          onClick={() => buyOrEquipWeapon(w.id)}
+                          className="w-full py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl font-bold transition-colors"
+                        >
+                          החלף נשק
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => buyOrEquipWeapon(w.id)}
+                          disabled={!canAfford}
+                          className={`w-full py-3 rounded-xl font-black flex justify-center items-center gap-2 transition-all ${
+                            canAfford ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg' : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                          }`}
+                        >
+                          קנה ב- {w.cost} <Coins className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-3 pointer-events-auto">
-          <span className={`text-sm font-black px-4 py-2 rounded-xl border-2 ${
-            team === 'red' ? 'bg-red-500/30 text-red-200 border-red-500/50' : 'bg-blue-500/30 text-blue-200 border-blue-500/50'
-          }`}>{team === 'red' ? '🔴' : '🔵'}</span>
-          <span className="text-base font-black text-amber-300 bg-amber-500/25 px-4 py-2 rounded-xl border-2 border-amber-500/40 shadow-[0_0_15px_rgba(251,191,36,0.2)]">⚡ {energy}</span>
-        </div>
-      </div>
+      )}
 
-      {/* ── Status banners ── */}
-      <div className="absolute top-12 left-0 right-0 z-20 pointer-events-none px-4 space-y-2">
-        <AnimatePresence>
-          {energy <= 0 && !isDead && (
-            <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -20, opacity: 0 }}
-              className="py-2 text-center text-sm font-bold bg-amber-900/60 text-amber-300 rounded-lg border border-amber-700/40 backdrop-blur-sm"
-            >⚡ נגמרה האנרגיה! לחץ על "שאלות" וענה נכון כדי לחדש</motion.div>
-          )}
-          {isDead && (
-            <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -20, opacity: 0 }}
-              className="py-2 text-center text-sm font-bold bg-red-900/60 text-red-300 rounded-lg border border-red-800/40 backdrop-blur-sm"
-            >💀 חוסלת! ממתין להחייאה...</motion.div>
-          )}
-          {hasFlag && (
-            <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -20, opacity: 0 }}
-              className="py-2 text-center text-sm font-bold bg-yellow-900/60 text-yellow-300 rounded-lg border border-yellow-800/40 backdrop-blur-sm"
-            ><motion.span animate={{ scale: [1, 1.05, 1] }} transition={{ repeat: Infinity, duration: 0.8 }}>🚩 יש לך את הדגל! רוץ לבסיס!</motion.span></motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* ── Canvas ── */}
-      <div className="flex-1 relative min-h-0">
-        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
-        <div className="absolute bottom-4 left-4 z-10 md:hidden">
-          <VirtualJoystick onMove={onJoystickMove} onRelease={onJoystickRelease} size={110} teamColor={teamBorder} />
-        </div>
-        <button onClick={() => setShowQuestions(!showQuestions)}
-          className={`absolute bottom-4 right-4 z-10 px-4 py-3 rounded-xl font-bold text-sm shadow-lg transition-all ${
-            showQuestions ? 'bg-slate-700/90 text-slate-300 border border-slate-600/50'
-              : 'bg-indigo-600/90 text-white border border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.3)]'
-          }`}>{showQuestions ? '🗺️ מפה' : '❓ שאלות (+⚡)'}</button>
-      </div>
-
-      {/* ── Questions modal (חלון קופץ במרכז) ── */}
-      <AnimatePresence>
-        {showQuestions && (
-          <>
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              className="absolute inset-0 z-30 bg-black/60 backdrop-blur-sm"
-              onClick={() => setShowQuestions(false)}
+      {/* Question panel — continuous: correct grants reward and loads next question; user closes manually */}
+      {showQuestion && (
+        <div className="absolute inset-0 bg-slate-950/80 z-40 flex items-center justify-center backdrop-blur-sm pointer-events-auto">
+          <div className="bg-slate-900 p-8 rounded-3xl border-4 border-yellow-500 shadow-[0_0_50px_rgba(234,179,8,0.2)] max-w-lg w-full relative">
+            <div className="flex items-center justify-between mb-6 gap-4">
+              <div className="flex items-center justify-center flex-1">
+                <BookOpen className="w-12 h-12 text-yellow-400 mr-3" />
+                <h2 className="text-3xl font-black text-white text-center">שעת חידון!</h2>
+              </div>
+              <button
+                onClick={() => setShowQuestion(false)}
+                className="px-6 py-3 bg-amber-500 hover:bg-amber-400 text-slate-900 rounded-xl font-bold text-lg shadow-lg border-2 border-amber-400 shrink-0"
+              >
+                סגור
+              </button>
+            </div>
+            <QuestionPanel
+              questions={mappedQuestions}
+              onCorrect={onCorrect}
+              onWrong={onWrong}
+              earnLabel="+25 כדורים | +50 מטבעות"
+              disabled={isDead}
+              compact
             />
-            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-              className="absolute left-1/2 top-1/2 z-40 w-[min(420px,90vw)] -translate-x-1/2 -translate-y-1/2 max-h-[80vh] overflow-y-auto rounded-2xl bg-slate-900/98 backdrop-blur-xl border border-slate-600/50 shadow-[0_25px_80px_rgba(0,0,0,0.6)]"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between p-4 border-b border-slate-700/50">
-                <h3 className="font-bold text-lg text-white">❓ שאלות – ענה נכון וקבל +50 אנרגיה!</h3>
-                <button onClick={() => setShowQuestions(false)}
-                  className="p-2 rounded-xl hover:bg-slate-700/80 text-slate-400 hover:text-white transition-all"
-                  title="סגור"
-                >✕</button>
-              </div>
-              <div className="p-4">
-                <QuestionPanel questions={questions} onCorrect={onCorrect} onWrong={onWrong} earnLabel="+50 ⚡" disabled={isDead} compact />
-              </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      )}
+
+      {/* Game over */}
+      {gameOver && (
+        <div className="absolute inset-0 bg-slate-950/90 z-50 flex items-center justify-center backdrop-blur-md">
+          <div className="bg-slate-900 p-16 rounded-[3rem] text-center border-4 border-slate-700 shadow-[0_0_100px_rgba(0,0,0,0.5)] transform scale-110">
+            <Trophy className={`w-32 h-32 mx-auto mb-8 drop-shadow-2xl ${gameOver === 'red' ? 'text-red-500' : 'text-blue-500'}`} />
+            <h2 className="text-6xl font-black text-white mb-4 tracking-tight">
+              ניצחון לצוות ה{gameOver === 'red' ? 'אדום' : 'כחול'}!
+            </h2>
+          </div>
+        </div>
+      )}
     </div>
   );
-}
-
-// ═══════════════════════════════════════════════════════════
-// RENDERING HELPERS (all operate in world-space coordinates)
-// ═══════════════════════════════════════════════════════════
-
-function drawFloor(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number, vpH: number) {
-  const ts = MAP.tileSize;
-  const sx = Math.floor(cam.x / ts);
-  const sy = Math.floor(cam.y / ts);
-  const ex = Math.ceil((cam.x + vpW / cam.zoom) / ts);
-  const ey = Math.ceil((cam.y + vpH / cam.zoom) / ts);
-
-  for (let ty = sy; ty <= ey; ty++) {
-    for (let tx = sx; tx <= ex; tx++) {
-      const wx = tx * ts, wy = ty * ts;
-      if (wx < 0 || wy < 0 || wx >= MAP.width || wy >= MAP.height) continue;
-
-      let c1 = '#1a3d1a', c2 = '#0f2a0f';
-      for (const z of MAP.zones) {
-        if (wx >= z.x && wx < z.x + z.w && wy >= z.y && wy < z.y + z.h) { c1 = z.color1; c2 = z.color2; break; }
-      }
-      const isEven = (tx + ty) % 2 === 0;
-      ctx.fillStyle = isEven ? c1 : c2;
-      ctx.fillRect(wx, wy, ts + 1, ts + 1);
-      if (isEven && (c1 === '#1a3d1a' || c2 === '#0f2a0f')) {
-        ctx.fillStyle = 'rgba(100,200,100,0.08)';
-        ctx.fillRect(wx + 2, wy + 2, ts - 2, 6);
-      }
-    }
-  }
-
-  ctx.strokeStyle = 'rgba(0,0,0,0.08)';
-  ctx.lineWidth = 0.5;
-  for (let x = sx * ts; x <= ex * ts; x += ts) {
-    ctx.beginPath(); ctx.moveTo(x, sy * ts); ctx.lineTo(x, ey * ts); ctx.stroke();
-  }
-  for (let y = sy * ts; y <= ey * ts; y += ts) {
-    ctx.beginPath(); ctx.moveTo(sx * ts, y); ctx.lineTo(ex * ts, y); ctx.stroke();
-  }
-}
-
-function drawDivider(ctx: CanvasRenderingContext2D, t: number) {
-  const mid = MAP.width / 2;
-  const pulse = 0.08 + 0.04 * Math.sin(t * 1.5);
-  const grad = ctx.createLinearGradient(mid - 80, 0, mid + 80, 0);
-  grad.addColorStop(0, 'transparent');
-  grad.addColorStop(0.4, `rgba(148,163,184,${0.03 + pulse})`);
-  grad.addColorStop(0.5, `rgba(200,220,255,${0.06 + pulse})`);
-  grad.addColorStop(0.6, `rgba(148,163,184,${0.03 + pulse})`);
-  grad.addColorStop(1, 'transparent');
-  ctx.fillStyle = grad;
-  ctx.fillRect(mid - 80, 0, 160, MAP.height);
-
-  ctx.strokeStyle = `rgba(148,163,184,${0.2 + 0.05 * Math.sin(t * 2)})`;
-  ctx.lineWidth = 3;
-  ctx.setLineDash([12, 12]);
-  ctx.beginPath(); ctx.moveTo(mid, 0); ctx.lineTo(mid, MAP.height); ctx.stroke();
-  ctx.setLineDash([]);
-}
-
-function drawWallRect(ctx: CanvasRenderingContext2D, w: Rect) {
-  ctx.shadowColor = 'rgba(0,0,0,0.5)';
-  ctx.shadowBlur = 8;
-  ctx.shadowOffsetX = 4;
-  ctx.shadowOffsetY = 4;
-  ctx.fillStyle = 'rgba(0,0,0,0.4)';
-  ctx.fillRect(w.x + 5, w.y + 5, w.w, w.h);
-
-  const grad = ctx.createLinearGradient(w.x, w.y, w.x, w.y + w.h);
-  grad.addColorStop(0, '#5a6b7a');
-  grad.addColorStop(0.4, '#3d4a5c');
-  grad.addColorStop(1, '#2a3340');
-  ctx.fillStyle = grad;
-  ctx.fillRect(w.x, w.y, w.w, w.h);
-
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = '#1a1f2e';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(w.x, w.y, w.w, w.h);
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.fillRect(w.x, w.y, w.w, 3);
-}
-
-function drawHouse(ctx: CanvasRenderingContext2D, r: Rect, t: number) {
-  const cx = r.x + r.w / 2;
-  ctx.shadowColor = 'rgba(0,0,0,0.5)';
-  ctx.shadowBlur = 12;
-  ctx.shadowOffsetX = 5;
-  ctx.shadowOffsetY = 5;
-  ctx.fillStyle = '#8b7355';
-  ctx.fillRect(r.x + 4, r.y + 4, r.w, r.h);
-
-  const wallGrad = ctx.createLinearGradient(r.x, r.y, r.x, r.y + r.h);
-  wallGrad.addColorStop(0, '#e8d5b7');
-  wallGrad.addColorStop(0.3, '#d4b896');
-  wallGrad.addColorStop(1, '#b8956a');
-  ctx.fillStyle = wallGrad;
-  ctx.fillRect(r.x, r.y, r.w, r.h);
-
-  ctx.fillStyle = '#8b4513';
-  ctx.strokeStyle = '#5d3a1a';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(r.x - 5, r.y + r.h * 0.5);
-  ctx.lineTo(cx, r.y - 15);
-  ctx.lineTo(r.x + r.w + 5, r.y + r.h * 0.5);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.strokeStyle = '#2a1810';
-  ctx.lineWidth = 3;
-  ctx.shadowBlur = 0;
-  ctx.strokeRect(r.x, r.y, r.w, r.h);
-
-  ctx.fillStyle = '#4a5568';
-  ctx.fillRect(r.x + r.w * 0.35, r.y + r.h * 0.5, r.w * 0.3, r.h * 0.45);
-  ctx.strokeStyle = '#2d3748';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(r.x + r.w * 0.35, r.y + r.h * 0.5, r.w * 0.3, r.h * 0.45);
-}
-
-function drawCrate(ctx: CanvasRenderingContext2D, r: Rect, t: number) {
-  ctx.shadowColor = 'rgba(0,0,0,0.4)';
-  ctx.shadowBlur = 6;
-  ctx.shadowOffsetX = 3;
-  ctx.shadowOffsetY = 3;
-  ctx.fillStyle = '#8b6914';
-  ctx.fillRect(r.x + 3, r.y + 3, r.w, r.h);
-
-  const grad = ctx.createLinearGradient(r.x, r.y, r.x + r.w, r.y + r.h);
-  grad.addColorStop(0, '#d4a84b');
-  grad.addColorStop(0.5, '#b8860b');
-  grad.addColorStop(1, '#8b6914');
-  ctx.fillStyle = grad;
-  ctx.fillRect(r.x, r.y, r.w, r.h);
-
-  ctx.strokeStyle = '#5d4a0a';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(r.x, r.y, r.w, r.h);
-  ctx.strokeStyle = '#2a2005';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(r.x + r.w / 2, r.y);
-  ctx.lineTo(r.x + r.w / 2, r.y + r.h);
-  ctx.moveTo(r.x, r.y + r.h / 2);
-  ctx.lineTo(r.x + r.w, r.y + r.h / 2);
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-}
-
-function drawBushShape(ctx: CanvasRenderingContext2D, b: Rect, t: number) {
-  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
-  const sway = Math.sin(t * 1.2 + cx * 0.008) * 3;
-
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.beginPath(); ctx.ellipse(cx + 4, cy + 6, b.w / 2, b.h / 2.4, 0, 0, Math.PI * 2); ctx.fill();
-
-  const baseGrad = ctx.createRadialGradient(cx - b.w * 0.2, cy - b.h * 0.2, 0, cx, cy, b.w * 0.6);
-  baseGrad.addColorStop(0, '#2a5c3a');
-  baseGrad.addColorStop(0.6, '#1d4a2a');
-  baseGrad.addColorStop(1, '#143820');
-  ctx.fillStyle = baseGrad;
-  ctx.beginPath(); ctx.ellipse(cx + sway, cy, b.w / 2, b.h / 2, 0, 0, Math.PI * 2); ctx.fill();
-
-  const lc = ['#3d7b4f', '#2d6b3f', '#236b35'];
-  for (let i = 0; i < 7; i++) {
-    const a = (i / 7) * Math.PI * 2 + t * 0.15;
-    const rd = Math.min(b.w, b.h) * 0.28;
-    ctx.fillStyle = lc[i % 3];
-    ctx.shadowColor = '#0a3018';
-    ctx.shadowBlur = 2;
-    ctx.beginPath(); ctx.arc(cx + Math.cos(a) * rd + sway, cy + Math.sin(a) * rd * 0.75, rd * 0.75, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0;
-  }
-  ctx.fillStyle = 'rgba(120,220,140,0.12)';
-  ctx.beginPath(); ctx.ellipse(cx + sway - b.w * 0.12, cy - b.h * 0.18, b.w * 0.22, b.h * 0.18, 0, 0, Math.PI * 2); ctx.fill();
-}
-
-function drawBaseHex(ctx: CanvasRenderingContext2D, x: number, y: number, team: string, t: number) {
-  const color = team === 'red' ? '#ef4444' : '#3b82f6';
-  const dark = team === 'red' ? '#7f1d1d' : '#1e3a8a';
-  const pulse = 0.5 + 0.5 * Math.sin(t * 2);
-
-  drawGlow(ctx, x, y, 220, color, 0.08 + 0.04 * pulse);
-
-  ctx.shadowColor = 'rgba(0,0,0,0.5)';
-  ctx.shadowBlur = 15;
-  ctx.shadowOffsetY = 6;
-  ctx.fillStyle = colorAlpha(dark, 0.4);
-  ctx.beginPath();
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * Math.PI * 2 - Math.PI / 6, r = 110;
-    const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
-    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
-  }
-  ctx.closePath(); ctx.fill();
-  ctx.shadowBlur = 0;
-
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 5;
-  ctx.stroke();
-
-  ctx.strokeStyle = colorAlpha(color, 0.25 + 0.15 * pulse);
-  ctx.lineWidth = 2; ctx.setLineDash([10, 10]);
-  ctx.beginPath(); ctx.arc(x, y, 75, 0, Math.PI * 2); ctx.stroke();
-  ctx.setLineDash([]);
-
-  ctx.fillStyle = colorAlpha(color, 0.9);
-  ctx.shadowBlur = 25; ctx.shadowColor = color;
-  ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.fill();
-  ctx.shadowBlur = 0;
-
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText('BASE', x, y + 48);
-}
-
-function drawFlagZone(ctx: CanvasRenderingContext2D, x: number, y: number, t: number) {
-  const r = 55;
-  const pulse = 0.5 + 0.5 * Math.sin(t * 2);
-  ctx.strokeStyle = colorAlpha('#fff', 0.15 + 0.1 * pulse);
-  ctx.lineWidth = 2;
-  ctx.setLineDash([6, 8]);
-  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = colorAlpha('#fff', 0.03);
-  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-}
-
-function drawFlagPole(ctx: CanvasRenderingContext2D, x: number, y: number, color: string, t: number) {
-  ctx.strokeStyle = '#f1f5f9'; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.moveTo(x, y + 28); ctx.lineTo(x, y - 32); ctx.stroke();
-
-  ctx.fillStyle = '#94a3b8';
-  ctx.beginPath(); ctx.arc(x, y + 28, 6, 0, Math.PI * 2); ctx.fill();
-
-  const wave = Math.sin(t * 4) * 4;
-  ctx.fillStyle = color; ctx.shadowBlur = 16; ctx.shadowColor = color;
-  ctx.beginPath();
-  ctx.moveTo(x, y - 28);
-  const fw = 30, fh = 20;
-  ctx.quadraticCurveTo(x + fw * 0.5, y - 28 + wave, x + fw, y - 28 + wave * 0.5);
-  ctx.lineTo(x + fw + wave, y - 28 + fh + wave * 0.3);
-  ctx.quadraticCurveTo(x + fw * 0.5, y - 28 + fh - wave * 0.5, x, y - 28 + fh);
-  ctx.closePath(); ctx.fill();
-  ctx.shadowBlur = 0;
-
-  ctx.fillStyle = 'rgba(255,255,255,0.4)';
-  ctx.beginPath(); ctx.arc(x + 15 + wave * 0.3, y - 18 + wave * 0.2, 6, 0, Math.PI * 2); ctx.fill();
-
-  drawGlow(ctx, x, y + 28, 40, color, 0.2);
-}
-
-function drawCharacter(
-  ctx: CanvasRenderingContext2D, x: number, y: number,
-  team: string, isMe: boolean, t: number, hasFlag: boolean, name: string,
-  moving: boolean,
-) {
-  const bob = moving ? Math.sin(t * 12) * 3 : 0;
-  const tilt = moving ? Math.sin(t * 10) * 0.08 : 0;
-  const drawY = y + bob;
-
-  const main = team === 'red' ? (isMe ? '#fca5a5' : '#ef4444') : (isMe ? '#93c5fd' : '#3b82f6');
-  const dark = team === 'red' ? '#991b1b' : '#1e40af';
-  const outline = team === 'red' ? '#7f1d1d' : '#1e3a8a';
-
-  ctx.save();
-  ctx.translate(x, drawY);
-  ctx.rotate(tilt);
-
-  ctx.shadowColor = 'rgba(0,0,0,0.5)';
-  ctx.shadowBlur = 8;
-  ctx.shadowOffsetY = 4;
-  ctx.fillStyle = outline;
-  ctx.beginPath(); ctx.ellipse(0, 4, 15, 7, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.shadowBlur = 0;
-
-  if (isMe) drawGlow(ctx, 0, 0, 50, team === 'red' ? '#ef4444' : '#3b82f6', 0.25);
-
-  const bodyGrad = ctx.createRadialGradient(-4, -6, 0, 0, 0, 18);
-  bodyGrad.addColorStop(0, main);
-  bodyGrad.addColorStop(0.7, main);
-  bodyGrad.addColorStop(1, dark);
-  ctx.fillStyle = bodyGrad;
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.ellipse(0, 0, 13, 20, 0, 0, Math.PI * 2);
-  ctx.fill(); ctx.stroke();
-
-  ctx.strokeStyle = dark;
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(-9, -5); ctx.lineTo(9, -5); ctx.stroke();
-
-  ctx.fillStyle = '#fef08a';
-  ctx.shadowBlur = 6; ctx.shadowColor = '#facc15';
-  ctx.beginPath(); ctx.arc(0, -24, 11, 0, Math.PI * 2); ctx.fill();
-  ctx.shadowBlur = 0;
-
-  ctx.fillStyle = '#1e293b';
-  ctx.beginPath(); ctx.arc(-3.5, -25, 2.5, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(3.5, -25, 2.5, 0, Math.PI * 2); ctx.fill();
-
-  const swing = moving ? Math.sin(t * 10) * 7 : 0;
-  ctx.strokeStyle = main; ctx.lineWidth = 4; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(-7, 16); ctx.lineTo(-7 + swing * 0.4, 28); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(7, 16); ctx.lineTo(7 - swing * 0.4, 28); ctx.stroke();
-
-  if (hasFlag) {
-    const fc = team === 'red' ? '#3b82f6' : '#ef4444';
-    ctx.strokeStyle = '#f1f5f9'; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(0, -36); ctx.lineTo(0, 0); ctx.stroke();
-    const w = Math.sin(t * 5) * 4;
-    ctx.fillStyle = fc; ctx.shadowBlur = 14; ctx.shadowColor = fc;
-    ctx.beginPath(); ctx.moveTo(0, -36); ctx.lineTo(18 + w, -28); ctx.lineTo(0, -20); ctx.closePath(); ctx.fill();
-    ctx.shadowBlur = 0;
-  }
-
-  if (isMe) {
-    ctx.strokeStyle = colorAlpha(team === 'red' ? '#ef4444' : '#3b82f6', 0.7);
-    ctx.lineWidth = 2.5; ctx.setLineDash([6, 6]);
-    ctx.beginPath(); ctx.arc(0, 0, 30, 0, Math.PI * 2); ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  ctx.restore();
-
-  ctx.fillStyle = isMe ? '#fff' : 'rgba(255,255,255,0.9)';
-  ctx.font = `bold ${isMe ? 15 : 13}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.fillText(isMe ? `★ ${name}` : name, x, drawY - 42);
-}
-
-function drawGhost(ctx: CanvasRenderingContext2D, x: number, y: number) {
-  ctx.globalAlpha = 0.25;
-  ctx.fillStyle = '#64748b';
-  ctx.beginPath(); ctx.ellipse(x, y, 12, 16, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.globalAlpha = 0.2;
-  ctx.font = '14px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText('💀', x, y + 6);
-  ctx.globalAlpha = 1;
-}
-
-function drawMinimap(
-  ctx: CanvasRenderingContext2D, vpW: number, vpH: number,
-  cam: CameraState, players: Record<string, any>, gs: any, myId: string,
-) {
-  const mmW = 140;
-  const mmH = mmW * (MAP.height / MAP.width);
-  const mx = vpW - mmW - 12;
-  const my = 48;
-  const sx = mmW / MAP.width;
-  const sy = mmH / MAP.height;
-
-  ctx.fillStyle = 'rgba(0,0,0,0.75)';
-  ctx.strokeStyle = 'rgba(148,163,184,0.3)'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.roundRect(mx - 4, my - 4, mmW + 8, mmH + 8, 6); ctx.fill(); ctx.stroke();
-
-  ctx.fillStyle = 'rgba(239,68,68,0.08)';
-  ctx.fillRect(mx, my, mmW / 2, mmH);
-  ctx.fillStyle = 'rgba(59,130,246,0.08)';
-  ctx.fillRect(mx + mmW / 2, my, mmW / 2, mmH);
-
-  ctx.fillStyle = '#334155';
-  for (const o of MAP.obstacles)
-    ctx.fillRect(mx + o.x * sx, my + o.y * sy, Math.max(1, o.w * sx), Math.max(1, o.h * sy));
-
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
-  ctx.strokeRect(mx + cam.x * sx, my + cam.y * sy, (vpW / cam.zoom) * sx, (vpH / cam.zoom) * sy);
-
-  if (gs?.redFlag) {
-    ctx.fillStyle = '#ef4444'; ctx.shadowBlur = 3; ctx.shadowColor = '#ef4444';
-    ctx.fillRect(mx + gs.redFlag.x * sx - 2, my + gs.redFlag.y * sy - 3, 4, 6); ctx.shadowBlur = 0;
-  }
-  if (gs?.blueFlag) {
-    ctx.fillStyle = '#3b82f6'; ctx.shadowBlur = 3; ctx.shadowColor = '#3b82f6';
-    ctx.fillRect(mx + gs.blueFlag.x * sx - 2, my + gs.blueFlag.y * sy - 3, 4, 6); ctx.shadowBlur = 0;
-  }
-
-  Object.values(players || {}).forEach((p: any) => {
-    const isMe = p.id === myId;
-    ctx.fillStyle = p.modeState?.team === 'red' ? '#ef4444' : '#3b82f6';
-    if (isMe) { ctx.shadowBlur = 4; ctx.shadowColor = '#fff'; }
-    ctx.beginPath(); ctx.arc(mx + p.x * sx, my + p.y * sy, isMe ? 3 : 2, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0;
-  });
 }

@@ -39,6 +39,76 @@ const ZOMBIE_WEAPONS: Record<string, { damage: number; fireRate: number; cost: n
   sniper: { damage: 150, fireRate: 1200, cost: 1500, color: '#38bdf8' },
 };
 
+// CTF mode: world and weapon definitions (match client ctfConstants)
+const CTF_WORLD_W = 10000;
+const CTF_WORLD_H = 6000;
+const CTF_RED_BASE_X = 1000;
+const CTF_RED_BASE_Y = 3000;
+const CTF_BLUE_BASE_X = 9000;
+const CTF_BLUE_BASE_Y = 3000;
+const CTF_BASE_RADIUS = 350;
+const CTF_PLAYER_RADIUS = 25;
+const CTF_FLAG_PICKUP_DIST = 60;
+const CTF_FLAG_CAPTURE_DIST = 250;
+const CTF_WIN_SCORE = 3;
+const CTF_BULLET_LIFETIME = 1.5;
+const CTF_RESPAWN_SECONDS = 6;
+const CTF_MOVEMENT_SPEED = 480;
+const CTF_SPRINT_MULTIPLIER = 1.4;
+const CTF_MAX_ENERGY = 100;
+const CTF_MAX_HEALTH = 100;
+const CTF_MAX_AMMO = 150;
+const CTF_STARTING_AMMO = 30;
+const CTF_AMMO_REWARD = 25;
+const CTF_COIN_TRIVIA_REWARD = 50;
+const CTF_COIN_KILL_REWARD = 100;
+const CTF_WEAPONS: Record<string, { fireRate: number; damage: number; bulletSpeed: number; spread: number; pellets: number; color: string }> = {
+  pistol: { fireRate: 0.35, damage: 25, bulletSpeed: 1000, spread: 0.05, pellets: 1, color: '#fca5a5' },
+  shotgun: { fireRate: 0.9, damage: 20, bulletSpeed: 900, spread: 0.25, pellets: 5, color: '#fb923c' },
+  ar: { fireRate: 0.12, damage: 14, bulletSpeed: 1200, spread: 0.08, pellets: 1, color: '#fcd34d' },
+  sniper: { fireRate: 1.5, damage: 85, bulletSpeed: 2500, spread: 0.01, pellets: 1, color: '#a78bfa' },
+  rocket: { fireRate: 2.0, damage: 100, bulletSpeed: 600, spread: 0, pellets: 1, color: '#4ade80' },
+};
+
+function generateCTFWorld() {
+  const obstacles: any[] = [];
+  const terrain: any[] = [];
+  const numObstacles = 400;
+  for (let i = 0; i < 200; i++) {
+    terrain.push({
+      x: Math.random() * CTF_WORLD_W,
+      y: Math.random() * CTF_WORLD_H,
+      radius: Math.random() * 300 + 100,
+      type: Math.random() > 0.5 ? 'dirt' : 'darkGrass',
+    });
+  }
+  for (let i = 0; i < numObstacles; i++) {
+    let x = Math.random() * CTF_WORLD_W;
+    let y = Math.random() * CTF_WORLD_H;
+    if (Math.hypot(x - CTF_RED_BASE_X, y - CTF_RED_BASE_Y) < CTF_BASE_RADIUS + 200) continue;
+    if (Math.hypot(x - CTF_BLUE_BASE_X, y - CTF_BLUE_BASE_Y) < CTF_BASE_RADIUS + 200) continue;
+    if (y > CTF_WORLD_H / 2 - 250 && y < CTF_WORLD_H / 2 + 250 && Math.random() > 0.15) continue;
+    const rand = Math.random();
+    let type: 'tree' | 'rock' | 'crate' = 'tree';
+    let radius = 20;
+    let visualRadius = 60;
+    if (rand > 0.8) {
+      type = 'rock';
+      radius = Math.random() * 30 + 30;
+      visualRadius = radius;
+    } else if (rand > 0.7) {
+      type = 'crate';
+      radius = 25;
+      visualRadius = 25;
+    } else {
+      radius = Math.random() * 10 + 15;
+      visualRadius = Math.random() * 50 + 70;
+    }
+    obstacles.push({ id: `obs_${i}`, x, y, radius, visualRadius, type, seed: Math.random() });
+  }
+  return { obstacles, terrain };
+}
+
 function checkWinCondition(io: Server, code: string) {
   const room = rooms[code];
   if (!room || room.state !== 'playing') return;
@@ -167,7 +237,19 @@ async function startServer() {
       } else if (mode === 'boss') {
         rooms[code].globalState = { bossIds: [], useAiBoss: true, aiBoss: null, timeLeft: 600, lasers: [], projectiles: [], openedBoxes: [], weaponBoxes: [], worldSize: 3000 };
       } else if (mode === 'ctf') {
-        rooms[code].globalState = { redScore: 0, blueScore: 0, redFlag: { x: 400, y: 4200, carrier: null, base: {x: 400, y: 4200} }, blueFlag: { x: 5600, y: 800, carrier: null, base: {x: 5600, y: 800} }, lasers: [] };
+        const { obstacles, terrain } = generateCTFWorld();
+        rooms[code].globalState = {
+          worldW: CTF_WORLD_W,
+          worldH: CTF_WORLD_H,
+          redScore: 0,
+          blueScore: 0,
+          redFlag: { x: CTF_RED_BASE_X, y: CTF_RED_BASE_Y, team: 'red', carrier: null },
+          blueFlag: { x: CTF_BLUE_BASE_X, y: CTF_BLUE_BASE_Y, team: 'blue', carrier: null },
+          bullets: [],
+          obstacles,
+          terrain,
+          gameOver: null,
+        };
       } else if (mode === 'economy') {
         rooms[code].globalState = { events: [], collectibles: [], timeLimit: 300, worldSize: 4000 };
       } else if (mode === 'farm') {
@@ -199,12 +281,28 @@ async function startServer() {
         const playerColor = TACTICAL_COLORS[Math.floor(Math.random() * TACTICAL_COLORS.length)];
         newPlayer.modeState = { hp: 100, maxHp: 100, ammo: 10, weapon: 'pistol', lastFire: 0, ownedWeapons: ['pistol'], playerColor };
       } else if (room.mode === 'ctf') {
-        const redCount = Object.values(room.players).filter(p => p.modeState.team === 'red').length;
-        const blueCount = Object.values(room.players).filter(p => p.modeState.team === 'blue').length;
-        newPlayer.modeState = { team: redCount <= blueCount ? 'red' : 'blue', hasFlag: false, hp: 100, maxHp: 100 };
-        newPlayer.x = newPlayer.modeState.team === 'red' ? 500 : 5500;
-        newPlayer.y = newPlayer.modeState.team === 'red' ? 4200 : 800;
-        newPlayer.resources = 100; // אנרגיה התחלתית
+        const redCount = Object.values(room.players).filter((p: any) => p.modeState?.team === 'red').length;
+        const blueCount = Object.values(room.players).filter((p: any) => p.modeState?.team === 'blue').length;
+        const team = redCount <= blueCount ? 'red' : 'blue';
+        const spawnX = team === 'red' ? CTF_RED_BASE_X + (Math.random() * 200 - 100) : CTF_BLUE_BASE_X + (Math.random() * 200 - 100);
+        const spawnY = team === 'red' ? CTF_RED_BASE_Y + (Math.random() * 200 - 100) : CTF_BLUE_BASE_Y + (Math.random() * 200 - 100);
+        newPlayer.x = spawnX;
+        newPlayer.y = spawnY;
+        newPlayer.resources = CTF_MAX_ENERGY;
+        newPlayer.modeState = {
+          team,
+          hasFlag: false,
+          hp: CTF_MAX_HEALTH,
+          maxHp: CTF_MAX_HEALTH,
+          ammo: CTF_STARTING_AMMO,
+          coins: 0,
+          inventory: ['pistol'],
+          currentWeapon: 'pistol',
+          dead: false,
+          respawnTimer: 0,
+          lastShotTime: 0,
+          angle: 0,
+        };
       } else if (room.mode === 'economy') {
         newPlayer.modeState = { multiplier: 1, frozenUntil: 0, energy: 100, maxEnergy: 100 };
         newPlayer.x = 2000;
@@ -244,8 +342,8 @@ async function startServer() {
         const p = room.players[playerId];
         if (team === 'red' || team === 'blue') {
           p.modeState.team = team;
-          p.x = team === 'red' ? 500 : 5500;
-          p.y = team === 'red' ? 4200 : 800;
+          p.x = team === 'red' ? CTF_RED_BASE_X : CTF_BLUE_BASE_X;
+          p.y = team === 'red' ? CTF_RED_BASE_Y : CTF_BLUE_BASE_Y;
           io.to(code).emit("roomUpdated", room);
           io.to(p.socketId).emit("playerUpdated", { playerId, player: p });
         }
@@ -379,22 +477,85 @@ async function startServer() {
       }
     });
 
-    socket.on("updatePosition", ({ code, playerId, x, y }) => {
+    socket.on("updatePosition", ({ code, playerId, x, y, angle, sprint }) => {
       const room = rooms[code];
       if (room && room.state === 'playing' && room.players[playerId]) {
         const p = room.players[playerId];
         
         if (room.mode === 'economy' && p.modeState.frozenUntil > Date.now()) return;
         if (room.mode === 'boss' && p.modeState.disabledUntil > Date.now()) return;
+        if (room.mode === 'ctf' && typeof angle === 'number') {
+          if (p.modeState) p.modeState.angle = angle;
+        }
 
         if (room.mode === 'ctf') {
-          if (p.resources <= 0) return; // אין אנרגיה - לא יכול לזוז
-          const dist = Math.hypot(p.x - x, p.y - y);
-          const energyCost = dist * 0.08;
+          if (p.modeState?.dead) return;
+          // Always process position update (no freeze when energy is 0); energy deduction only when enough
+          // Validation: world bounds + max distance per update only (no rejection by absolute position; high x/y are valid)
+          const safeNum = (n, fallback) => (typeof n === 'number' && isFinite(n) ? n : fallback);
+          const minX = CTF_PLAYER_RADIUS;
+          const maxX = CTF_WORLD_W - CTF_PLAYER_RADIUS;
+          const minY = CTF_PLAYER_RADIUS;
+          const maxY = CTF_WORLD_H - CTF_PLAYER_RADIUS;
+          const prevX = Math.max(minX, Math.min(maxX, safeNum(p.x, minX)));
+          const prevY = Math.max(minY, Math.min(maxY, safeNum(p.y, minY)));
+          let nx = Math.max(minX, Math.min(maxX, safeNum(x, prevX)));
+          let ny = Math.max(minY, Math.min(maxY, safeNum(y, prevY)));
+          const obstacles = room.globalState?.obstacles || [];
+          const EMBEDDED_THRESH = 1e-6;
+          const MAX_PASSES = 3;
+          for (let pass = 0; pass < MAX_PASSES; pass++) {
+            for (const obs of obstacles) {
+              const ox = safeNum(obs.x, 0);
+              const oy = safeNum(obs.y, 0);
+              const rad = safeNum(obs.radius, 0);
+              if (!rad || !isFinite(ox) || !isFinite(oy)) continue;
+              const minDist = CTF_PLAYER_RADIUS + rad;
+              let dist = Math.hypot(nx - ox, ny - oy);
+              if (dist >= minDist) continue;
+              if (dist <= EMBEDDED_THRESH) {
+                nx = ox + minDist;
+                ny = oy;
+                dist = minDist;
+              } else {
+                const overlap = minDist - dist;
+                const nxNorm = (nx - ox) / dist;
+                const nyNorm = (ny - oy) / dist;
+                nx += nxNorm * overlap;
+                ny += nyNorm * overlap;
+              }
+              const moveX = nx - prevX;
+              const moveY = ny - prevY;
+              const normalX = (nx - ox) / dist;
+              const normalY = (ny - oy) / dist;
+              const dot = moveX * normalX + moveY * normalY;
+              if (dot < 0) {
+                nx -= dot * normalX;
+                ny -= dot * normalY;
+              }
+              nx = Math.max(minX, Math.min(maxX, nx));
+              ny = Math.max(minY, Math.min(maxY, ny));
+            }
+          }
+          if (!isFinite(nx) || !isFinite(ny)) {
+            nx = prevX;
+            ny = prevY;
+          }
+          nx = Math.max(minX, Math.min(maxX, nx));
+          ny = Math.max(minY, Math.min(maxY, ny));
+          const dist = Math.hypot(nx - prevX, ny - prevY);
+          const dt = 1 / 30;
+          const maxMove = CTF_MOVEMENT_SPEED * 1.2 * dt * 2;
+          if (dist > maxMove && dist > 1e-6) {
+            const scale = maxMove / dist;
+            nx = prevX + (nx - prevX) * scale;
+            ny = prevY + (ny - prevY) * scale;
+          }
+          const energyCost = dist * 0.04;
+          p.x = isFinite(nx) ? nx : prevX;
+          p.y = isFinite(ny) ? ny : prevY;
           if (p.resources >= energyCost) {
-            p.resources = Math.max(0, p.resources - energyCost);
-            p.x = Math.max(40, Math.min(5960, x));
-            p.y = Math.max(40, Math.min(4960, y));
+            p.resources = Math.max(0, Math.min(CTF_MAX_ENERGY, p.resources - energyCost));
           }
         } else if (room.mode === 'boss') {
           const WORLD = room.globalState.worldSize || 3000;
@@ -442,7 +603,11 @@ async function startServer() {
           earned *= (player.modeState.multiplier || 1);
           player.modeState.energy = Math.min(player.modeState.maxEnergy || 100, (player.modeState.energy || 0) + 25);
         }
-        if (room.mode === 'ctf') earned = 50; // Energy
+        if (room.mode === 'ctf') {
+          player.modeState.ammo = Math.min(CTF_MAX_AMMO, (player.modeState.ammo ?? CTF_STARTING_AMMO) + CTF_AMMO_REWARD);
+          player.modeState.coins = (player.modeState.coins ?? 0) + CTF_COIN_TRIVIA_REWARD;
+          earned = 0;
+        }
         if (room.mode === 'boss') earned = 2; // 2 ammo per correct answer for both
         if (room.mode === 'farm') {
           player.resources += 20; // Plasma Ammo
@@ -468,6 +633,21 @@ async function startServer() {
       if (!room || room.state !== 'playing') return;
       const player = room.players[playerId];
       if (!player) return;
+
+      if (room.mode === 'ctf') {
+        const wpn = CTF_WEAPONS[upgradeId];
+        if (!wpn || player.modeState?.dead) return;
+        const coins = player.modeState?.coins ?? 0;
+        if (coins < cost) return;
+        if ((player.modeState?.inventory || []).includes(upgradeId)) return;
+        player.modeState.coins = coins - cost;
+        player.modeState.inventory = [...(player.modeState.inventory || ['pistol']), upgradeId];
+        player.modeState.currentWeapon = upgradeId;
+        io.to(code).emit("playerUpdated", { playerId, player });
+        io.to(code).emit("globalStateUpdated", room.globalState);
+        return;
+      }
+
       const useCredits = room.mode === 'farm' && ['weapon_tier_2', 'weapon_tier_3', 'weapon_tier_4', 'laser', 'magnet', 'shield'].includes(upgradeId);
       const currency = useCredits ? (player.modeState?.credits || 0) : player.resources;
       if (currency < cost) return;
@@ -569,11 +749,55 @@ async function startServer() {
       io.to(code).emit("globalStateUpdated", room.globalState);
     });
 
-    socket.on("action", ({ code, playerId, actionType, targetId, aimAngle: clientAimAngle }) => {
+    socket.on("action", ({ code, playerId, actionType, targetId, aimAngle: clientAimAngle, weaponId }) => {
       const room = rooms[code];
       if (!room || room.state !== 'playing') return;
       const player = room.players[playerId];
       if (!player) return;
+
+      if (room.mode === 'ctf') {
+        if (player.modeState?.dead) return;
+        if (actionType === 'equipWeapon' && weaponId) {
+          if ((player.modeState?.inventory || []).includes(weaponId) && CTF_WEAPONS[weaponId]) {
+            player.modeState.currentWeapon = weaponId;
+            io.to(code).emit("playerUpdated", { playerId, player });
+          }
+          return;
+        }
+        if (actionType === 'shoot') {
+          const aimAngle = typeof clientAimAngle === 'number' ? clientAimAngle : (player.modeState?.angle ?? 0);
+          const currentWpn = player.modeState?.currentWeapon || 'pistol';
+          const wpn = CTF_WEAPONS[currentWpn] || CTF_WEAPONS.pistol;
+          const ammo = player.modeState?.ammo ?? CTF_STARTING_AMMO;
+          const now = Date.now();
+          const lastShot = player.modeState?.lastShotTime ?? 0;
+          if (ammo < 1 || (now - lastShot) < wpn.fireRate * 1000) return;
+          player.modeState.ammo = ammo - 1;
+          player.modeState.lastShotTime = now;
+          const spawnDist = CTF_PLAYER_RADIUS + 5;
+          const bullets = room.globalState.bullets || [];
+          for (let i = 0; i < wpn.pellets; i++) {
+            const angleOffset = (Math.random() - 0.5) * wpn.spread;
+            const finalAngle = aimAngle + angleOffset;
+            bullets.push({
+              id: Math.random().toString(36).slice(2),
+              x: player.x + Math.cos(finalAngle) * spawnDist,
+              y: player.y + Math.sin(finalAngle) * spawnDist,
+              vx: Math.cos(finalAngle) * wpn.bulletSpeed,
+              vy: Math.sin(finalAngle) * wpn.bulletSpeed,
+              team: player.modeState.team,
+              ownerId: playerId,
+              life: CTF_BULLET_LIFETIME,
+              damage: wpn.damage,
+              color: wpn.color,
+            });
+          }
+          room.globalState.bullets = bullets;
+          io.to(code).emit("playerUpdated", { playerId, player });
+          io.to(code).emit("globalStateUpdated", room.globalState);
+        }
+        return;
+      }
 
       const PROJECTILE_SPEED = 520;
 
@@ -773,8 +997,9 @@ async function startServer() {
     });
   });
 
-  // 30 FPS Game Loop
+  // 30 FPS Game Loop — wrapped in try/catch so one room/mode error cannot kill the tick loop
   setInterval(() => {
+    try {
     const now = Date.now();
     Object.values(rooms).forEach(room => {
       if (room.state !== 'playing') return;
@@ -1060,91 +1285,139 @@ async function startServer() {
 
       // --- CTF MODE ---
       else if (room.mode === 'ctf') {
+        const dt = 0.05;
         const playersList = Object.values(room.players);
-        
-        playersList.forEach(p => {
-          if (p.modeState.hp <= 0) {
-            if (now > p.modeState.respawnAt) {
-              p.modeState.hp = 100;
-              p.x = p.modeState.team === 'red' ? 500 : 5500;
-              p.y = p.modeState.team === 'red' ? 4200 : 800;
-            }
-            return;
-          }
+        const obstacles = state.obstacles || [];
 
-          // אנרגיה מתמלאת רק משאלות נכונות - לא אוטומטית
-
-          playersList.forEach(otherP => {
-            if (otherP.id !== p.id && otherP.modeState.hp > 0 && otherP.modeState.team !== p.modeState.team) {
-              if (Math.hypot(p.x - otherP.x, p.y - otherP.y) < 30) {
-                if ((p.modeState.team === 'red' && p.x < 3000 && otherP.x < 3000) || 
-                    (p.modeState.team === 'blue' && p.x > 3000 && otherP.x > 3000)) {
-                  otherP.modeState.hp = 0;
-                  otherP.modeState.respawnAt = now + 3000; // 3 seconds respawn
-                  
-                  // Drop flag if carrying
-                  if (otherP.modeState.hasFlag) {
-                    otherP.modeState.hasFlag = false;
-                    if (otherP.modeState.team === 'red') {
-                      state.blueFlag.carrier = null;
-                    } else {
-                      state.redFlag.carrier = null;
-                    }
-                  }
-                  io.to(room.code).emit('ctfTagged', { x: otherP.x, y: otherP.y, taggerTeam: p.modeState.team });
-                }
-              }
-            }
-          });
-
-          // Grab flag - מיידי כשמגיעים לאזור הדגל, בלי שאלות
-          if (p.modeState.team === 'red' && !state.blueFlag.carrier && Math.hypot(p.x - state.blueFlag.x, p.y - state.blueFlag.y) < 65) {
-            state.blueFlag.carrier = p.id;
-            p.modeState.hasFlag = true;
-          } else if (p.modeState.team === 'blue' && !state.redFlag.carrier && Math.hypot(p.x - state.redFlag.x, p.y - state.redFlag.y) < 65) {
-            state.redFlag.carrier = p.id;
-            p.modeState.hasFlag = true;
-          }
-
-          // Return dropped flag
-          if (p.modeState.team === 'red' && !state.redFlag.carrier && Math.hypot(p.x - state.redFlag.x, p.y - state.redFlag.y) < 50 && (state.redFlag.x !== state.redFlag.base.x || state.redFlag.y !== state.redFlag.base.y)) {
-            state.redFlag.x = state.redFlag.base.x;
-            state.redFlag.y = state.redFlag.base.y;
-          } else if (p.modeState.team === 'blue' && !state.blueFlag.carrier && Math.hypot(p.x - state.blueFlag.x, p.y - state.blueFlag.y) < 50 && (state.blueFlag.x !== state.blueFlag.base.x || state.blueFlag.y !== state.blueFlag.base.y)) {
-            state.blueFlag.x = state.blueFlag.base.x;
-            state.blueFlag.y = state.blueFlag.base.y;
-          }
-
-          // Score flag
-          if (p.modeState.hasFlag) {
-            const base = p.modeState.team === 'red' ? state.redFlag.base : state.blueFlag.base;
-            if (Math.hypot(p.x - base.x, p.y - base.y) < 80) {
-              p.modeState.hasFlag = false;
-              if (p.modeState.team === 'red') {
-                state.redScore++;
-                state.blueFlag = { ...state.blueFlag, x: state.blueFlag.base.x, y: state.blueFlag.base.y, carrier: null };
-                io.to(room.code).emit('ctfScored', { team: 'red', x: base.x, y: base.y });
-              } else {
-                state.blueScore++;
-                state.redFlag = { ...state.redFlag, x: state.redFlag.base.x, y: state.redFlag.base.y, carrier: null };
-                io.to(room.code).emit('ctfScored', { team: 'blue', x: base.x, y: base.y });
-              }
-            }
+        // Respawn
+        playersList.forEach((p: any) => {
+          if (!p.modeState?.dead) return;
+          p.modeState.respawnTimer = (p.modeState.respawnTimer ?? 0) - dt;
+          if (p.modeState.respawnTimer <= 0) {
+            p.modeState.dead = false;
+            p.modeState.hp = CTF_MAX_HEALTH;
+            p.modeState.respawnTimer = 0;
+            p.resources = CTF_MAX_ENERGY;
+            p.modeState.ammo = CTF_STARTING_AMMO;
+            p.x = p.modeState.team === 'red' ? CTF_RED_BASE_X + (Math.random() * 200 - 100) : CTF_BLUE_BASE_X + (Math.random() * 200 - 100);
+            p.y = p.modeState.team === 'red' ? CTF_RED_BASE_Y + (Math.random() * 200 - 100) : CTF_BLUE_BASE_Y + (Math.random() * 200 - 100);
           }
         });
 
+        // Bullets
+        state.bullets = (state.bullets || []).filter((b: any) => {
+          b.x += b.vx * dt;
+          b.y += b.vy * dt;
+          b.life -= dt;
+          if (b.life <= 0 || b.x < 0 || b.x > CTF_WORLD_W || b.y < 0 || b.y > CTF_WORLD_H) return false;
+          for (const obs of obstacles) {
+            if (Math.hypot(b.x - obs.x, b.y - obs.y) < obs.radius + 5) return false;
+          }
+          const enemies = playersList.filter((pl: any) => !pl.modeState?.dead && pl.modeState?.team !== b.team);
+          for (const pl of enemies) {
+            if (Math.hypot(b.x - pl.x, b.y - pl.y) < CTF_PLAYER_RADIUS + 10) {
+              pl.modeState.hp = (pl.modeState.hp ?? CTF_MAX_HEALTH) - b.damage;
+              if (pl.modeState.hp <= 0) {
+                pl.modeState.dead = true;
+                pl.modeState.respawnTimer = CTF_RESPAWN_SECONDS;
+                pl.modeState.hasFlag = false;
+                if (state.redFlag.carrier === pl.id) {
+                  state.redFlag.carrier = null;
+                  state.redFlag.x = pl.x;
+                  state.redFlag.y = pl.y;
+                }
+                if (state.blueFlag.carrier === pl.id) {
+                  state.blueFlag.carrier = null;
+                  state.blueFlag.x = pl.x;
+                  state.blueFlag.y = pl.y;
+                }
+                const killer = room.players[b.ownerId];
+                if (killer?.modeState) killer.modeState.coins = (killer.modeState.coins ?? 0) + CTF_COIN_KILL_REWARD;
+              }
+              return false;
+            }
+          }
+          return true;
+        });
+
+        // Flag position from carrier & flag logic
         if (state.redFlag.carrier && room.players[state.redFlag.carrier]) {
           state.redFlag.x = room.players[state.redFlag.carrier].x;
-          state.redFlag.y = room.players[state.redFlag.carrier].y - 20;
+          state.redFlag.y = room.players[state.redFlag.carrier].y;
         }
         if (state.blueFlag.carrier && room.players[state.blueFlag.carrier]) {
           state.blueFlag.x = room.players[state.blueFlag.carrier].x;
-          state.blueFlag.y = room.players[state.blueFlag.carrier].y - 20;
+          state.blueFlag.y = room.players[state.blueFlag.carrier].y;
         }
 
-        if (state.redScore >= 3 || state.blueScore >= 3) {
+        const redBaseX = CTF_RED_BASE_X, redBaseY = CTF_RED_BASE_Y;
+        const blueBaseX = CTF_BLUE_BASE_X, blueBaseY = CTF_BLUE_BASE_Y;
+
+        playersList.forEach((p: any) => {
+          if (p.modeState?.dead) return;
+
+          // Drop flag if carrier died (already cleared above)
+          if (state.redFlag.carrier === p.id && p.modeState.dead) state.redFlag.carrier = null;
+          if (state.blueFlag.carrier === p.id && p.modeState.dead) state.blueFlag.carrier = null;
+
+          // Enemy pickup red flag (blue team takes red flag)
+          if (p.modeState.team === 'blue' && !state.redFlag.carrier && Math.hypot(p.x - state.redFlag.x, p.y - state.redFlag.y) < CTF_FLAG_PICKUP_DIST) {
+            state.redFlag.carrier = p.id;
+            p.modeState.hasFlag = true;
+            io.to(room.code).emit('ctfMessage', { text: `${p.name} לקח את הדגל האדום!` });
+          }
+          if (p.modeState.team === 'red' && !state.blueFlag.carrier && Math.hypot(p.x - state.blueFlag.x, p.y - state.blueFlag.y) < CTF_FLAG_PICKUP_DIST) {
+            state.blueFlag.carrier = p.id;
+            p.modeState.hasFlag = true;
+            io.to(room.code).emit('ctfMessage', { text: `${p.name} לקח את הדגל הכחול!` });
+          }
+
+          // Return own flag (teammate touches dropped flag)
+          if (p.modeState.team === 'red' && !state.redFlag.carrier && (state.redFlag.x !== redBaseX || state.redFlag.y !== redBaseY) && Math.hypot(p.x - state.redFlag.x, p.y - state.redFlag.y) < CTF_FLAG_PICKUP_DIST) {
+            state.redFlag.x = redBaseX;
+            state.redFlag.y = redBaseY;
+            io.to(room.code).emit('ctfMessage', { text: 'הדגל האדום הוחזר לבסיס.' });
+          }
+          if (p.modeState.team === 'blue' && !state.blueFlag.carrier && (state.blueFlag.x !== blueBaseX || state.blueFlag.y !== blueBaseY) && Math.hypot(p.x - state.blueFlag.x, p.y - state.blueFlag.y) < CTF_FLAG_PICKUP_DIST) {
+            state.blueFlag.x = blueBaseX;
+            state.blueFlag.y = blueBaseY;
+            io.to(room.code).emit('ctfMessage', { text: 'הדגל הכחול הוחזר לבסיס.' });
+          }
+
+          // Capture: bring enemy flag to own base
+          if (p.modeState.hasFlag && p.modeState.team === 'red' && Math.hypot(p.x - redBaseX, p.y - redBaseY) < CTF_FLAG_CAPTURE_DIST) {
+            p.modeState.hasFlag = false;
+            state.blueFlag.carrier = null;
+            state.blueFlag.x = blueBaseX;
+            state.blueFlag.y = blueBaseY;
+            state.redScore = (state.redScore || 0) + 1;
+            io.to(room.code).emit('ctfScored', { team: 'red', x: redBaseX, y: redBaseY });
+            io.to(room.code).emit('ctfMessage', { text: 'הדגל נכבש! נקודה לצוות האדום!' });
+          }
+          if (p.modeState.hasFlag && p.modeState.team === 'blue' && Math.hypot(p.x - blueBaseX, p.y - blueBaseY) < CTF_FLAG_CAPTURE_DIST) {
+            p.modeState.hasFlag = false;
+            state.redFlag.carrier = null;
+            state.redFlag.x = redBaseX;
+            state.redFlag.y = redBaseY;
+            state.blueScore = (state.blueScore || 0) + 1;
+            io.to(room.code).emit('ctfScored', { team: 'blue', x: blueBaseX, y: blueBaseY });
+            io.to(room.code).emit('ctfMessage', { text: 'הדגל נכבש! נקודה לצוות הכחול!' });
+          }
+        });
+
+        // Regenerate energy in base
+        playersList.forEach((p: any) => {
+          if (p.modeState?.dead) return;
+          const inBase = p.modeState.team === 'red'
+            ? Math.hypot(p.x - redBaseX, p.y - redBaseY) < CTF_BASE_RADIUS
+            : Math.hypot(p.x - blueBaseX, p.y - blueBaseY) < CTF_BASE_RADIUS;
+          if (inBase) p.resources = Math.min(CTF_MAX_ENERGY, (p.resources || 0) + 30 * dt);
+        });
+
+        if ((state.redScore || 0) >= CTF_WIN_SCORE || (state.blueScore || 0) >= CTF_WIN_SCORE) {
+          state.gameOver = (state.redScore || 0) >= CTF_WIN_SCORE ? 'red' : 'blue';
           room.state = 'ended';
-          const ctfWinner = state.redScore >= 3 ? "קבוצה אדומה" : "קבוצה כחולה";
+          const ctfWinner = (state.redScore || 0) >= CTF_WIN_SCORE ? "קבוצה אדומה" : "קבוצה כחולה";
           io.to(room.code).emit("gameOver", { winner: ctfWinner });
           persistGameResult(room, ctfWinner);
         }
@@ -1313,7 +1586,10 @@ async function startServer() {
         globalState: { ...state, collectibles: [...(state.collectibles || [])] }
       });
     });
-  }, 1000 / 30);
+    } catch (err) {
+      console.error('Tick error:', err);
+    }
+  }, 50); // 20 Hz tick for network efficiency; client interpolates for smooth display
 
   // Serve static assets from public (images, etc.) - before Vite in dev
   app.use(express.static('public'));
