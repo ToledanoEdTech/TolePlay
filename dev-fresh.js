@@ -56,10 +56,10 @@ function waitForServer(port, cb) {
 function openBrowser(port) {
   const url = `http://localhost:${port}`;
   if (process.platform === 'win32') {
-    spawn('cmd', ['/c', 'start', '', url], { stdio: 'ignore', windowsHide: true });
+    spawn('cmd', ['/c', 'start', '', url], { stdio: 'ignore', windowsHide: true, shell: false });
   } else {
     const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
-    spawn(cmd, [url], { stdio: 'ignore' });
+    spawn(cmd, [url], { stdio: 'ignore', shell: false });
   }
 }
 
@@ -68,9 +68,10 @@ process.env.PORT = String(port);
 
 console.log(`\n[dev-fresh] פורט הפעם: ${port} (מעודכן כל הרצה)\n`);
 
-const child = spawn('npx', ['tsx', 'server.ts'], {
+const tsxCli = path.join(__dirname, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const child = spawn(process.execPath, [tsxCli, 'server.ts'], {
   stdio: 'inherit',
-  shell: true,
+  shell: false,
   env: { ...process.env, PORT: String(port) },
   cwd: __dirname,
 });

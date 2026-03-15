@@ -19,6 +19,8 @@ const ZOMBIE_BASE_X = 2000;
 const ZOMBIE_BASE_Y = 2000;
 const BASE_RADIUS = 85;
 const CAMERA_ZOOM = 0.65;
+/** On mobile (≤768px), zoom out so player sees ~25% more world */
+const CAMERA_ZOOM_MOBILE = 0.52;
 const PLAYER_SPEED = 7 * 60;
 /** Scale for player and zombie visuals (1.5 = 50% larger than base); keeps them smaller than houses but more visible */
 const ENTITY_SCALE = 1.5;
@@ -86,6 +88,12 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const playerRef = useRef(player);
   const weaponDisplayRef = useRef<string>(player?.modeState?.weapon ?? 'pistol');
   const firefliesRef = useRef<{ x: number; y: number; vx: number; vy: number; phase: number; color: string }[] | null>(null);
+  const lastTouchFireRef = useRef(0);
+  const cameraZoomRef = useRef(CAMERA_ZOOM);
+  const clientProjectilesRef = useRef<{ x: number; y: number; vx: number; vy: number }[]>([]);
+  const lastServerProjectilesRef = useRef<any>(null);
+  const impactParticlesRef = useRef<{ x: number; y: number; vx: number; vy: number; createdAt: number; color: string }[]>([]);
+  const lastProcessedHitsRef = useRef<any>(null);
 
   useEffect(() => { gsRef.current = globalState; }, [globalState]);
   useEffect(() => { playersRef.current = allPlayers; }, [allPlayers]);
@@ -254,12 +262,14 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         }
       }
 
-      const camX = (vpW / 2) / CAMERA_ZOOM - posRef.current.x;
-      const camY = (vpH / 2) / CAMERA_ZOOM - posRef.current.y;
-      mouseRef.current.worldX = posRef.current.x + (mouseRef.current.screenX - vpW / 2) / CAMERA_ZOOM;
-      mouseRef.current.worldY = posRef.current.y + (mouseRef.current.screenY - vpH / 2) / CAMERA_ZOOM;
-      const vW = vpW / CAMERA_ZOOM;
-      const vH = vpH / CAMERA_ZOOM;
+      const zoom = (typeof window !== 'undefined' && window.innerWidth <= 768) ? CAMERA_ZOOM_MOBILE : CAMERA_ZOOM;
+      cameraZoomRef.current = zoom;
+      const camX = (vpW / 2) / zoom - posRef.current.x;
+      const camY = (vpH / 2) / zoom - posRef.current.y;
+      mouseRef.current.worldX = posRef.current.x + (mouseRef.current.screenX - vpW / 2) / zoom;
+      mouseRef.current.worldY = posRef.current.y + (mouseRef.current.screenY - vpH / 2) / zoom;
+      const vW = vpW / zoom;
+      const vH = vpH / zoom;
       const isVis = (x: number, y: number, m: number) =>
         x > posRef.current.x - vW / 2 - m && x < posRef.current.x + vW / 2 + m &&
         y > posRef.current.y - vH / 2 - m && y < posRef.current.y + vH / 2 + m;
@@ -271,7 +281,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       ctx.fillStyle = '#161c14';
       ctx.fillRect(0, 0, vpW, vpH);
       ctx.save();
-      ctx.scale(CAMERA_ZOOM, CAMERA_ZOOM);
+      ctx.scale(zoom, zoom);
       ctx.translate(camX, camY);
 
       // Fireflies: init once, then drift and pulse (neon cyan/green)
@@ -397,6 +407,86 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         drawTurret(ctx, tur.x, tur.y, t, gs?.zombies ?? []);
       });
 
+      // Consume server hit events and spawn impact particles (bullet hit zombie)
+      const nowMs = Date.now();
+      const recentHits = gs?.recentHits ?? [];
+      if (recentHits.length > 0 && recentHits !== lastProcessedHitsRef.current) {
+        lastProcessedHitsRef.current = recentHits;
+        const impactColors = ['#f97316', '#fbbf24', '#facc15', '#fff'];
+        recentHits.forEach((h: { x: number; y: number }) => {
+          for (let i = 0; i < 4; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const speed = 80 + Math.random() * 100;
+            impactParticlesRef.current.push({
+              x: h.x, y: h.y,
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed,
+              createdAt: nowMs,
+              color: impactColors[i % impactColors.length],
+            });
+          }
+        });
+      }
+
+      // Pistol projectiles: client-side extrapolation for smooth 60 FPS movement (server sends at 30 Hz)
+      const serverProjectiles = gs?.projectiles ?? [];
+      if (serverProjectiles !== lastServerProjectilesRef.current) {
+        lastServerProjectilesRef.current = serverProjectiles;
+        clientProjectilesRef.current = serverProjectiles
+          .filter((p: any) => p.type === 'pistol')
+          .map((p: any) => ({ x: p.x, y: p.y, vx: p.vx ?? 0, vy: p.vy ?? 0 }));
+      }
+      const TICKS_PER_SEC = 30;
+      clientProjectilesRef.current.forEach((p) => {
+        p.x += p.vx * TICKS_PER_SEC * dt;
+        p.y += p.vy * TICKS_PER_SEC * dt;
+      });
+      clientProjectilesRef.current.forEach((proj) => {
+        const px = proj.x;
+        const py = proj.y;
+        const vx = proj.vx;
+        const vy = proj.vy;
+        const vlen = Math.hypot(vx, vy) || 1;
+        const trailLen = 70;
+        const tailX = px - (vx / vlen) * trailLen;
+        const tailY = py - (vy / vlen) * trailLen;
+        if (!isVis(px, py, trailLen) && !isVis(tailX, tailY, trailLen)) return;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(tailX, tailY);
+        ctx.lineTo(px, py);
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.6)';
+        ctx.lineWidth = 5;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(255, 255, 220, 0.95)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 255, 240, 0.98)';
+        ctx.beginPath();
+        ctx.arc(px, py, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
+
+      // Bullet impact particles (from server recentHits): move, fade, remove after 180ms
+      const IMPACT_LIFETIME_MS = 180;
+      impactParticlesRef.current = impactParticlesRef.current.filter((p) => nowMs - p.createdAt < IMPACT_LIFETIME_MS);
+      impactParticlesRef.current.forEach((p) => {
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        const age = nowMs - p.createdAt;
+        const life = 1 - age / IMPACT_LIFETIME_MS;
+        if (life <= 0 || !isVis(p.x, p.y, 30)) return;
+        ctx.save();
+        ctx.globalAlpha = life;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
+
       // Trees
       env.trees.forEach((tr) => {
         if (!isVis(tr.x, tr.y, tr.r)) return;
@@ -431,7 +521,6 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       ctx.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
 
       // Use Date.now() for laser lifetime so it matches the timestamp we store on click
-      const nowMs = Date.now();
       const LASER_LIFETIME_MS = 280;
       const laserCut = nowMs - LASER_LIFETIME_MS;
       localLasersRef.current = localLasersRef.current.filter((l) => l.createdAt > laserCut);
@@ -544,14 +633,14 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         const isMoving = p.id === playerId ? isLocalMoving : false;
         drawPlayerWithWeapon(ctx, px, py, angle, hp, maxHp, weapon, t, p.id === playerId, color, isMoving);
         ctx.save();
-        ctx.font = 'bold 14px Arial';
+        ctx.font = 'bold 16px Arial';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#fff';
+        ctx.fillStyle = 'white';
         ctx.strokeStyle = '#000';
         ctx.lineWidth = 3;
         const name = (p.name || 'שחקן').slice(0, 12);
-        const nameY = py - 14 * ENTITY_SCALE - 14;
+        const nameY = py - 18 * ENTITY_SCALE - 18;
         ctx.strokeText(name, px, nameY);
         ctx.fillText(name, px, nameY);
         ctx.restore();
@@ -651,12 +740,13 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     const vpH = canvas.height;
     const playerX = posRef.current.x;
     const playerY = posRef.current.y;
-    const worldX = playerX + (mouseRef.current.screenX - vpW / 2) / CAMERA_ZOOM;
-    const worldY = playerY + (mouseRef.current.screenY - vpH / 2) / CAMERA_ZOOM;
+    const zoom = cameraZoomRef.current;
+    const worldX = playerX + (mouseRef.current.screenX - vpW / 2) / zoom;
+    const worldY = playerY + (mouseRef.current.screenY - vpH / 2) / zoom;
     const weapon = weaponDisplayRef.current || (pl?.modeState?.weapon ?? 'pistol');
     const wpn = WEAPONS[weapon];
     const weaponRange = wpn ? (weapon === 'sniper' ? 3000 : weapon === 'shotgun' ? 2500 : 2800) : 2800;
-    const toScreenEdge = Math.hypot(vpW / 2, vpH / 2) / CAMERA_ZOOM;
+    const toScreenEdge = Math.hypot(vpW / 2, vpH / 2) / zoom;
     const range = Math.max(weaponRange, toScreenEdge);
     const aimAngle = Math.atan2(worldY - playerY, worldX - playerX);
     const now = Date.now();
@@ -672,7 +762,8 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         localLasersRef.current.push({ x1: gunTipX, y1: gunTipY, x2: ex, y2: ey, color: (wpn?.color) ?? '#f97316', createdAt: now, weaponId: 'shotgun' });
       });
       socket.emit('action', { code: roomCode, playerId, actionType: 'shoot_zombie', aimAngle });
-    } else {
+    } else if (weapon !== 'pistol') {
+      // Rifle/Sniper: instant raycast laser on client
       const endX = gunTipX + Math.cos(aimAngle) * range;
       const endY = gunTipY + Math.sin(aimAngle) * range;
       localLasersRef.current.push({
@@ -706,6 +797,9 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         playHitSound();
         hitParticlesRef.current.push({ x: hitZombie.x, y: hitZombie.y, createdAt: now });
       }
+    } else {
+      // Pistol: server spawns physical projectile; no instant laser on client
+      socket.emit('action', { code: roomCode, playerId, actionType: 'shoot_zombie', aimAngle });
     }
     triggerShake(shakeRef.current, weapon === 'sniper' ? 5 : 3);
     playShootSound();
@@ -725,16 +819,18 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     const target = 'target' in e ? e.target : (e as React.SyntheticEvent).nativeEvent?.target;
     if (target && target !== canvas) return;
     e.preventDefault?.();
+    const isTouch = 'touches' in e && e.touches?.length > 0;
+    if (!isTouch && Date.now() - lastTouchFireRef.current < 400) return;
     const ammo = player?.modeState?.ammo ?? 0;
     if (ammo < 1) {
       playErrorSound();
       return;
     }
     let clientX: number, clientY: number;
-    if ('touches' in e) {
-      if (!e.touches[0]) return;
+    if (isTouch) {
       clientX = e.touches[0].clientX;
       clientY = e.touches[0].clientY;
+      lastTouchFireRef.current = Date.now();
     } else {
       clientX = e.clientX;
       clientY = e.clientY;
@@ -763,6 +859,25 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       rifleIntervalRef.current = null;
     }
   }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onTouchStart = (e: TouchEvent) => {
+      e.preventDefault();
+      if (e.touches[0]) handleCanvasClick(e as unknown as RTouchEvent<HTMLCanvasElement>);
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+      if (e.touches[0]) updateMouse(e.touches[0].clientX, e.touches[0].clientY);
+    };
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => {
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove', onTouchMove);
+    };
+  }, [handleCanvasClick, updateMouse]);
 
   const switchWeaponTo = useCallback((id: string) => {
     if (!WEAPONS[id]) return;
@@ -806,7 +921,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const timerStr = `${Math.floor(timeLeftSec / 60)}:${(timeLeftSec % 60).toString().padStart(2, '0')}`;
 
   return (
-    <div className="fixed inset-0 bg-[#08090d] text-white flex flex-col">
+    <div className="zombie-game-root fixed inset-0 bg-[#08090d] text-white flex flex-col">
       {/* Full-screen game canvas – z-0 so overlays can sit on top */}
       <div className="absolute inset-0 z-0">
         <canvas
@@ -814,8 +929,6 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
           className="absolute inset-0 w-full h-full cursor-crosshair touch-none"
           style={{ touchAction: 'none' }}
           onClick={handleCanvasClick}
-          onTouchStart={handleCanvasClick}
-          onTouchMove={(e) => { e.preventDefault(); if (e.touches[0]) updateMouse(e.touches[0].clientX, e.touches[0].clientY); }}
           onMouseMove={(e) => updateMouse(e.clientX, e.clientY)}
           onMouseDown={() => { mouseRef.current.down = true; }}
           onMouseUp={() => { mouseRef.current.down = false; }}
@@ -891,9 +1004,9 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         )}
       </AnimatePresence>
 
-      {/* Weapon switcher: list of ALL purchased weapons (not a binary toggle). Switch freely between any owned weapon. */}
-      <div className="fixed left-2 bottom-24 z-[100] flex flex-row flex-wrap items-center gap-2 pointer-events-auto py-2" dir="ltr">
-        <span className="text-[10px] text-slate-300 font-bold shrink-0">נשק:</span>
+      {/* Weapon switcher: list of ALL purchased weapons; on mobile: compact horizontal scroll */}
+      <div className="zombie-weapon-strip fixed left-0 right-0 bottom-20 z-[100] flex flex-row items-center gap-1.5 pointer-events-auto py-1.5 px-2 overflow-x-auto overflow-y-hidden" dir="ltr">
+        <span className="text-[10px] text-slate-300 font-bold shrink-0 hidden sm:inline">נשק:</span>
         {(() => {
           const owned = player?.modeState?.ownedWeapons;
           const list = Array.isArray(owned) ? owned : [];
@@ -920,7 +1033,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                   e.stopPropagation();
                   switchWeaponTo(id);
                 }}
-                className={`flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-[11px] font-bold border-2 min-h-[48px] min-w-[48px] touch-manipulation cursor-pointer select-none bg-slate-800/95 backdrop-blur ${isActive ? 'ring-2 ring-cyan-400 bg-slate-600 border-cyan-400' : 'border-slate-500 hover:bg-slate-700 active:scale-95'}`}
+                className={`zombie-weapon-btn flex items-center justify-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2.5 rounded-lg sm:rounded-xl text-[10px] sm:text-[11px] font-bold border-2 min-h-[40px] min-w-[40px] sm:min-h-[48px] sm:min-w-[48px] touch-manipulation cursor-pointer select-none bg-slate-800/95 backdrop-blur shrink-0 ${isActive ? 'ring-2 ring-cyan-400 bg-slate-600 border-cyan-400' : 'border-slate-500 hover:bg-slate-700 active:scale-95'}`}
                 style={{ borderColor: isActive ? w.color : undefined }}
                 title={w.name}
               >
@@ -934,23 +1047,23 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         })()}
       </div>
 
-      {/* Bottom: joystick left, שאלות + חנות right */}
-      <div className="absolute bottom-3 left-0 right-0 z-20 flex items-end justify-between gap-2 px-2 min-[480px]:px-4 pointer-events-none">
+      {/* Bottom: joystick left, שאלות + חנות right; compact on mobile */}
+      <div className="zombie-bottom-bar absolute bottom-1 left-0 right-0 z-20 flex items-end justify-between gap-1 sm:gap-2 px-1.5 sm:px-4 pb-0.5 pointer-events-none">
         <div className="pointer-events-auto">
           <VirtualJoystick onMove={onJoystickMove} onRelease={onJoystickRelease} size={110} teamColor="rgba(34,211,238,0.5)" />
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2 pointer-events-auto" dir="ltr">
+        <div className="flex items-center justify-end gap-1 sm:gap-2 pointer-events-auto shrink-0" dir="ltr">
           <button
             onClick={() => setShowQuestions(true)}
-            className="px-3 py-2 min-[480px]:px-5 min-[480px]:py-3 rounded-xl font-bold text-sm min-[480px]:text-base bg-blue-600 hover:bg-blue-500 text-white shadow-lg border border-blue-500/50 flex items-center gap-1.5 min-[480px]:gap-2"
+            className="zombie-bottom-btn px-2 py-1.5 sm:px-5 sm:py-3 rounded-lg sm:rounded-xl font-bold text-xs sm:text-base bg-blue-600 hover:bg-blue-500 text-white shadow border border-blue-500/50 flex items-center gap-1 sm:gap-2 min-h-[40px] sm:min-h-[48px]"
           >
-            <HelpCircle size={16} className="min-[480px]:w-[18px] min-[480px]:h-[18px]" /> <span className="hidden min-[400px]:inline">שאלות (+תחמושת)</span><span className="min-[400px]:hidden">שאלות</span>
+            <HelpCircle size={14} className="sm:w-[18px] sm:h-[18px] shrink-0" /> <span className="hidden min-[400px]:inline">שאלות (+תחמושת)</span><span className="min-[400px]:hidden">שאלות</span>
           </button>
           <button
             onClick={() => setShowShop(true)}
-            className="px-3 py-2 min-[480px]:px-5 min-[480px]:py-3 rounded-xl font-bold text-sm min-[480px]:text-base bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg border border-emerald-500/50 flex items-center gap-1.5 min-[480px]:gap-2"
+            className="zombie-bottom-btn px-2 py-1.5 sm:px-5 sm:py-3 rounded-lg sm:rounded-xl font-bold text-xs sm:text-base bg-emerald-600 hover:bg-emerald-500 text-white shadow border border-emerald-500/50 flex items-center gap-1 sm:gap-2 min-h-[40px] sm:min-h-[48px]"
           >
-            <ShoppingCart size={16} className="min-[480px]:w-[18px] min-[480px]:h-[18px]" /> חנות
+            <ShoppingCart size={14} className="sm:w-[18px] sm:h-[18px] shrink-0" /> <span className="hidden min-[380px]:inline">חנות</span>
           </button>
         </div>
       </div>
@@ -970,7 +1083,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.9, y: 20 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-slate-900 rounded-2xl border border-slate-600 shadow-2xl max-w-lg w-full max-h-[85vh] overflow-hidden"
+              className="zombie-game-modal bg-slate-900 rounded-2xl border border-slate-600 shadow-2xl max-w-lg w-full max-h-[85vh] overflow-hidden"
             >
               <div className="p-4 border-b border-slate-700 flex justify-between items-center">
                 <span className="font-bold text-cyan-400">ענה על שאלות - כל תשובה נכונה = +10 תחמושת!</span>
@@ -999,13 +1112,13 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
               animate={{ scale: 1 }}
               exit={{ scale: 0.9 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-slate-900 rounded-2xl border border-slate-600 shadow-2xl max-w-md w-full max-h-[80vh] overflow-hidden"
+              className="zombie-game-modal bg-slate-900 rounded-2xl border border-slate-600 shadow-2xl max-w-md w-full max-h-[80vh] overflow-hidden"
             >
               <div className="p-4 border-b border-slate-700 flex justify-between items-center">
                 <span className="font-bold text-emerald-400">חנות</span>
                 <button onClick={() => setShowShop(false)} className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 font-bold">סגור</button>
               </div>
-              <div className="p-4 space-y-2 overflow-y-auto">
+              <div className="p-4 space-y-2 overflow-y-auto zombie-game-modal-content">
                 {(() => {
                   const owned = (player?.modeState?.ownedWeapons ?? ['pistol']).filter((id: string) => WEAPONS[id]);
                   const uniqueOwned = [...new Set(owned)];
@@ -1013,7 +1126,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                   return (
                     <div className="mb-4 p-3 bg-slate-800/70 rounded-xl border border-slate-600">
                       <p className="text-slate-300 text-sm font-bold mb-2">החלף נשק פעיל</p>
-                      <div className="flex flex-wrap gap-2" dir="ltr">
+                      <div className="zombie-shop-weapons flex flex-wrap gap-2" dir="ltr">
                         {uniqueOwned.map((id: string) => {
                           const w = WEAPONS[id];
                           const isActive = weaponId === id;
@@ -1038,6 +1151,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                   );
                 })()}
                 <p className="text-slate-400 text-sm font-bold mb-2">נשקייה (מטבעות)</p>
+                <div className="zombie-shop-upgrades flex flex-wrap gap-2">
                 {Object.entries(WEAPONS).map(([key, w]) => {
                   const ownedList = player?.modeState?.ownedWeapons ?? ['pistol'];
                   const isOwned = ownedList.includes(key);
@@ -1054,7 +1168,9 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                     />
                   );
                 })}
+                </div>
                 <p className="text-slate-400 text-sm font-bold mt-4 mb-2">שדרוגים</p>
+                <div className="zombie-shop-upgrades flex flex-wrap gap-2">
                 <ShopButton title="בנה צריח" desc="צריח אוטומטי שיורה בזומבים" cost={500}
                   icon={<Crosshair className="text-cyan-400" size={18} />}
                   canAfford={coins >= 500} onBuy={() => buyUpgrade('turret', 500)} />
@@ -1064,6 +1180,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                 <ShopButton title="ריפוי קבוצתי" desc="מרפא את כל חברי הקבוצה" cost={300}
                   icon={<Heart className="text-pink-400" size={18} />}
                   canAfford={coins >= 300} onBuy={() => buyUpgrade('heal', 300)} />
+                </div>
               </div>
             </motion.div>
           </motion.div>
@@ -1298,13 +1415,16 @@ function drawPlayerWithWeapon(
   hp: number, maxHp: number, weaponId: string, t: number, isMe: boolean, accentColor?: string, isMoving?: boolean
 ) {
   const s = ENTITY_SCALE;
-  const navyDark = '#0f172a';
-  const navyMid = '#1e3a5f';
-  const navyLight = accentColor ? colorAlpha(accentColor, 0.9) : '#334155';
+  const borderDark = '#0a0a0a';
+  const borderWidth = 3;
   const greyDark = '#374151';
   const greyMid = '#4b5563';
   const greyLight = '#6b7280';
   const breathe = isMoving ? Math.sin(Date.now() / 180) * 2 * s : Math.sin(Date.now() / 220) * 1 * s;
+  const vestColor = accentColor ? colorAlpha(accentColor, 1) : '#334155';
+  const vestColorDark = accentColor ? colorAlpha(accentColor, 0.75) : '#1e3a5f';
+  const helmetBright = accentColor ? colorAlpha(accentColor, 1) : '#475569';
+  const helmetMid = accentColor ? colorAlpha(accentColor, 0.85) : '#334155';
 
   ctx.save();
   ctx.translate(x, y);
@@ -1317,41 +1437,41 @@ function drawPlayerWithWeapon(
   ctx.ellipse(0, 18 * s + breathe, 22 * s, 16 * s, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // 2. Body/torso – symmetrical around center, below head (0,0)
+  // 2. Body/torso – PRIMARY player color (vest), thick dark border
   const torsoCy = 14 * s + breathe;
   const torsoW = 22 * s;
   const torsoH = 16 * s;
   const vestGrad = ctx.createLinearGradient(-torsoW, 0, torsoW, 0);
-  vestGrad.addColorStop(0, navyDark);
-  vestGrad.addColorStop(0.5, navyMid);
-  vestGrad.addColorStop(1, navyDark);
+  vestGrad.addColorStop(0, vestColorDark);
+  vestGrad.addColorStop(0.5, vestColor);
+  vestGrad.addColorStop(1, vestColorDark);
   ctx.fillStyle = vestGrad;
-  ctx.strokeStyle = navyDark;
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = borderDark;
+  ctx.lineWidth = borderWidth;
   ctx.beginPath();
   ctx.ellipse(0, torsoCy, torsoW, torsoH, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = greyDark;
   ctx.fillRect(-3 * s, torsoCy - 4 * s, 6 * s, 10 * s);
-  ctx.strokeStyle = greyLight;
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = borderDark;
+  ctx.lineWidth = 1.5;
   ctx.strokeRect(-3 * s, torsoCy - 4 * s, 6 * s, 10 * s);
 
-  // 3. Head (helmet) – exactly at (0, 0)
+  // 3. Head (helmet) – PRIMARY player color, thick dark border
   const headR = 12 * s;
   const helmetGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, headR);
-  helmetGrad.addColorStop(0, navyLight);
-  helmetGrad.addColorStop(0.5, navyMid);
-  helmetGrad.addColorStop(1, navyDark);
+  helmetGrad.addColorStop(0, helmetBright);
+  helmetGrad.addColorStop(0.5, helmetMid);
+  helmetGrad.addColorStop(1, vestColorDark);
   ctx.fillStyle = helmetGrad;
-  ctx.strokeStyle = navyDark;
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = borderDark;
+  ctx.lineWidth = borderWidth;
   ctx.beginPath();
   ctx.arc(0, 0, headR, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = 'rgba(30, 58, 95, 0.9)';
+  ctx.fillStyle = vestColorDark;
   ctx.beginPath();
   ctx.arc(0, 0, 8 * s, -0.5, 0.5);
   ctx.lineTo(0, 0);
@@ -1398,7 +1518,7 @@ function drawPlayerWithWeapon(
     ctx.arc(12 * s, 0, 2.5 * s, 0, Math.PI * 2);
     ctx.fill();
   } else if (weaponId === 'rifle') {
-    ctx.fillStyle = navyDark;
+    ctx.fillStyle = borderDark;
     ctx.fillRect(0, -4 * s, 20 * s, 8 * s);
     ctx.fillStyle = greyDark;
     ctx.fillRect(12 * s, 2 * s, 6 * s, 4 * s);
