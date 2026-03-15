@@ -31,6 +31,14 @@ interface GameRoom {
 
 const rooms: Record<string, GameRoom> = {};
 
+// Zombie mode: weapon definitions (match client exmpl.html)
+const ZOMBIE_WEAPONS: Record<string, { damage: number; fireRate: number; cost: number; color: string }> = {
+  pistol: { damage: 25, fireRate: 400, cost: 0, color: '#06b6d4' },
+  rifle: { damage: 40, fireRate: 150, cost: 500, color: '#eab308' },
+  shotgun: { damage: 30, fireRate: 800, cost: 800, color: '#f97316' },
+  sniper: { damage: 150, fireRate: 1200, cost: 1500, color: '#38bdf8' },
+};
+
 function checkWinCondition(io: Server, code: string) {
   const room = rooms[code];
   if (!room || room.state !== 'playing') return;
@@ -138,7 +146,22 @@ async function startServer() {
       };
       
       if (mode === 'zombie') {
-        rooms[code].globalState = { baseHealth: 2000, maxBaseHealth: 2000, wave: 1, zombies: [], lasers: [], turrets: [] };
+        rooms[code].globalState = {
+          worldSize: 4000,
+          baseX: 2000,
+          baseY: 2000,
+          baseRadius: 85,
+          baseHealth: 1000,
+          maxBaseHealth: 1000,
+          wave: 1,
+          zombies: [],
+          lasers: [],
+          turrets: [],
+          particles: [],
+          zombiesSpawnedThisWave: 0,
+          zombiesToSpawnThisWave: 6,
+          gameDurationMs: 6 * 60 * 1000,
+        };
       } else if (mode === 'boss') {
         rooms[code].globalState = { bossIds: [], useAiBoss: true, aiBoss: null, timeLeft: 600, lasers: [], projectiles: [], openedBoxes: [], weaponBoxes: [], worldSize: 3000 };
       } else if (mode === 'ctf') {
@@ -167,7 +190,10 @@ async function startServer() {
       };
 
       if (room.mode === 'zombie') {
-        newPlayer.modeState = { hp: 100, maxHp: 100, damage: 20 };
+        const baseX = 2000, baseY = 2000;
+        newPlayer.x = baseX + (Math.random() * 120 - 60);
+        newPlayer.y = baseY + 120 + Math.random() * 80;
+        newPlayer.modeState = { hp: 100, maxHp: 100, ammo: 10, weapon: 'pistol', lastFire: 0 };
       } else if (room.mode === 'ctf') {
         const redCount = Object.values(room.players).filter(p => p.modeState.team === 'red').length;
         const blueCount = Object.values(room.players).filter(p => p.modeState.team === 'blue').length;
@@ -246,7 +272,10 @@ async function startServer() {
       if (room && room.hostId === socket.id) {
         room.state = 'playing';
         room.startTime = Date.now();
-        
+        if (room.mode === 'zombie') {
+          const pc = Math.max(1, Object.keys(room.players).length);
+          room.globalState.zombiesToSpawnThisWave = 6 * pc + room.globalState.wave * 3;
+        }
         if (room.mode === 'boss') {
           const playerIds = Object.keys(room.players);
           const WORLD = room.globalState.worldSize || 3000;
@@ -383,6 +412,10 @@ async function startServer() {
           p.modeState.energy = Math.max(0, energy - energyCost);
           p.x = targetX;
           p.y = targetY;
+        } else if (room.mode === 'zombie') {
+          const WORLD = room.globalState.worldSize ?? 4000;
+          p.x = Math.max(0, Math.min(WORLD, x));
+          p.y = Math.max(0, Math.min(WORLD, y));
         } else {
           p.x = Math.max(15, Math.min(985, x));
           p.y = Math.max(15, Math.min(985, y));
@@ -410,6 +443,9 @@ async function startServer() {
         if (room.mode === 'farm') {
           player.resources += 20; // Plasma Ammo
           player.modeState.credits = (player.modeState.credits || 0) + 10; // Credits
+        } else if (room.mode === 'zombie') {
+          player.modeState.ammo = (player.modeState.ammo ?? 10) + 10;
+          player.score += 10;
         } else {
           player.resources += earned;
           player.score += 10;
@@ -442,14 +478,20 @@ async function startServer() {
       if (room.mode === 'zombie') {
         if (upgradeId === 'repair') room.globalState.baseHealth = Math.min(room.globalState.maxBaseHealth, room.globalState.baseHealth + 500);
         if (upgradeId === 'turret') {
+          const baseX = room.globalState.baseX ?? 2000, baseY = room.globalState.baseY ?? 2000;
           const angle = Math.random() * Math.PI * 2;
           const dist = 120 + Math.random() * 150;
-          room.globalState.turrets.push({ x: 500 + Math.cos(angle) * dist, y: 500 + Math.sin(angle) * dist, lastShoot: 0 });
+          room.globalState.turrets.push({ x: baseX + Math.cos(angle) * dist, y: baseY + Math.sin(angle) * dist, lastShoot: 0 });
         }
         if (upgradeId === 'heal') {
-          Object.values(room.players).forEach(p => p.modeState.hp = p.modeState.maxHp);
+          Object.values(room.players).forEach(p => { if (p.modeState) p.modeState.hp = p.modeState.maxHp ?? 100; });
         }
         if (upgradeId === 'damage') player.modeState.damage = (player.modeState.damage || 20) + 10;
+        // Weapon purchases (coins = player.resources; cost already deducted above)
+        const wpn = ZOMBIE_WEAPONS[upgradeId];
+        if (wpn && wpn.cost > 0 && cost === wpn.cost) {
+          player.modeState.weapon = upgradeId;
+        }
       } else if (room.mode === 'economy') {
         if (upgradeId === 'multiplier') player.modeState.multiplier += 1;
         if (upgradeId === 'freeze') {
@@ -556,18 +598,52 @@ async function startServer() {
         }
         room.globalState.projectiles = projs;
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
-      } else if (room.mode === 'zombie' && actionType === 'shoot_zombie' && targetId) {
-        const zombie = room.globalState.zombies.find((z:any) => z.id === targetId);
-        if (zombie && player.resources >= 5) {
-          player.resources -= 5;
-          zombie.hp -= player.modeState.damage || 20;
-          room.globalState.lasers.push({ x1: player.x ?? 500, y1: player.y ?? 500, x2: zombie.x, y2: zombie.y, color: '#ef4444' });
-          
+      } else if (room.mode === 'zombie' && actionType === 'shoot_zombie') {
+        const ammo = player.modeState?.ammo ?? 0;
+        const weapon = player.modeState?.weapon ?? 'pistol';
+        const wpn = ZOMBIE_WEAPONS[weapon] ?? ZOMBIE_WEAPONS.pistol;
+        const now = Date.now();
+        const lastFire = player.modeState?.lastFire ?? 0;
+        if (ammo < 1 || now - lastFire < wpn.fireRate) return;
+        const px = player.x ?? 2000;
+        const py = player.y ?? 2150;
+        const aimAngle = typeof clientAimAngle === 'number' ? clientAimAngle : Math.atan2(0, 1);
+        const range = weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000;
+        let endX = px + Math.cos(aimAngle) * range;
+        let endY = py + Math.sin(aimAngle) * range;
+        let zombie = targetId ? room.globalState.zombies.find((z: any) => String(z.id) === String(targetId)) : null;
+        if (!zombie && room.globalState.zombies.length > 0) {
+          let best: any = null;
+          let bestScore = -1;
+          room.globalState.zombies.forEach((z: any) => {
+            const d = Math.hypot(z.x - px, z.y - py);
+            if (d > range) return;
+            const angleToZ = Math.atan2(z.y - py, z.x - px);
+            const angleDiff = Math.abs((angleToZ - aimAngle + Math.PI * 2) % (Math.PI * 2));
+            const score = d < 1 ? 1e6 : 1 / (d * (0.1 + Math.min(angleDiff, Math.PI * 2 - angleDiff)));
+            if (score > bestScore) { bestScore = score; best = z; }
+          });
+          zombie = best;
+        }
+        if (zombie) {
+          endX = zombie.x;
+          endY = zombie.y;
+        }
+        player.modeState.ammo = ammo - 1;
+        player.modeState.lastFire = now;
+        if (zombie) {
+          zombie.hp -= wpn.damage;
           if (zombie.hp <= 0) {
+            player.resources = (player.resources || 0) + 50;
             player.score += 10;
           }
-          io.to(code).emit("playerUpdated", { playerId: player.id, player });
         }
+        room.globalState.lasers.push({
+          x1: px, y1: py, x2: endX, y2: endY,
+          color: wpn.color, createdAt: now,
+        });
+        io.to(code).emit("playerUpdated", { playerId: player.id, player });
+        io.to(code).emit("globalStateUpdated", room.globalState);
       }
     });
 
@@ -602,38 +678,74 @@ async function startServer() {
 
       // --- ZOMBIE MODE ---
       if (room.mode === 'zombie') {
+        const WORLD_SIZE = state.worldSize ?? 4000;
+        const BASE_X = state.baseX ?? 2000;
+        const BASE_Y = state.baseY ?? 2000;
+        const BASE_RADIUS = state.baseRadius ?? 85;
+        const wave = state.wave ?? 1;
         const playerCount = Math.max(1, Object.keys(room.players).length);
-        const baseRate = 0.002 + state.wave * 0.0008;
-        const singlePlayerBonus = playerCount === 1 ? 3 : 1;
-        const spawnChance = baseRate / (playerCount * singlePlayerBonus);
-        if (Math.random() < spawnChance) {
-          let zx, zy;
-          if (Math.random() < 0.5) { zx = Math.random() * 1000; zy = Math.random() < 0.5 ? -50 : 1050; }
-          else { zx = Math.random() < 0.5 ? -50 : 1050; zy = Math.random() * 1000; }
-          state.zombies.push({
-            id: Math.random().toString(),
-            x: zx, y: zy,
-            hp: 25 + (state.wave * 8), maxHp: 25 + (state.wave * 8),
-            speed: 0.4 + (state.wave * 0.05)
-          });
+        const toSpawn = state.zombiesToSpawnThisWave ?? 6 * playerCount;
+        let spawned = state.zombiesSpawnedThisWave ?? 0;
+        const gameDurationMs = state.gameDurationMs ?? 6 * 60 * 1000;
+
+        // 6-minute timer: if time's up and base alive, players win
+        if (room.startTime && now - room.startTime >= gameDurationMs) {
+          room.state = 'ended';
+          io.to(room.code).emit("gameOver", { winner: "השחקנים!" });
+          persistGameResult(room, "השחקנים!");
+          return;
         }
 
+        // Wave advance: no zombies left and spawned enough this wave
+        if (state.zombies.length === 0 && spawned >= toSpawn) {
+          state.wave = wave + 1;
+          state.zombiesSpawnedThisWave = 0;
+          state.zombiesToSpawnThisWave = 6 * playerCount + state.wave * 3;
+        }
+
+        // Spawn zombies from edges (~6 per player per wave, scales with wave)
+        if (spawned < (state.zombiesToSpawnThisWave ?? 6 * playerCount)) {
+          const spawnChance = Math.min(0.25, (0.08 + state.wave * 0.02) * 0.55);
+          if (Math.random() < spawnChance) {
+            const side = Math.floor(Math.random() * 4);
+            let zx: number, zy: number;
+            if (side === 0) { zx = Math.random() * WORLD_SIZE; zy = 0; }
+            else if (side === 1) { zx = WORLD_SIZE; zy = Math.random() * WORLD_SIZE; }
+            else if (side === 2) { zx = Math.random() * WORLD_SIZE; zy = WORLD_SIZE; }
+            else { zx = 0; zy = Math.random() * WORLD_SIZE; }
+            state.zombies.push({
+              id: Math.random().toString(),
+              x: zx, y: zy,
+              hp: 25 + state.wave * 8,
+              maxHp: 25 + state.wave * 8,
+              speed: 2 + state.wave * 0.2,
+              angle: 0,
+              wobbleSeed: Math.random() * 100,
+            });
+            state.zombiesSpawnedThisWave = (state.zombiesSpawnedThisWave ?? 0) + 1;
+          }
+        }
+
+        // Move zombies toward base (center)
         state.zombies.forEach((z: any) => {
-          const dx = 500 - z.x;
-          const dy = 500 - z.y;
+          const dx = BASE_X - z.x;
+          const dy = BASE_Y - z.y;
           const dist = Math.hypot(dx, dy);
-          if (dist > 60) {
+          z.angle = Math.atan2(dy, dx);
+          if (dist > BASE_RADIUS + 10) {
             z.x += (dx / dist) * z.speed;
             z.y += (dy / dist) * z.speed;
           } else {
-            state.baseHealth -= 1;
+            state.baseHealth -= 0.5 + state.wave * 0.1;
+            if (state.baseHealth < 0) state.baseHealth = 0;
           }
         });
 
         // Turrets shoot
-        state.turrets.forEach((t: any) => {
-          if (now - t.lastShoot > 500) {
-            let closest: any = null; let minDist = 300;
+        (state.turrets || []).forEach((t: any) => {
+          if (now - (t.lastShoot || 0) > 500) {
+            let closest: any = null;
+            let minDist = 300;
             state.zombies.forEach((z: any) => {
               const d = Math.hypot(z.x - t.x, z.y - t.y);
               if (d < minDist) { minDist = d; closest = z; }
@@ -641,21 +753,13 @@ async function startServer() {
             if (closest) {
               closest.hp -= 30;
               t.lastShoot = now;
-              state.lasers.push({ x1: t.x, y1: t.y, x2: closest.x, y2: closest.y, color: '#3b82f6' });
+              state.lasers.push({ x1: t.x, y1: t.y, x2: closest.x, y2: closest.y, color: '#3b82f6', createdAt: now });
             }
           }
         });
 
         state.zombies = state.zombies.filter((z: any) => z.hp > 0);
-        // Wave advances every 60 seconds
-        if (room.startTime && Math.floor((now - room.startTime) / 60000) >= state.wave) {
-          state.wave += 1;
-        }
-        if (state.wave > 5 && state.baseHealth > 0) {
-          room.state = 'ended';
-          io.to(room.code).emit("gameOver", { winner: "השחקנים!" });
-          persistGameResult(room, "השחקנים!");
-        }
+
         if (state.baseHealth <= 0) {
           room.state = 'ended';
           io.to(room.code).emit("gameOver", { winner: "הזומבים" });
