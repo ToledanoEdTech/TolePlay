@@ -769,21 +769,23 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         )}
       </AnimatePresence>
 
-      {/* Weapon switcher: fixed on RIGHT side, high z-index so it always receives clicks */}
-      <div className="fixed right-2 top-1/2 -translate-y-1/2 z-[100] flex flex-col gap-2 pointer-events-auto py-2" dir="ltr">
-        <span className="text-[10px] text-slate-300 font-bold text-center">נשק</span>
+      {/* Weapon switcher: bottom-left, all purchased weapon types – always show pistol + every owned + current */}
+      <div className="fixed left-2 bottom-24 z-[100] flex flex-row flex-wrap items-center gap-2 pointer-events-auto py-2" dir="ltr">
+        <span className="text-[10px] text-slate-300 font-bold shrink-0">נשק:</span>
         {(() => {
-          const owned = Array.isArray(player?.modeState?.ownedWeapons) && player.modeState.ownedWeapons.length > 0
-            ? player.modeState.ownedWeapons
-            : (player?.modeState?.weapon ? ['pistol', player.modeState.weapon] : ['pistol']);
-          const validOwned = owned.filter((id): id is string => !!WEAPONS[id]);
-          if (validOwned.length === 0) return null;
-          return validOwned.map((id, idx) => {
+          const raw = player?.modeState?.ownedWeapons;
+          const fromServer = Array.isArray(raw) ? raw : [];
+          const current = player?.modeState?.weapon;
+          const withPistol = fromServer.includes('pistol') ? fromServer : ['pistol', ...fromServer];
+          const withCurrent = current && !withPistol.includes(current) ? [...withPistol, current] : withPistol;
+          const uniqueOwned = [...new Set(withCurrent)].filter((id): id is string => !!WEAPONS[id]);
+          if (uniqueOwned.length === 0) return null;
+          return uniqueOwned.map((id) => {
             const w = WEAPONS[id];
             const isActive = weaponId === id;
             return (
               <button
-                key={`${id}-${idx}`}
+                key={id}
                 type="button"
                 onPointerDown={(e) => {
                   e.preventDefault();
@@ -881,17 +883,18 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
               <div className="p-4 space-y-2 overflow-y-auto">
                 {(() => {
                   const owned = (player?.modeState?.ownedWeapons ?? ['pistol']).filter((id: string) => WEAPONS[id]);
-                  if (owned.length === 0) return null;
+                  const uniqueOwned = [...new Set(owned)];
+                  if (uniqueOwned.length === 0) return null;
                   return (
                     <div className="mb-4 p-3 bg-slate-800/70 rounded-xl border border-slate-600">
                       <p className="text-slate-300 text-sm font-bold mb-2">החלף נשק פעיל</p>
                       <div className="flex flex-wrap gap-2" dir="ltr">
-                        {owned.map((id: string, idx: number) => {
+                        {uniqueOwned.map((id: string) => {
                           const w = WEAPONS[id];
                           const isActive = weaponId === id;
                           return w ? (
                             <button
-                              key={`shop-${id}-${idx}`}
+                              key={`shop-${id}`}
                               type="button"
                               onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); switchWeaponTo(id); }}
                               onClick={(e) => { e.preventDefault(); e.stopPropagation(); switchWeaponTo(id); }}

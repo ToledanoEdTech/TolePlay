@@ -528,14 +528,12 @@ async function startServer() {
       const player = room.players[playerId];
       if (!player) return;
       if (!player.modeState) player.modeState = {};
-      let owned = player.modeState.ownedWeapons;
-      if (!Array.isArray(owned) || owned.length === 0) {
-        owned = ['pistol'];
-        if (player.modeState.weapon && player.modeState.weapon !== 'pistol') owned.push(player.modeState.weapon);
-        player.modeState.ownedWeapons = owned;
-      }
-      if (!owned.includes(weaponId)) return;
-      if (!ZOMBIE_WEAPONS[weaponId]) return;
+      let owned = Array.isArray(player.modeState.ownedWeapons) ? player.modeState.ownedWeapons : [];
+      if (!owned.includes('pistol')) owned = ['pistol', ...owned];
+      if (player.modeState.weapon && !owned.includes(player.modeState.weapon)) owned.push(player.modeState.weapon);
+      owned = [...new Set(owned)];
+      player.modeState.ownedWeapons = owned;
+      if (!owned.includes(weaponId) || !ZOMBIE_WEAPONS[weaponId]) return;
       player.modeState.weapon = weaponId;
       const payload = { playerId, player: { ...player, modeState: { ...player.modeState } } };
       io.to(code).emit("playerUpdated", payload);
@@ -639,7 +637,8 @@ async function startServer() {
           const projX = x1 + t * dx, projY = y1 + t * dy;
           return Math.hypot(zx - projX, zy - projY);
         }
-        const ZOMBIE_HIT_RADIUS = 35;
+        const SHOTGUN_HIT_RADIUS = 35;
+        const SINGLE_RAY_HIT_RADIUS = 10;
 
         if (weapon === 'shotgun') {
           // Shotgun: 5 rays in a cone – only damage zombies that are hit by at least one ray (within hit radius of ray)
@@ -660,7 +659,7 @@ async function startServer() {
               const a = aimAngle + off;
               const rx2 = px + Math.cos(a) * weaponRange;
               const ry2 = py + Math.sin(a) * weaponRange;
-              if (distPointToSegment(z.x, z.y, px, py, rx2, ry2) <= ZOMBIE_HIT_RADIUS) {
+              if (distPointToSegment(z.x, z.y, px, py, rx2, ry2) <= SHOTGUN_HIT_RADIUS) {
                 hit = true;
                 break;
               }
@@ -682,27 +681,21 @@ async function startServer() {
           player.resources = (player.resources || 0) + 50 * killed;
           player.score += 10 * killed;
         } else {
-          // Pistol, rifle, sniper: single ray – only damage zombie if it's on the ray (within hit radius)
+          // Pistol, rifle, sniper: damage ONLY when the ray passes through the zombie (distance to ray <= 10)
           const endX = px + Math.cos(aimAngle) * weaponRange;
           const endY = py + Math.sin(aimAngle) * weaponRange;
-          let zombie = targetId ? room.globalState.zombies.find((z: any) => String(z.id) === String(targetId)) : null;
-          if (!zombie && room.globalState.zombies.length > 0) {
-            let best: any = null;
-            let bestDist = Infinity;
-            room.globalState.zombies.forEach((z: any) => {
-              const d = Math.hypot(z.x - px, z.y - py);
-              if (d > maxHitRange) return;
-              const distToRay = distPointToSegment(z.x, z.y, px, py, endX, endY);
-              if (distToRay <= ZOMBIE_HIT_RADIUS && d < bestDist) {
-                bestDist = d;
-                best = z;
-              }
-            });
-            zombie = best;
-          }
-          if (zombie) {
-            const distToRay = distPointToSegment(zombie.x, zombie.y, px, py, endX, endY);
-            if (distToRay > ZOMBIE_HIT_RADIUS) zombie = null;
+          const hitRadius = SINGLE_RAY_HIT_RADIUS;
+          let zombie: any = null;
+          let bestDistToRay = Infinity;
+          const zombies = room.globalState.zombies || [];
+          for (const z of zombies) {
+            const d = Math.hypot(z.x - px, z.y - py);
+            if (d > maxHitRange || d < 3) continue;
+            const distToRay = distPointToSegment(z.x, z.y, px, py, endX, endY);
+            if (distToRay < bestDistToRay && distToRay <= hitRadius) {
+              bestDistToRay = distToRay;
+              zombie = z;
+            }
           }
           player.modeState.ammo = ammo - 1;
           player.modeState.lastFire = now;
