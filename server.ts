@@ -193,7 +193,9 @@ async function startServer() {
         const baseX = 2000, baseY = 2000;
         newPlayer.x = baseX + (Math.random() * 120 - 60);
         newPlayer.y = baseY + 120 + Math.random() * 80;
-        newPlayer.modeState = { hp: 100, maxHp: 100, ammo: 10, weapon: 'pistol', lastFire: 0, ownedWeapons: ['pistol'] };
+        const TACTICAL_COLORS = ['#3b82f6', '#ef4444', '#eab308', '#f97316', '#a855f7'];
+        const playerColor = TACTICAL_COLORS[Math.floor(Math.random() * TACTICAL_COLORS.length)];
+        newPlayer.modeState = { hp: 100, maxHp: 100, ammo: 10, weapon: 'pistol', lastFire: 0, ownedWeapons: ['pistol'], playerColor };
       } else if (room.mode === 'ctf') {
         const redCount = Object.values(room.players).filter(p => p.modeState.team === 'red').length;
         const blueCount = Object.values(room.players).filter(p => p.modeState.team === 'blue').length;
@@ -630,7 +632,7 @@ async function startServer() {
         const px = player.x ?? 2000;
         const py = player.y ?? 2150;
         const aimAngle = typeof clientAimAngle === 'number' ? clientAimAngle : Math.atan2(0, 1);
-        const weaponRange = weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000;
+        const weaponRange = weapon === 'sniper' ? 3000 : weapon === 'shotgun' ? 2500 : 2800;
         const maxHitRange = 3000;
         const GUN_TIP_DISTANCE = 51;
         const gunTipX = px + Math.cos(aimAngle) * GUN_TIP_DISTANCE;
@@ -664,6 +666,7 @@ async function startServer() {
           let killed = 0;
           for (let i = 0; i < zombies.length; i++) {
             const z = zombies[i];
+            if ((z.hp ?? 0) <= 0) continue;
             const d = Math.hypot(z.x - px, z.y - py);
             if (d < 10 || d > weaponRange) continue;
             let hit = false;
@@ -701,6 +704,7 @@ async function startServer() {
           let hitZombie: any = null;
           let closestDist = Infinity;
           for (const z of zombies) {
+            if ((z.hp ?? 0) <= 0) continue;
             const d = Math.hypot(z.x - gunTipX, z.y - gunTipY);
             if (d > maxHitRange || d < 2) continue;
             const intersects = segmentIntersectsCircle(z.x, z.y, ZOMBIE_HITBOX_RADIUS, gunTipX, gunTipY, endX, endY);

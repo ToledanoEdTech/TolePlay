@@ -84,6 +84,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const rifleIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const playerRef = useRef(player);
   const weaponDisplayRef = useRef<string>(player?.modeState?.weapon ?? 'pistol');
+  const firefliesRef = useRef<{ x: number; y: number; vx: number; vy: number; phase: number; color: string }[] | null>(null);
 
   useEffect(() => { gsRef.current = globalState; }, [globalState]);
   useEffect(() => { playersRef.current = allPlayers; }, [allPlayers]);
@@ -121,57 +122,79 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     const cellSize = 80;
     const cols = Math.floor(WORLD_SIZE / cellSize);
     const totalCells = cols * cols;
-    const baseCellX = Math.floor(ZOMBIE_BASE_X / cellSize);
-    const baseCellY = Math.floor(ZOMBIE_BASE_Y / cellSize);
-    const excludeRadius = 6;
-    for (let i = 0; i < 120; i++) {
+    const roadW = 180;
+    const baseRadius = 320;
+    const margin = 35;
+
+    const overlapsBase = (cx: number, cy: number, r: number) =>
+      Math.hypot(cx - ZOMBIE_BASE_X, cy - ZOMBIE_BASE_Y) < baseRadius + r + margin;
+    const overlapsRoad = (cx: number, cy: number, r: number) =>
+      Math.abs(cx - ZOMBIE_BASE_X) <= roadW / 2 + r + margin ||
+      Math.abs(cy - ZOMBIE_BASE_Y) <= roadW / 2 + r + margin;
+    const circlesOverlap = (x1: number, y1: number, r1: number, x2: number, y2: number, r2: number) =>
+      Math.hypot(x1 - x2, y1 - y2) < r1 + r2 + margin;
+
+    const houseCount = 72;
+    for (let i = 0; i < houseCount * 3; i++) {
+      if (houses.length >= houseCount) break;
       const cell = rnd(i * 7919) % totalCells;
       const cx = (cell % cols) * cellSize;
       const cy = Math.floor(cell / cols) * cellSize;
-      const cellX = cell % cols;
-      const cellY = Math.floor(cell / cols);
-      if (Math.abs(cellX - baseCellX) < excludeRadius && Math.abs(cellY - baseCellY) < excludeRadius) continue;
       const x = cx + rndNorm(i * 7919 + 1) * cellSize * 0.85;
       const y = cy + rndNorm(i * 7919 + 2) * cellSize * 0.85;
-      if (Math.hypot(x - ZOMBIE_BASE_X, y - ZOMBIE_BASE_Y) < 320) continue;
+      const w = 70 + rndNorm(i * 3 + 100) * 90;
+      const h = 70 + rndNorm(i * 3 + 101) * 90;
+      const houseR = Math.max(w, h) / 2;
+      if (overlapsBase(x, y, houseR) || overlapsRoad(x, y, houseR)) continue;
+      const overlapsExisting = houses.some(h => circlesOverlap(x, y, houseR, h.x, h.y, Math.max(h.w, h.h) / 2));
+      if (overlapsExisting) continue;
       houses.push({
-        x, y,
-        w: 70 + rndNorm(i * 3 + 100) * 90,
-        h: 70 + rndNorm(i * 3 + 101) * 90,
+        x, y, w, h,
         angle: rndNorm(i * 3 + 102) * Math.PI,
         baseColor: ['#1e293b', '#334155', '#475569'][rnd(i + 200) % 3],
         roof1: ['#0f172a', '#1e293b', '#312e81'][rnd(i + 201) % 3],
         roof2: ['#020617', '#0f172a', '#1e1b4b'][rnd(i + 202) % 3],
       });
     }
-    for (let i = 0; i < 500; i++) {
+
+    const treeCount = 300;
+    for (let i = 0; i < treeCount * 2; i++) {
+      if (trees.length >= treeCount) break;
       const cell = rnd(i * 4003 + 11) % totalCells;
       const cx = (cell % cols) * cellSize;
       const cy = Math.floor(cell / cols) * cellSize;
       const x = cx + rndNorm(i * 4003 + 1) * cellSize * 0.9;
       const y = cy + rndNorm(i * 4003 + 2) * cellSize * 0.9;
-      if (Math.hypot(x - ZOMBIE_BASE_X, y - ZOMBIE_BASE_Y) < 220) continue;
-      const insideHouse = houses.some(h => Math.hypot(x - h.x, y - h.y) < Math.max(h.w, h.h) * 0.6);
-      if (!insideHouse) {
-        const isDark = rnd(i + 300) % 2 === 0;
-        trees.push({
-          x, y, r: 25 + rndNorm(i + 301) * 35,
-          color1: isDark ? '#064e3b' : '#047857',
-          color2: isDark ? '#022c22' : '#064e3b',
-          offset: rndNorm(i + 302) * Math.PI * 2,
-        });
-      }
+      const r = 25 + rndNorm(i + 301) * 35;
+      if (overlapsBase(x, y, r) || overlapsRoad(x, y, r)) continue;
+      const overlapsHouse = houses.some(h => circlesOverlap(x, y, r, h.x, h.y, Math.max(h.w, h.h) / 2));
+      if (overlapsHouse) continue;
+      const overlapsTree = trees.some(t => circlesOverlap(x, y, r, t.x, t.y, t.r));
+      if (overlapsTree) continue;
+      const isDark = rnd(i + 300) % 2 === 0;
+      trees.push({
+        x, y, r,
+        color1: isDark ? '#064e3b' : '#047857',
+        color2: isDark ? '#022c22' : '#064e3b',
+        offset: rndNorm(i + 302) * Math.PI * 2,
+      });
     }
-    for (let i = 0; i < 300; i++) {
+
+    const rockCount = 180;
+    for (let i = 0; i < rockCount * 2; i++) {
+      if (rocks.length >= rockCount) break;
       const cell = rnd(i * 6007 + 17) % totalCells;
       const cx = (cell % cols) * cellSize;
       const cy = Math.floor(cell / cols) * cellSize;
-      rocks.push({
-        x: cx + rndNorm(i + 400) * cellSize,
-        y: cy + rndNorm(i + 401) * cellSize,
-        r: 5 + rndNorm(i + 402) * 12,
-        angle: rndNorm(i + 403) * Math.PI,
-      });
+      const x = cx + rndNorm(i + 400) * cellSize;
+      const y = cy + rndNorm(i + 401) * cellSize;
+      const r = 5 + rndNorm(i + 402) * 12;
+      if (overlapsBase(x, y, r) || overlapsRoad(x, y, r)) continue;
+      const overlapsHouse = houses.some(h => circlesOverlap(x, y, r, h.x, h.y, Math.max(h.w, h.h) / 2));
+      if (overlapsHouse) continue;
+      const overlapsRock = rocks.some(ro => circlesOverlap(x, y, r, ro.x, ro.y, ro.r));
+      if (overlapsRock) continue;
+      rocks.push({ x, y, r, angle: rndNorm(i + 403) * Math.PI });
     }
     return { houses, trees, rocks };
   }, []);
@@ -249,6 +272,43 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       ctx.save();
       ctx.scale(CAMERA_ZOOM, CAMERA_ZOOM);
       ctx.translate(camX, camY);
+
+      // Fireflies: init once, then drift and pulse (neon cyan/green)
+      const FIREFLY_COUNT = 18;
+      if (!firefliesRef.current) {
+        const list: { x: number; y: number; vx: number; vy: number; phase: number; color: string }[] = [];
+        for (let i = 0; i < FIREFLY_COUNT; i++) {
+          list.push({
+            x: Math.random() * WORLD_SIZE,
+            y: Math.random() * WORLD_SIZE,
+            vx: (Math.random() - 0.5) * 25,
+            vy: (Math.random() - 0.5) * 25,
+            phase: Math.random() * Math.PI * 2,
+            color: i % 2 === 0 ? '#22d3ee' : '#4ade80',
+          });
+        }
+        firefliesRef.current = list;
+      }
+      const fireflies = firefliesRef.current;
+      fireflies.forEach((f) => {
+        f.x += f.vx * dt * 60;
+        f.y += f.vy * dt * 60;
+        if (f.x < 0 || f.x > WORLD_SIZE) f.vx *= -1;
+        if (f.y < 0 || f.y > WORLD_SIZE) f.vy *= -1;
+        f.x = Math.max(0, Math.min(WORLD_SIZE, f.x));
+        f.y = Math.max(0, Math.min(WORLD_SIZE, f.y));
+      });
+      fireflies.forEach((f) => {
+        if (!isVis(f.x, f.y, 80)) return;
+        const pulse = 0.4 + 0.35 * Math.sin(t * 2 + f.phase);
+        ctx.save();
+        ctx.globalAlpha = pulse;
+        ctx.fillStyle = f.color;
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
 
       // Rocks
       ctx.fillStyle = '#262f22';
@@ -380,46 +440,43 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         const x1 = Number(l.x1), y1 = Number(l.y1), x2 = Number(l.x2), y2 = Number(l.y2);
         if (!valid(x1, y1) || !valid(x2, y2)) return;
         const len = Math.hypot(x2 - x1, y2 - y1);
-        if (len > 2500 || len < 1) return;
+        if (len > 3600 || len < 1) return;
         const created = l.createdAt ?? nowMs;
         if (localLasersRef.current.some((ex) => Math.abs(ex.createdAt - created) < 80)) return;
         localLasersRef.current.push({ x1, y1, x2, y2, color: l.color || '#06b6d4', createdAt: created });
       });
-      // Draw all lasers at full length; fade out over lifetime
+      // Draw all lasers: bright tracer line, fade out over lifetime (no shadow for performance)
+      const MAX_LASER_LEN = 3600;
       localLasersRef.current.forEach((l) => {
         const age = nowMs - l.createdAt;
         const life = 1 - age / LASER_LIFETIME_MS;
         if (life <= 0) return;
         const len = Math.hypot(l.x2 - l.x1, l.y2 - l.y1);
-        if (!Number.isFinite(len) || len < 1 || len > 2600) return;
+        if (!Number.isFinite(len) || len < 1 || len > MAX_LASER_LEN) return;
         ctx.save();
         ctx.globalAlpha = life;
-        ctx.strokeStyle = l.color;
+        ctx.strokeStyle = '#FFFF00';
         ctx.lineWidth = 4;
         ctx.lineCap = 'round';
-        ctx.shadowBlur = 5;
-        ctx.shadowColor = l.color;
         ctx.beginPath();
         ctx.moveTo(l.x1, l.y1);
         ctx.lineTo(l.x2, l.y2);
         ctx.stroke();
-        ctx.shadowBlur = 0;
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-        ctx.stroke();
         ctx.restore();
       });
 
-      // Zombies (grotesque, mottled, tattered; shuffling animation)
+      // Zombies – simplified draw when many for performance (shadowBlur is expensive)
+      const zombieCount = gs?.zombies?.length ?? 0;
+      const useSimplifiedZombie = zombieCount > 30;
       gs?.zombies?.forEach((z: any, idx: number) => {
         if (!isVis(z.x, z.y, 60)) return;
-        drawZombieHtml(ctx, z.x, z.y, z.hp, z.maxHp, z.angle ?? 0, t, idx, z.wobbleSeed ?? idx);
+        drawZombieHtml(ctx, z.x, z.y, z.hp, z.maxHp, z.angle ?? 0, t, idx, z.wobbleSeed ?? idx, useSimplifiedZombie);
       });
 
       // Players (with stable color index and names)
       const playerList = Object.values(players || {}).filter(Boolean);
       const sortedIds = [...playerList].map((p: any) => p.id).sort();
-      const playerColors = ['#22d3ee', '#a855f7', '#f97316', '#22c55e', '#ec4899', '#eab308', '#06b6d4', '#84cc16'];
+      const fallbackColors = ['#3b82f6', '#ef4444', '#eab308', '#f97316', '#a855f7'];
       const isLocalMoving = dir.x !== 0 || dir.y !== 0;
       playerList.forEach((p: any) => {
         const px = p.id === playerId ? posRef.current.x : (p.x ?? ZOMBIE_BASE_X);
@@ -430,8 +487,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         const angle = p.id === playerId
           ? Math.atan2(mouseRef.current.worldY - py, mouseRef.current.worldX - px)
           : (Math.atan2(ZOMBIE_BASE_Y - py, ZOMBIE_BASE_X - px));
-        const colorIndex = sortedIds.indexOf(p.id);
-        const color = playerColors[colorIndex % playerColors.length];
+        const color = p.modeState?.playerColor ?? fallbackColors[sortedIds.indexOf(p.id) % fallbackColors.length];
         const isMoving = p.id === playerId ? isLocalMoving : false;
         drawPlayerWithWeapon(ctx, px, py, angle, hp, maxHp, weapon, t, p.id === playerId, color, isMoving);
         ctx.save();
@@ -546,7 +602,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     const worldY = playerY + (mouseRef.current.screenY - vpH / 2) / CAMERA_ZOOM;
     const weapon = weaponDisplayRef.current || (pl?.modeState?.weapon ?? 'pistol');
     const wpn = WEAPONS[weapon];
-    const weaponRange = wpn ? (weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000) : 1000;
+    const weaponRange = wpn ? (weapon === 'sniper' ? 3000 : weapon === 'shotgun' ? 2500 : 2800) : 2800;
     const toScreenEdge = Math.hypot(vpW / 2, vpH / 2) / CAMERA_ZOOM;
     const range = Math.max(weaponRange, toScreenEdge);
     const aimAngle = Math.atan2(worldY - playerY, worldX - playerX);
@@ -809,7 +865,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                 style={{ borderColor: isActive ? w.color : undefined }}
                 title={w.name}
               >
-                <WeaponIcon weaponId={id} size={20} color={w.color} />
+                <img src={`/assets/${id}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" />
                 <span className="hidden min-[400px]:inline truncate max-w-[60px]">{w.name}</span>
               </button>
             );
@@ -909,7 +965,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                               className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-bold border-2 ${isActive ? 'ring-2 ring-cyan-400' : 'hover:bg-slate-700'}`}
                               style={{ borderColor: w.color, background: isActive ? 'rgba(30,41,59,0.9)' : undefined }}
                             >
-                              <WeaponIcon weaponId={id} size={18} color={w.color} />
+                              <img src={`/assets/${id}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" />
                               {w.name}
                             </button>
                           ) : null;
@@ -929,7 +985,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                       title={w.name}
                       desc={isOwned ? 'במאגר – בחר למעלה' : `נזק ${w.damage} | קצב ${w.fireRate}ms`}
                       cost={w.cost}
-                      icon={<span className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: w.color + '33', color: w.color }}><WeaponIcon weaponId={key} size={22} color={w.color} /></span>}
+                      icon={<img src={`/assets/${key}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" />}
                       canAfford={!isOwned && canAfford}
                       onBuy={() => { if (!isOwned && canAfford) buyUpgrade(key, w.cost); }}
                     />
@@ -1025,37 +1081,29 @@ function drawBase(ctx: CanvasRenderingContext2D, x: number, y: number, hpPct: nu
   ctx.fill();
   ctx.stroke();
 
-  // Central intensely glowing core: multiple concentric circles + strong neon cyan
+  // Central glowing core (no shadow for performance)
   const neonCyan = '#22d3ee';
   const neonGlow = '#06b6d4';
-  ctx.shadowBlur = 55;
-  ctx.shadowColor = neonCyan;
   ctx.fillStyle = `rgba(34, 211, 238, ${0.25 + Math.sin(now / 180) * 0.1})`;
   ctx.beginPath();
   ctx.arc(0, 0, R * 0.35, 0, Math.PI * 2);
   ctx.fill();
-  ctx.shadowBlur = 40;
-  ctx.shadowColor = neonGlow;
   ctx.fillStyle = `rgba(34, 211, 238, ${0.5 + Math.sin(now / 220) * 0.15})`;
   ctx.beginPath();
   ctx.arc(0, 0, R * 0.26, 0, Math.PI * 2);
   ctx.fill();
-  ctx.shadowBlur = 30;
   ctx.fillStyle = neonCyan;
   ctx.globalAlpha = 0.95;
   ctx.beginPath();
   ctx.arc(0, 0, R * 0.18, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 1;
-  ctx.shadowBlur = 20;
-  ctx.shadowColor = '#fff';
   ctx.fillStyle = '#e0f7ff';
   ctx.globalAlpha = 0.9 + Math.sin(now / 150) * 0.1;
   ctx.beginPath();
   ctx.arc(0, 0, R * 0.08, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 1;
-  ctx.shadowBlur = 0;
 
   // Outer energy ring (pulse)
   ctx.strokeStyle = `rgba(34, 211, 238, ${0.5 + Math.sin(now / 280) * 0.2})`;
@@ -1066,103 +1114,91 @@ function drawBase(ctx: CanvasRenderingContext2D, x: number, y: number, hpPct: nu
   ctx.restore();
 }
 
-// ── Zombie: grotesque top-down monster; mottled skin, tattered clothing, arms forward; shuffling/stagger animation; HP bar horizontal ──
+// ── Zombie: grotesque top-down monster; optional simplified mode when >30 zombies (no shadowBlur) for performance ──
 function drawZombieHtml(
   ctx: CanvasRenderingContext2D, x: number, y: number,
-  hp: number, maxHp: number, angle: number, t: number, idx: number, wobbleSeed: number = 0
+  hp: number, maxHp: number, angle: number, t: number, idx: number, wobbleSeed: number = 0, useSimplified: boolean = false
 ) {
   const s = ENTITY_SCALE;
   const now = Date.now();
-  // Shuffling / staggering: side-to-side sway and rotation wobble (clumsy gait)
   const phase = now / 320 + wobbleSeed * 10;
-  const rotWobble = Math.sin(phase) * 0.18 + Math.sin(phase * 2.3) * 0.08;
-  const sideSway = Math.sin(phase * 1.7) * 4 * s;
-  const bob = Math.sin(phase * 2) * 2 * s;
+  const rotWobble = useSimplified ? 0 : Math.sin(phase) * 0.18 + Math.sin(phase * 2.3) * 0.08;
+  const sideSway = useSimplified ? 0 : Math.sin(phase * 1.7) * 4 * s;
+  const bob = useSimplified ? 0 : Math.sin(phase * 2) * 2 * s;
 
   ctx.save();
   ctx.translate(x + sideSway * Math.cos(angle + Math.PI / 2), y + sideSway * Math.sin(angle + Math.PI / 2));
   ctx.rotate(angle + rotWobble);
   ctx.translate(0, bob);
 
-  // Subtle shadow under zombie
-  ctx.shadowBlur = 14 * s;
-  ctx.shadowColor = 'rgba(0,0,0,0.4)';
-  ctx.shadowOffsetX = 6 * s;
-  ctx.shadowOffsetY = 8 * s;
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
   ctx.beginPath();
   ctx.ellipse(0, 4 * s, 22 * s, 28 * s, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
 
-  // Tattered clothing (torso base) – dark rags
-  ctx.fillStyle = '#3d3630';
-  ctx.strokeStyle = '#2a2520';
+  // Tattered clothing (torso) – no shadow for performance – visible grey-brown rags
+  ctx.fillStyle = '#5c5349';
+  ctx.strokeStyle = '#3d3630';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.ellipse(0, 4 * s, 18 * s, 24 * s, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  // Tattered patches (irregular shapes)
-  ctx.fillStyle = '#4a4238';
+  ctx.fillStyle = '#6b6258';
   ctx.beginPath();
   ctx.ellipse(-6 * s, 2 * s, 8 * s, 10 * s, 0.2, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
   ctx.ellipse(7 * s, 6 * s, 6 * s, 12 * s, -0.15, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = '#2d2822';
+  ctx.fillStyle = '#4a4238';
   ctx.beginPath();
   ctx.ellipse(5 * s, -4 * s, 5 * s, 8 * s, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Body (decaying skin under clothing) – mottled green/grey/brown
+  // Body – bright toxic green / pale sickly skin (high contrast)
   const skinGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 20 * s);
-  skinGrad.addColorStop(0, '#5a6b52');
-  skinGrad.addColorStop(0.4, '#4a5548');
-  skinGrad.addColorStop(0.7, '#3d4a38');
-  skinGrad.addColorStop(1, '#2d3628');
+  skinGrad.addColorStop(0, '#a3e635');
+  skinGrad.addColorStop(0.4, '#84cc16');
+  skinGrad.addColorStop(0.7, '#65a30d');
+  skinGrad.addColorStop(1, '#4d7c0f');
   ctx.fillStyle = skinGrad;
   ctx.beginPath();
   ctx.ellipse(0, 2 * s, 14 * s, 20 * s, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = '#252d20';
+  ctx.strokeStyle = '#3f6212';
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // Head – decaying mottled skin
+  // Head – bright toxic green, visible
   const headGrad = ctx.createRadialGradient(0, -2 * s, 0, 0, 0, 14 * s);
-  headGrad.addColorStop(0, '#6b7a5e');
-  headGrad.addColorStop(0.5, '#4d5c48');
-  headGrad.addColorStop(1, '#3a4535');
+  headGrad.addColorStop(0, '#bef264');
+  headGrad.addColorStop(0.5, '#a3e635');
+  headGrad.addColorStop(1, '#65a30d');
   ctx.fillStyle = headGrad;
-  ctx.strokeStyle = '#2d3528';
+  ctx.strokeStyle = '#4d7c0f';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.arc(0, -16 * s, 14 * s, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  // Eyes (hollow, creepy)
   ctx.fillStyle = '#1a1a1a';
   ctx.beginPath();
   ctx.arc(-4 * s, -18 * s, 3 * s, 0, Math.PI * 2);
   ctx.arc(4 * s, -18 * s, 3 * s, 0, Math.PI * 2);
   ctx.fill();
-  // Mouth / wound hint
-  ctx.strokeStyle = '#2d2520';
+  ctx.strokeStyle = '#374151';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.arc(0, -12 * s, 4 * s, 0.2 * Math.PI, 0.8 * Math.PI);
   ctx.stroke();
 
-  // Two arms always reaching forward (toward +y = toward player)
+  // Arms reaching forward (toward player)
   const armGrad = ctx.createLinearGradient(0, 0, 0, 24 * s);
-  armGrad.addColorStop(0, '#4a5c48');
-  armGrad.addColorStop(1, '#2d3a2a');
+  armGrad.addColorStop(0, '#84cc16');
+  armGrad.addColorStop(1, '#65a30d');
   ctx.fillStyle = armGrad;
-  ctx.strokeStyle = '#252d20';
+  ctx.strokeStyle = '#4d7c0f';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.ellipse(-11 * s, 10 * s, 6 * s, 20 * s, 0.2, 0, Math.PI * 2);
@@ -1172,8 +1208,7 @@ function drawZombieHtml(
   ctx.ellipse(11 * s, 10 * s, 6 * s, 20 * s, -0.2, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  // Claws / hands (dark)
-  ctx.fillStyle = '#1a1a1a';
+  ctx.fillStyle = '#422006';
   ctx.beginPath();
   ctx.arc(-11 * s, 28 * s, 5 * s, 0, Math.PI * 2);
   ctx.arc(11 * s, 28 * s, 5 * s, 0, Math.PI * 2);
@@ -1181,229 +1216,234 @@ function drawZombieHtml(
 
   ctx.restore();
 
-  // Health bar: scaled with body size, always horizontal (world space, no rotation)
+  // Health bar – brighter red for visibility
   const barW = 42 * s;
   const barH = 6 * s;
   const barY = y - 40 * s;
-  ctx.fillStyle = '#000';
-  ctx.fillRect(x - barW / 2, barY, barW, barH);
-  ctx.fillStyle = '#ef4444';
+  ctx.fillStyle = '#1c1917';
+  ctx.fillRect(x - barW / 2 - 1, barY - 1, barW + 2, barH + 2);
+  ctx.fillStyle = '#f87171';
   ctx.fillRect(x - barW / 2, barY, barW * (Math.max(0, hp) / maxHp), barH);
+  ctx.strokeStyle = '#dc2626';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x - barW / 2, barY, barW, barH);
 }
 
-// ── Player: tactical character (vest/backpack, helmet, arms + weapon); rotates to aim; tactical palette; shadow ──
+// ── Player: rebuilt – head at (0,0), body/arms symmetric, weapon along +X; tactical navy/grey ──
 function drawPlayerWithWeapon(
   ctx: CanvasRenderingContext2D, x: number, y: number, angle: number,
   hp: number, maxHp: number, weaponId: string, t: number, isMe: boolean, accentColor?: string, isMoving?: boolean
 ) {
   const s = ENTITY_SCALE;
-  const vestDark = '#1e293b';
-  const vestMid = '#334155';
-  const vestLight = '#475569';
-  const helmetDark = '#0f172a';
-  const helmetMid = accentColor ? colorAlpha(accentColor, 0.9) : '#1e3a5f';
-  const camoGreen = '#374151';
-  const armColor = '#4b5563';
-  const breathe = isMoving ? Math.sin(Date.now() / 180) * 2.5 * s : 0;
+  const navyDark = '#0f172a';
+  const navyMid = '#1e3a5f';
+  const navyLight = accentColor ? colorAlpha(accentColor, 0.9) : '#334155';
+  const greyDark = '#374151';
+  const greyMid = '#4b5563';
+  const greyLight = '#6b7280';
+  const breathe = isMoving ? Math.sin(Date.now() / 180) * 2 * s : Math.sin(Date.now() / 220) * 1 * s;
 
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(angle);
+  // Head drawn at (0,0). No extra translate; breathe applied only to body/shadow positions.
 
-  // Drop shadow for depth (offset down-right in local “forward” frame)
-  ctx.shadowBlur = 16 * s;
-  ctx.shadowColor = 'rgba(0,0,0,0.45)';
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 4 * s;
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  // 1. Shadow (offset down-right in local “forward” frame)
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
   ctx.beginPath();
-  ctx.ellipse(0, 20 * s, 28 * s, 22 * s, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-
-  // Backpack (back = left, -X)
-  ctx.fillStyle = vestDark;
-  ctx.strokeStyle = '#0f172a';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.ellipse(-12 * s, 18 * s, 10 * s, 18 * s, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-  ctx.fillStyle = vestMid;
-  ctx.beginPath();
-  ctx.ellipse(-12 * s, 18 * s, 6 * s, 12 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 18 * s + breathe, 22 * s, 16 * s, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Tactical vest (body; front = right, +X)
-  const vestGrad = ctx.createLinearGradient(-26 * s, 18 * s, 26 * s, 18 * s);
-  vestGrad.addColorStop(0, vestDark);
-  vestGrad.addColorStop(0.35, camoGreen);
-  vestGrad.addColorStop(0.5, vestMid);
-  vestGrad.addColorStop(0.65, camoGreen);
-  vestGrad.addColorStop(1, vestDark);
+  // 2. Body/torso – symmetrical around center, below head (0,0)
+  const torsoCy = 14 * s + breathe;
+  const torsoW = 22 * s;
+  const torsoH = 16 * s;
+  const vestGrad = ctx.createLinearGradient(-torsoW, 0, torsoW, 0);
+  vestGrad.addColorStop(0, navyDark);
+  vestGrad.addColorStop(0.5, navyMid);
+  vestGrad.addColorStop(1, navyDark);
   ctx.fillStyle = vestGrad;
-  ctx.strokeStyle = '#0f172a';
+  ctx.strokeStyle = navyDark;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.ellipse(0, 18 * s, 24 * s, 18 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, torsoCy, torsoW, torsoH, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = vestDark;
-  ctx.fillRect(-4 * s, 8 * s, 8 * s, 20 * s);
-  ctx.strokeStyle = vestLight;
+  ctx.fillStyle = greyDark;
+  ctx.fillRect(-3 * s, torsoCy - 4 * s, 6 * s, 10 * s);
+  ctx.strokeStyle = greyLight;
   ctx.lineWidth = 1;
-  ctx.strokeRect(-4 * s, 8 * s, 8 * s, 20 * s);
+  ctx.strokeRect(-3 * s, torsoCy - 4 * s, 6 * s, 10 * s);
 
-  // Helmet (head) strictly centered at (0, headY) over torso for natural rotation
-  const helmetGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 16 * s);
-  helmetGrad.addColorStop(0, helmetMid);
-  helmetGrad.addColorStop(0.6, helmetDark);
-  helmetGrad.addColorStop(1, '#020617');
+  // 3. Head (helmet) – exactly at (0, 0)
+  const headR = 12 * s;
+  const helmetGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, headR);
+  helmetGrad.addColorStop(0, navyLight);
+  helmetGrad.addColorStop(0.5, navyMid);
+  helmetGrad.addColorStop(1, navyDark);
   ctx.fillStyle = helmetGrad;
-  ctx.strokeStyle = '#0f172a';
+  ctx.strokeStyle = navyDark;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(0, 0, 14 * s, 0, Math.PI * 2);
+  ctx.arc(0, 0, headR, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = 'rgba(30, 58, 95, 0.85)';
+  ctx.fillStyle = 'rgba(30, 58, 95, 0.9)';
   ctx.beginPath();
-  ctx.arc(0, 0, 10 * s, -0.6, 0.6);
+  ctx.arc(0, 0, 8 * s, -0.5, 0.5);
   ctx.lineTo(0, 0);
   ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = '#1e3a5f';
+  ctx.strokeStyle = greyLight;
   ctx.lineWidth = 1.5;
-  ctx.stroke();
   ctx.beginPath();
-  ctx.arc(0, 0, 12 * s, -Math.PI / 3, Math.PI / 3);
-  ctx.strokeStyle = vestLight;
-  ctx.lineWidth = 2.5;
+  ctx.arc(0, 0, 10 * s, -Math.PI / 3, Math.PI / 3);
   ctx.stroke();
 
-  // Arms + gun on the RIGHT (+X). Gun tip at GUN_TIP_DISTANCE from center.
-  const handOffset = isMoving ? Math.sin(Date.now() / 150) * 4 * s : 0;
-  ctx.fillStyle = armColor;
-  ctx.strokeStyle = '#374151';
-  ctx.lineWidth = 2;
+  // 4. Shoulders and arms – symmetric; left arm back, right arm forward holding weapon
+  const handOffset = isMoving ? Math.sin(Date.now() / 150) * 3 * s : 0;
+  const shoulderY = 6 * s + breathe * 0.5;
+  const armW = 8 * s;
+  const armH = 10 * s;
+  ctx.fillStyle = greyMid;
+  ctx.strokeStyle = greyDark;
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(10 * s, 10 * s + handOffset, 12 * s, 10 * s, 4);
-  else ctx.rect(10 * s, 10 * s + handOffset, 12 * s, 10 * s);
+  if (ctx.roundRect) {
+    ctx.roundRect(-18 * s, shoulderY + handOffset, armW, armH, 3);
+    ctx.roundRect(10 * s, shoulderY - handOffset, armW, armH, 3);
+  } else {
+    ctx.rect(-18 * s, shoulderY + handOffset, armW, armH);
+    ctx.rect(10 * s, shoulderY - handOffset, armW, armH);
+  }
   ctx.fill();
   ctx.stroke();
   ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(10 * s, 16 * s - handOffset, 12 * s, 10 * s, 4);
-  else ctx.rect(10 * s, 16 * s - handOffset, 12 * s, 10 * s);
+  if (ctx.roundRect) ctx.roundRect(10 * s, shoulderY + 10 * s - handOffset, armW, armH, 3);
+  else ctx.rect(10 * s, shoulderY + 10 * s - handOffset, armW, armH);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = vestDark;
-  ctx.fillRect(14 * s, 13 * s, 8 * s, 10 * s);
-  ctx.strokeRect(14 * s, 13 * s, 8 * s, 10 * s);
 
-  ctx.translate(20 * s, 18 * s);
+  // 5. Weapon – at (18*s, 12*s), pointing along +X (forward)
+  ctx.save();
+  ctx.translate(18 * s, 12 * s);
   if (weaponId === 'pistol') {
-    ctx.fillStyle = '#334155';
-    ctx.fillRect(0, -4 * s, 14 * s, 8 * s);
+    ctx.fillStyle = greyDark;
+    ctx.fillRect(0, -3 * s, 12 * s, 6 * s);
     ctx.fillStyle = '#06b6d4';
     ctx.beginPath();
-    ctx.arc(14 * s, 0, 3 * s, 0, Math.PI * 2);
+    ctx.arc(12 * s, 0, 2.5 * s, 0, Math.PI * 2);
     ctx.fill();
   } else if (weaponId === 'rifle') {
-    ctx.fillStyle = vestDark;
-    ctx.fillRect(0, -5 * s, 22 * s, 10 * s);
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(14 * s, 4 * s, 8 * s, 6 * s);
+    ctx.fillStyle = navyDark;
+    ctx.fillRect(0, -4 * s, 20 * s, 8 * s);
+    ctx.fillStyle = greyDark;
+    ctx.fillRect(12 * s, 2 * s, 6 * s, 4 * s);
     ctx.fillStyle = '#eab308';
     ctx.beginPath();
-    ctx.arc(22 * s, 0, 4 * s, 0, Math.PI * 2);
+    ctx.arc(20 * s, 0, 3 * s, 0, Math.PI * 2);
     ctx.fill();
   } else if (weaponId === 'shotgun') {
     ctx.fillStyle = '#451a03';
-    ctx.fillRect(0, -5 * s, 18 * s, 10 * s);
+    ctx.fillRect(0, -4 * s, 16 * s, 8 * s);
     ctx.fillStyle = '#9a3412';
-    ctx.fillRect(10 * s, -7 * s, 8 * s, 14 * s);
+    ctx.fillRect(8 * s, -5 * s, 6 * s, 10 * s);
     ctx.fillStyle = '#f97316';
-    ctx.fillRect(18 * s, -4 * s, 4 * s, 8 * s);
+    ctx.fillRect(16 * s, -3 * s, 3 * s, 6 * s);
   } else if (weaponId === 'sniper') {
     ctx.fillStyle = '#172554';
-    ctx.fillRect(0, -3 * s, 30 * s, 6 * s);
+    ctx.fillRect(0, -2.5 * s, 26 * s, 5 * s);
     ctx.fillStyle = '#1e3a8a';
-    ctx.fillRect(8 * s, -5 * s, 12 * s, 3 * s);
+    ctx.fillRect(6 * s, -4 * s, 10 * s, 2.5 * s);
     ctx.fillStyle = '#38bdf8';
-    ctx.shadowBlur = 10;
-    ctx.shadowColor = '#38bdf8';
     ctx.beginPath();
-    ctx.arc(30 * s, 0, 2 * s, 0, Math.PI * 2);
+    ctx.arc(26 * s, 0, 1.5 * s, 0, Math.PI * 2);
     ctx.fill();
-    ctx.shadowBlur = 0;
   }
+  ctx.restore();
+
   ctx.restore();
 
   const pct = hp / maxHp;
   const barColor = pct > 0.5 ? '#22c55e' : pct > 0.25 ? '#eab308' : '#ef4444';
-  drawHPBar(ctx, x, y - 28 * s, 38 * s, 5 * s, pct, barColor);
+  drawHPBar(ctx, x, y - 26 * s, 36 * s, 5 * s, pct, barColor);
 }
 
-// ── Sprite: Turret ──
+// ── Sprite: Turret – high-tech automated sentry (heavy base, double-barrel, red LED) ──
 function drawTurret(ctx: CanvasRenderingContext2D, x: number, y: number, t: number, zombies: any[]) {
   ctx.save();
 
-  // Find target angle
   let targetAngle = t * 0.5;
-  if (zombies?.length) {
+  const aliveZombies = zombies?.filter((z: any) => (z.hp ?? 0) > 0) ?? [];
+  if (aliveZombies.length) {
     let closest: any = null, minDist = Infinity;
-    zombies.forEach((z: any) => {
+    aliveZombies.forEach((z: any) => {
       const d = Math.hypot(z.x - x, z.y - y);
       if (d < minDist) { minDist = d; closest = z; }
     });
     if (closest) targetAngle = Math.atan2(closest.y - y, closest.x - x);
   }
 
-  // Range ring
   ctx.strokeStyle = 'rgba(34,211,238,0.06)';
   ctx.lineWidth = 0.5;
   ctx.setLineDash([3, 6]);
   ctx.beginPath(); ctx.arc(x, y, 150, 0, Math.PI * 2); ctx.stroke();
   ctx.setLineDash([]);
 
-  // Base plate
-  ctx.fillStyle = '#374151';
-  ctx.strokeStyle = '#4b5563';
-  ctx.lineWidth = 1.5;
-  roundRect(ctx, x - 11, y - 11, 22, 22, 4);
-  ctx.fill(); ctx.stroke();
-
-  // Diamond accent
+  // Heavy mechanical base (dark grey)
   ctx.fillStyle = '#1f2937';
-  ctx.beginPath();
-  ctx.moveTo(x, y - 8);
-  ctx.lineTo(x + 8, y);
-  ctx.lineTo(x, y + 8);
-  ctx.lineTo(x - 8, y);
-  ctx.closePath();
+  ctx.strokeStyle = '#374151';
+  ctx.lineWidth = 2;
+  roundRect(ctx, x - 16, y - 16, 32, 32, 6);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#111827';
+  roundRect(ctx, x - 12, y - 12, 24, 24, 4);
   ctx.fill();
+  ctx.strokeStyle = '#4b5563';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
-  // Rotating barrel
+  // Turret head (rotating) – dark with double-barrel
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(targetAngle);
-  ctx.fillStyle = '#6b7280';
-  ctx.fillRect(0, -2, 18, 4);
-  ctx.fillStyle = '#22d3ee';
-  ctx.shadowBlur = 6;
-  ctx.shadowColor = '#22d3ee';
-  ctx.beginPath(); ctx.arc(18, 0, 2, 0, Math.PI * 2); ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.restore();
 
-  // Center core
-  ctx.fillStyle = '#22d3ee';
-  ctx.shadowBlur = 8;
-  ctx.shadowColor = '#22d3ee';
-  ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
-  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#374151';
+  ctx.strokeStyle = '#4b5563';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#1f2937';
+  ctx.fillRect(-8, -4, 16, 8);
+  ctx.strokeRect(-8, -4, 16, 8);
+
+  const barrelLen = 28;
+  ctx.fillStyle = '#4b5563';
+  ctx.fillRect(0, -3, barrelLen, 3);
+  ctx.fillRect(0, 0, barrelLen, 3);
+  ctx.strokeStyle = '#6b7280';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0, -3, barrelLen, 3);
+  ctx.strokeRect(0, 0, barrelLen, 3);
+  ctx.fillStyle = '#1e293b';
+  ctx.beginPath();
+  ctx.arc(barrelLen, -1.5, 2, 0, Math.PI * 2);
+  ctx.arc(barrelLen, 1.5, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  const flash = Math.sin(t * 0.015) > 0.3;
+  ctx.fillStyle = flash ? '#ef4444' : '#7f1d1d';
+  ctx.beginPath();
+  ctx.arc(6, -6, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#991b1b';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.restore();
 
   ctx.restore();
 }
