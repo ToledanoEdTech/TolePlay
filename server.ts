@@ -632,6 +632,9 @@ async function startServer() {
         const aimAngle = typeof clientAimAngle === 'number' ? clientAimAngle : Math.atan2(0, 1);
         const weaponRange = weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000;
         const maxHitRange = 3000;
+        const GUN_TIP_DISTANCE = 51;
+        const gunTipX = px + Math.cos(aimAngle) * GUN_TIP_DISTANCE;
+        const gunTipY = py + Math.sin(aimAngle) * GUN_TIP_DISTANCE;
 
         function distPointToSegment(zx: number, zy: number, x1: number, y1: number, x2: number, y2: number): number {
           const dx = x2 - x1, dy = y2 - y1;
@@ -646,8 +649,8 @@ async function startServer() {
         ): boolean {
           return distPointToSegment(cx, cy, x1, y1, x2, y2) <= r;
         }
-        const SHOTGUN_HIT_RADIUS = 45;
-        const ZOMBIE_HITBOX_RADIUS = 28; // רדיוס פגיעה צמוד – גם ירי קרוב לזומבי מוריד חיים (לא רחוק)
+        const SHOTGUN_HIT_RADIUS = 52;
+        const ZOMBIE_HITBOX_RADIUS = 52; // Matches scaled zombie visual radius; segment-circle intersection for precision
 
         if (weapon === 'shotgun') {
           // Shotgun: 5 rays in a cone – only damage zombies that are hit by at least one ray (within hit radius of ray)
@@ -666,9 +669,9 @@ async function startServer() {
             let hit = false;
             for (const off of spreadOffsets) {
               const a = aimAngle + off;
-              const rx2 = px + Math.cos(a) * weaponRange;
-              const ry2 = py + Math.sin(a) * weaponRange;
-              if (distPointToSegment(z.x, z.y, px, py, rx2, ry2) <= SHOTGUN_HIT_RADIUS) {
+              const rx2 = gunTipX + Math.cos(a) * weaponRange;
+              const ry2 = gunTipY + Math.sin(a) * weaponRange;
+              if (distPointToSegment(z.x, z.y, gunTipX, gunTipY, rx2, ry2) <= SHOTGUN_HIT_RADIUS) {
                 hit = true;
                 break;
               }
@@ -676,32 +679,31 @@ async function startServer() {
             if (!hit) continue;
             const prevHp = typeof z.hp === 'number' ? z.hp : (z.maxHp ?? 100);
             zombies[i].hp = Math.max(0, prevHp - wpn.damage);
+            console.log("HIT! Zombie took damage. Remaining HP:", zombies[i].hp);
             if (zombies[i].hp <= 0) killed++;
           }
           spreadOffsets.forEach((off) => {
             const a = aimAngle + off;
             state.lasers.push({
-              x1: px, y1: py,
-              x2: px + Math.cos(a) * weaponRange,
-              y2: py + Math.sin(a) * weaponRange,
+              x1: gunTipX, y1: gunTipY,
+              x2: gunTipX + Math.cos(a) * weaponRange,
+              y2: gunTipY + Math.sin(a) * weaponRange,
               color: wpn.color, createdAt: now,
             });
           });
           player.resources = (player.resources || 0) + 50 * killed;
           player.score += 10 * killed;
         } else {
-          // Pistol, Assault Rifle, Sniper: STRICTLY single-target. No cone, no AOE.
-          // Only one zombie takes damage: the one whose hitbox (circle) is intersected by the bullet segment.
-          // Bullet = segment from (px,py) to (endX,endY). Zombie hitbox = circle at (z.x,z.y) radius ZOMBIE_HITBOX_RADIUS.
-          const endX = px + Math.cos(aimAngle) * weaponRange;
-          const endY = py + Math.sin(aimAngle) * weaponRange;
+          // Pistol, Assault Rifle, Sniper: single-target. Bullet segment from gun tip to end.
+          const endX = gunTipX + Math.cos(aimAngle) * weaponRange;
+          const endY = gunTipY + Math.sin(aimAngle) * weaponRange;
           const zombies = room.globalState.zombies || [];
           let hitZombie: any = null;
           let closestDist = Infinity;
           for (const z of zombies) {
-            const d = Math.hypot(z.x - px, z.y - py);
+            const d = Math.hypot(z.x - gunTipX, z.y - gunTipY);
             if (d > maxHitRange || d < 2) continue;
-            const intersects = segmentIntersectsCircle(z.x, z.y, ZOMBIE_HITBOX_RADIUS, px, py, endX, endY);
+            const intersects = segmentIntersectsCircle(z.x, z.y, ZOMBIE_HITBOX_RADIUS, gunTipX, gunTipY, endX, endY);
             if (intersects && d < closestDist) {
               closestDist = d;
               hitZombie = z;
@@ -710,14 +712,16 @@ async function startServer() {
           player.modeState.ammo = ammo - 1;
           player.modeState.lastFire = now;
           if (hitZombie) {
-            hitZombie.hp -= wpn.damage;
+            const prevHp = hitZombie.hp;
+            hitZombie.hp = Math.max(0, (typeof prevHp === 'number' ? prevHp : hitZombie.maxHp ?? 100) - wpn.damage);
+            console.log("HIT! Zombie took damage. Remaining HP:", hitZombie.hp);
             if (hitZombie.hp <= 0) {
               player.resources = (player.resources || 0) + 50;
               player.score += 10;
             }
           }
           room.globalState.lasers.push({
-            x1: px, y1: py, x2: hitZombie ? hitZombie.x : endX, y2: hitZombie ? hitZombie.y : endY,
+            x1: gunTipX, y1: gunTipY, x2: hitZombie ? hitZombie.x : endX, y2: hitZombie ? hitZombie.y : endY,
             color: wpn.color, createdAt: now,
           });
         }
@@ -805,15 +809,21 @@ async function startServer() {
           }
         }
 
-        // Move zombies toward base (center)
+        // Move zombies toward base (center) with shuffling/staggering gait (side sway + slight speed variation)
         state.zombies.forEach((z: any) => {
           const dx = BASE_X - z.x;
           const dy = BASE_Y - z.y;
           const dist = Math.hypot(dx, dy);
           z.angle = Math.atan2(dy, dx);
           if (dist > BASE_RADIUS + 10) {
-            z.x += (dx / dist) * z.speed;
-            z.y += (dy / dist) * z.speed;
+            const seed = (z.wobbleSeed ?? 0) * 100;
+            const phase = now / 400 + seed;
+            const sideSway = Math.sin(phase) * 0.9;
+            const speedMult = 0.85 + 0.3 * (0.5 + 0.5 * Math.sin(phase * 1.3));
+            const perpX = -dy / dist;
+            const perpY = dx / dist;
+            z.x += (dx / dist) * z.speed * speedMult + perpX * sideSway;
+            z.y += (dy / dist) * z.speed * speedMult + perpY * sideSway;
           } else {
             state.baseHealth -= 0.5 + state.wave * 0.1;
             if (state.baseHealth < 0) state.baseHealth = 0;

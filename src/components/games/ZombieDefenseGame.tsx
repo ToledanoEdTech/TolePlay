@@ -20,6 +20,10 @@ const ZOMBIE_BASE_Y = 2000;
 const BASE_RADIUS = 85;
 const CAMERA_ZOOM = 0.65;
 const PLAYER_SPEED = 7 * 60;
+/** Scale for player and zombie visuals (1.5 = 50% larger than base); keeps them smaller than houses but more visible */
+const ENTITY_SCALE = 1.5;
+/** Distance from player center to gun muzzle (bullet/laser origin); forward = +X in local coords */
+const GUN_TIP_DISTANCE = 34 * ENTITY_SCALE;
 
 const WEAPONS: Record<string, { id: string; name: string; damage: number; fireRate: number; color: string; cost: number; barrelLength: number }> = {
   pistol: { id: 'pistol', name: 'אקדח', damage: 25, fireRate: 400, color: '#06b6d4', cost: 0, barrelLength: 26 },
@@ -406,10 +410,10 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         ctx.restore();
       });
 
-      // Zombies (same look as HTML: ellipse, arms, HP bar)
+      // Zombies (grotesque, mottled, tattered; shuffling animation)
       gs?.zombies?.forEach((z: any, idx: number) => {
-        if (!isVis(z.x, z.y, 40)) return;
-        drawZombieHtml(ctx, z.x, z.y, z.hp, z.maxHp, z.angle ?? 0, t, idx);
+        if (!isVis(z.x, z.y, 60)) return;
+        drawZombieHtml(ctx, z.x, z.y, z.hp, z.maxHp, z.angle ?? 0, t, idx, z.wobbleSeed ?? idx);
       });
 
       // Players (with stable color index and names)
@@ -438,8 +442,9 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         ctx.strokeStyle = '#000';
         ctx.lineWidth = 3;
         const name = (p.name || 'שחקן').slice(0, 12);
-        ctx.strokeText(name, px, py - 42);
-        ctx.fillText(name, px, py - 42);
+        const nameY = py - 32 * ENTITY_SCALE - 10;
+        ctx.strokeText(name, px, nameY);
+        ctx.fillText(name, px, nameY);
         ctx.restore();
       });
 
@@ -547,20 +552,22 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     const aimAngle = Math.atan2(worldY - playerY, worldX - playerX);
     const now = Date.now();
 
+    const gunTipX = playerX + Math.cos(aimAngle) * GUN_TIP_DISTANCE;
+    const gunTipY = playerY + Math.sin(aimAngle) * GUN_TIP_DISTANCE;
     if (weapon === 'shotgun') {
       const spreadOffsets = [-0.2, -0.1, 0, 0.1, 0.2];
       spreadOffsets.forEach((off) => {
         const a = aimAngle + off;
-        const ex = playerX + Math.cos(a) * range;
-        const ey = playerY + Math.sin(a) * range;
-        localLasersRef.current.push({ x1: playerX, y1: playerY, x2: ex, y2: ey, color: (wpn?.color) ?? '#f97316', createdAt: now });
+        const ex = gunTipX + Math.cos(a) * range;
+        const ey = gunTipY + Math.sin(a) * range;
+        localLasersRef.current.push({ x1: gunTipX, y1: gunTipY, x2: ex, y2: ey, color: (wpn?.color) ?? '#f97316', createdAt: now });
       });
       socket.emit('action', { code: roomCode, playerId, actionType: 'shoot_zombie', aimAngle });
     } else {
-      const endX = playerX + Math.cos(aimAngle) * range;
-      const endY = playerY + Math.sin(aimAngle) * range;
+      const endX = gunTipX + Math.cos(aimAngle) * range;
+      const endY = gunTipY + Math.sin(aimAngle) * range;
       localLasersRef.current.push({
-        x1: playerX, y1: playerY, x2: endX, y2: endY,
+        x1: gunTipX, y1: gunTipY, x2: endX, y2: endY,
         color: (wpn?.color) ?? '#06b6d4',
         createdAt: now,
       });
@@ -1002,135 +1009,285 @@ function drawBase(ctx: CanvasRenderingContext2D, x: number, y: number, hpPct: nu
   ctx.restore();
 }
 
-// ── Zombie: same look as exmpl.html (ellipse, green, arms, HP bar) ──
+// ── Zombie: grotesque top-down monster; mottled skin, tattered clothing, arms forward; shuffling/stagger animation; HP bar horizontal ──
 function drawZombieHtml(
   ctx: CanvasRenderingContext2D, x: number, y: number,
-  hp: number, maxHp: number, angle: number, t: number, idx: number
+  hp: number, maxHp: number, angle: number, t: number, idx: number, wobbleSeed: number = 0
 ) {
+  const s = ENTITY_SCALE;
+  const now = Date.now();
+  // Shuffling / staggering: side-to-side sway and rotation wobble (clumsy gait)
+  const phase = now / 320 + wobbleSeed * 10;
+  const rotWobble = Math.sin(phase) * 0.18 + Math.sin(phase * 2.3) * 0.08;
+  const sideSway = Math.sin(phase * 1.7) * 4 * s;
+  const bob = Math.sin(phase * 2) * 2 * s;
+
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.translate(x + sideSway * Math.cos(angle + Math.PI / 2), y + sideSway * Math.sin(angle + Math.PI / 2));
+  ctx.rotate(angle + rotWobble);
+  ctx.translate(0, bob);
+
+  // Subtle shadow under zombie
+  ctx.shadowBlur = 14 * s;
+  ctx.shadowColor = 'rgba(0,0,0,0.4)';
+  ctx.shadowOffsetX = 6 * s;
+  ctx.shadowOffsetY = 8 * s;
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath();
-  ctx.ellipse(x + 8, y + 8, 14, 22, angle, 0, Math.PI * 2);
+  ctx.ellipse(0, 4 * s, 22 * s, 28 * s, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.translate(x, y);
-  ctx.rotate(angle + Math.sin((Date.now() / 200) + (idx * 100)) * 0.15);
-  ctx.fillStyle = '#064e3b';
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  // Tattered clothing (torso base) – dark rags
+  ctx.fillStyle = '#3d3630';
+  ctx.strokeStyle = '#2a2520';
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.ellipse(0, 0, 14, 22, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 4 * s, 18 * s, 24 * s, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = '#166534';
-  ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(5, -20, 18, 8, 4);
-  else ctx.rect(5, -20, 18, 8);
-  ctx.fill();
-  ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(8, 12, 16, 8, 4);
-  else ctx.rect(8, 12, 16, 8);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(4, 0, 13, 0, Math.PI * 2);
-  ctx.fillStyle = '#22c55e';
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = '#14532d';
   ctx.stroke();
+  // Tattered patches (irregular shapes)
+  ctx.fillStyle = '#4a4238';
+  ctx.beginPath();
+  ctx.ellipse(-6 * s, 2 * s, 8 * s, 10 * s, 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(7 * s, 6 * s, 6 * s, 12 * s, -0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#2d2822';
+  ctx.beginPath();
+  ctx.ellipse(5 * s, -4 * s, 5 * s, 8 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body (decaying skin under clothing) – mottled green/grey/brown
+  const skinGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 20 * s);
+  skinGrad.addColorStop(0, '#5a6b52');
+  skinGrad.addColorStop(0.4, '#4a5548');
+  skinGrad.addColorStop(0.7, '#3d4a38');
+  skinGrad.addColorStop(1, '#2d3628');
+  ctx.fillStyle = skinGrad;
+  ctx.beginPath();
+  ctx.ellipse(0, 2 * s, 14 * s, 20 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#252d20';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Head – decaying mottled skin
+  const headGrad = ctx.createRadialGradient(0, -2 * s, 0, 0, 0, 14 * s);
+  headGrad.addColorStop(0, '#6b7a5e');
+  headGrad.addColorStop(0.5, '#4d5c48');
+  headGrad.addColorStop(1, '#3a4535');
+  ctx.fillStyle = headGrad;
+  ctx.strokeStyle = '#2d3528';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, -16 * s, 14 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  // Eyes (hollow, creepy)
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.arc(-4 * s, -18 * s, 3 * s, 0, Math.PI * 2);
+  ctx.arc(4 * s, -18 * s, 3 * s, 0, Math.PI * 2);
+  ctx.fill();
+  // Mouth / wound hint
+  ctx.strokeStyle = '#2d2520';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, -12 * s, 4 * s, 0.2 * Math.PI, 0.8 * Math.PI);
+  ctx.stroke();
+
+  // Two arms always reaching forward (toward +y = toward player)
+  const armGrad = ctx.createLinearGradient(0, 0, 0, 24 * s);
+  armGrad.addColorStop(0, '#4a5c48');
+  armGrad.addColorStop(1, '#2d3a2a');
+  ctx.fillStyle = armGrad;
+  ctx.strokeStyle = '#252d20';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.ellipse(-11 * s, 10 * s, 6 * s, 20 * s, 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(11 * s, 10 * s, 6 * s, 20 * s, -0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  // Claws / hands (dark)
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.arc(-11 * s, 28 * s, 5 * s, 0, Math.PI * 2);
+  ctx.arc(11 * s, 28 * s, 5 * s, 0, Math.PI * 2);
+  ctx.fill();
+
   ctx.restore();
+
+  // Health bar: scaled with body size, always horizontal (world space, no rotation)
+  const barW = 42 * s;
+  const barH = 6 * s;
+  const barY = y - 40 * s;
   ctx.fillStyle = '#000';
-  ctx.fillRect(x - 15, y - 30, 30, 6);
+  ctx.fillRect(x - barW / 2, barY, barW, barH);
   ctx.fillStyle = '#ef4444';
-  ctx.fillRect(x - 15, y - 30, 30 * (Math.max(0, hp) / maxHp), 6);
+  ctx.fillRect(x - barW / 2, barY, barW * (Math.max(0, hp) / maxHp), barH);
 }
 
-// ── Player with weapon (like exmpl.html); accentColor for different players; legs move only when isMoving ──
+// ── Player: tactical character (vest/backpack, helmet, arms + weapon); rotates to aim; tactical palette; shadow ──
 function drawPlayerWithWeapon(
   ctx: CanvasRenderingContext2D, x: number, y: number, angle: number,
   hp: number, maxHp: number, weaponId: string, t: number, isMe: boolean, accentColor?: string, isMoving?: boolean
 ) {
-  const bodyColor = accentColor || '#22d3ee';
-  const bodyDark = accentColor ? colorAlpha(accentColor, 0.7) : '#0369a1';
+  const s = ENTITY_SCALE;
+  const vestDark = '#1e293b';
+  const vestMid = '#334155';
+  const vestLight = '#475569';
+  const helmetDark = '#0f172a';
+  const helmetMid = accentColor ? colorAlpha(accentColor, 0.9) : '#1e3a5f';
+  const camoGreen = '#374151';
+  const armColor = '#4b5563';
+  const breathe = isMoving ? Math.sin(Date.now() / 180) * 2.5 * s : 0;
+
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.beginPath();
-  ctx.arc(x + 10, y + 10, 18, 0, Math.PI * 2);
-  ctx.fill();
   ctx.translate(x, y);
-  ctx.beginPath();
-  ctx.arc(0, 0, 40, 0, Math.PI * 2);
-  ctx.fillStyle = colorAlpha(bodyColor, 0.15);
-  ctx.fill();
   ctx.rotate(angle);
-  const wC = isMoving ? Math.sin(Date.now() / 150) * 10 : 0;
-  ctx.fillStyle = '#1e293b';
-  ctx.strokeStyle = '#94a3b8';
-  ctx.lineWidth = 2;
-  ctx.fillRect(-10 + wC, -18, 14, 10);
-  ctx.strokeRect(-10 + wC, -18, 14, 10);
-  ctx.fillRect(-10 - wC, 8, 14, 10);
-  ctx.strokeRect(-10 - wC, 8, 14, 10);
-  const bGrad = ctx.createRadialGradient(0, 0, 5, 0, 0, 20);
-  bGrad.addColorStop(0, bodyColor);
-  bGrad.addColorStop(1, bodyDark);
+
+  // Drop shadow for depth (offset down-right in local “forward” frame)
+  ctx.shadowBlur = 16 * s;
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowOffsetX = 6 * s;
+  ctx.shadowOffsetY = 8 * s;
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath();
-  ctx.arc(0, 0, 18, 0, Math.PI * 2);
-  ctx.fillStyle = bGrad;
+  ctx.ellipse(6 * s, 2 * s, 28 * s, 22 * s, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = bodyColor;
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(0, 0, 12, 0, Math.PI * 2);
-  ctx.fillStyle = '#0f172a';
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(0, 0, 12, -Math.PI / 3, Math.PI / 3);
-  ctx.strokeStyle = bodyColor;
-  ctx.lineWidth = 4;
-  ctx.shadowBlur = 10;
-  ctx.shadowColor = bodyColor;
-  ctx.stroke();
   ctx.shadowBlur = 0;
-  ctx.translate(10, 16);
-  const wp = WEAPONS[weaponId] ?? WEAPONS.pistol;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  // Backpack (back = left, -X)
+  ctx.fillStyle = vestDark;
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(-12 * s, 0, 10 * s, 18 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = vestMid;
+  ctx.beginPath();
+  ctx.ellipse(-12 * s, 0, 6 * s, 12 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Tactical vest (body; front = right, +X)
+  const vestGrad = ctx.createLinearGradient(-26 * s, 0, 26 * s, 0);
+  vestGrad.addColorStop(0, vestDark);
+  vestGrad.addColorStop(0.35, camoGreen);
+  vestGrad.addColorStop(0.5, vestMid);
+  vestGrad.addColorStop(0.65, camoGreen);
+  vestGrad.addColorStop(1, vestDark);
+  ctx.fillStyle = vestGrad;
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(0, breathe * 0.5, 24 * s, 18 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = vestDark;
+  ctx.fillRect(-4 * s, -10 * s, 8 * s, 20 * s);
+  ctx.strokeStyle = vestLight;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-4 * s, -10 * s, 8 * s, 20 * s);
+
+  // Helmet (head, above body)
+  const helmetGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 16 * s);
+  helmetGrad.addColorStop(0, helmetMid);
+  helmetGrad.addColorStop(0.6, helmetDark);
+  helmetGrad.addColorStop(1, '#020617');
+  ctx.fillStyle = helmetGrad;
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, -18 * s, 14 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(30, 58, 95, 0.85)';
+  ctx.beginPath();
+  ctx.arc(4 * s, -18 * s, 10 * s, -0.6, 0.6);
+  ctx.lineTo(0, -18 * s);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#1e3a5f';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, -18 * s, 12 * s, -Math.PI / 3, Math.PI / 3);
+  ctx.strokeStyle = vestLight;
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  // Arms + gun on the RIGHT (+X). Gun tip at GUN_TIP_DISTANCE from center.
+  const handOffset = isMoving ? Math.sin(Date.now() / 150) * 4 * s : 0;
+  ctx.fillStyle = armColor;
+  ctx.strokeStyle = '#374151';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(10 * s, -8 * s + handOffset, 12 * s, 10 * s, 4);
+  else ctx.rect(10 * s, -8 * s + handOffset, 12 * s, 10 * s);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(10 * s, -2 * s - handOffset, 12 * s, 10 * s, 4);
+  else ctx.rect(10 * s, -2 * s - handOffset, 12 * s, 10 * s);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = vestDark;
+  ctx.fillRect(14 * s, -5 * s, 8 * s, 10 * s);
+  ctx.strokeRect(14 * s, -5 * s, 8 * s, 10 * s);
+
+  // Weapon barrel: drawn along +X (right). Tip at GUN_TIP_DISTANCE from origin.
+  ctx.translate(20 * s, 0);
   if (weaponId === 'pistol') {
     ctx.fillStyle = '#334155';
-    ctx.fillRect(0, -4, 18, 8);
+    ctx.fillRect(0, -4 * s, 14 * s, 8 * s);
     ctx.fillStyle = '#06b6d4';
     ctx.beginPath();
-    ctx.arc(16, 0, 3, 0, Math.PI * 2);
+    ctx.arc(14 * s, 0, 3 * s, 0, Math.PI * 2);
     ctx.fill();
   } else if (weaponId === 'rifle') {
-    ctx.fillStyle = '#1e293b';
-    ctx.fillRect(0, -5, 30, 10);
+    ctx.fillStyle = vestDark;
+    ctx.fillRect(0, -5 * s, 22 * s, 10 * s);
     ctx.fillStyle = '#0f172a';
-    ctx.fillRect(8, 5, 8, 6);
+    ctx.fillRect(14 * s, 4 * s, 8 * s, 6 * s);
     ctx.fillStyle = '#eab308';
     ctx.beginPath();
-    ctx.arc(28, 0, 4, 0, Math.PI * 2);
+    ctx.arc(22 * s, 0, 4 * s, 0, Math.PI * 2);
     ctx.fill();
   } else if (weaponId === 'shotgun') {
     ctx.fillStyle = '#451a03';
-    ctx.fillRect(0, -6, 24, 12);
+    ctx.fillRect(0, -5 * s, 18 * s, 10 * s);
     ctx.fillStyle = '#9a3412';
-    ctx.fillRect(6, -8, 10, 16);
+    ctx.fillRect(10 * s, -7 * s, 8 * s, 14 * s);
     ctx.fillStyle = '#f97316';
-    ctx.fillRect(22, -4, 4, 8);
+    ctx.fillRect(18 * s, -4 * s, 4 * s, 8 * s);
   } else if (weaponId === 'sniper') {
     ctx.fillStyle = '#172554';
-    ctx.fillRect(-5, -3, 45, 6);
+    ctx.fillRect(0, -3 * s, 30 * s, 6 * s);
     ctx.fillStyle = '#1e3a8a';
-    ctx.fillRect(5, -6, 15, 3);
+    ctx.fillRect(8 * s, -5 * s, 12 * s, 3 * s);
     ctx.fillStyle = '#38bdf8';
     ctx.shadowBlur = 10;
     ctx.shadowColor = '#38bdf8';
     ctx.beginPath();
-    ctx.arc(40, 0, 2, 0, Math.PI * 2);
+    ctx.arc(30 * s, 0, 2 * s, 0, Math.PI * 2);
     ctx.fill();
     ctx.shadowBlur = 0;
   }
   ctx.restore();
+
   const pct = hp / maxHp;
   const barColor = pct > 0.5 ? '#22c55e' : pct > 0.25 ? '#eab308' : '#ef4444';
-  drawHPBar(ctx, x, y - 26, 26, 4, pct, barColor);
+  drawHPBar(ctx, x, y - 48 * s, 38 * s, 5 * s, pct, barColor);
 }
 
 // ── Sprite: Turret ──
