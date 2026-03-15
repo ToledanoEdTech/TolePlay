@@ -173,6 +173,17 @@ input:focus {
   scroll-behavior: smooth;
 }
 
+.weapon-icon-wrap {
+  background-color: rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
 .weapon-icon {
   width: 40px;
   height: 40px;

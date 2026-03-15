@@ -78,7 +78,8 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const shakeRef = useRef<ShakeState>({ intensity: 0, offsetX: 0, offsetY: 0 });
   const prevBaseHp = useRef(globalState?.baseHealth ?? 1000);
   const timeRef = useRef(0);
-  const localLasersRef = useRef<{ x1: number; y1: number; x2: number; y2: number; color: string; createdAt: number }[]>([]);
+  const localLasersRef = useRef<{ x1: number; y1: number; x2: number; y2: number; color: string; createdAt: number; weaponId?: string }[]>([]);
+  const hitParticlesRef = useRef<{ x: number; y: number; createdAt: number }[]>([]);
   const mouseRef = useRef({ screenX: 0, screenY: 0, worldX: ZOMBIE_BASE_X, worldY: ZOMBIE_BASE_Y + 100, down: false });
   const minimapRef = useRef<HTMLCanvasElement>(null);
   const rifleIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -443,25 +444,77 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         if (len > 3600 || len < 1) return;
         const created = l.createdAt ?? nowMs;
         if (localLasersRef.current.some((ex) => Math.abs(ex.createdAt - created) < 80)) return;
-        localLasersRef.current.push({ x1, y1, x2, y2, color: l.color || '#06b6d4', createdAt: created });
+        localLasersRef.current.push({ x1, y1, x2, y2, color: l.color || '#06b6d4', createdAt: created, weaponId: 'pistol' });
       });
-      // Draw all lasers: bright tracer line, fade out over lifetime (no shadow for performance)
       const MAX_LASER_LEN = 3600;
+      const LASER_LIFETIME_BY_WEAPON: Record<string, number> = { pistol: 200, rifle: 180, shotgun: 220, sniper: 320 };
       localLasersRef.current.forEach((l) => {
         const age = nowMs - l.createdAt;
-        const life = 1 - age / LASER_LIFETIME_MS;
+        const maxLife = LASER_LIFETIME_BY_WEAPON[l.weaponId ?? 'pistol'] ?? LASER_LIFETIME_MS;
+        const life = 1 - age / maxLife;
         if (life <= 0) return;
         const len = Math.hypot(l.x2 - l.x1, l.y2 - l.y1);
         if (!Number.isFinite(len) || len < 1 || len > MAX_LASER_LEN) return;
+        const wid = l.weaponId ?? 'pistol';
         ctx.save();
         ctx.globalAlpha = life;
-        ctx.strokeStyle = '#FFFF00';
-        ctx.lineWidth = 4;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(l.x1, l.y1);
-        ctx.lineTo(l.x2, l.y2);
-        ctx.stroke();
+        if (wid === 'shotgun') {
+          ctx.strokeStyle = Math.random() > 0.5 ? '#f97316' : '#eab308';
+          ctx.lineWidth = 3;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(l.x1, l.y1);
+          ctx.lineTo(l.x2, l.y2);
+          ctx.stroke();
+        } else if (wid === 'rifle') {
+          ctx.strokeStyle = '#f97316';
+          ctx.lineWidth = 4;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(l.x1, l.y1);
+          ctx.lineTo(l.x2, l.y2);
+          ctx.stroke();
+        } else if (wid === 'sniper') {
+          ctx.strokeStyle = '#22d3ee';
+          ctx.lineWidth = 8;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(l.x1, l.y1);
+          ctx.lineTo(l.x2, l.y2);
+          ctx.stroke();
+          ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+          ctx.lineWidth = 4;
+          ctx.stroke();
+        } else {
+          const shortLen = Math.min(len, 280);
+          const x2 = l.x1 + (l.x2 - l.x1) / len * shortLen;
+          const y2 = l.y1 + (l.y2 - l.y1) / len * shortLen;
+          ctx.strokeStyle = '#FFFF00';
+          ctx.lineWidth = 4;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(l.x1, l.y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      });
+
+      hitParticlesRef.current = hitParticlesRef.current.filter((p) => nowMs - p.createdAt < 380);
+      hitParticlesRef.current.forEach((p) => {
+        const age = nowMs - p.createdAt;
+        const life = 1 - age / 380;
+        if (life <= 0) return;
+        if (!isVis(p.x, p.y, 50)) return;
+        ctx.save();
+        ctx.globalAlpha = life;
+        const sparks = [[-6, -4], [5, 3], [-3, 6], [6, -5]];
+        sparks.forEach(([ax, ay], i) => {
+          ctx.fillStyle = i % 2 === 0 ? '#fbbf24' : '#f97316';
+          ctx.beginPath();
+          ctx.arc(p.x + ax, p.y + ay, 4, 0, Math.PI * 2);
+          ctx.fill();
+        });
         ctx.restore();
       });
 
@@ -616,7 +669,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         const a = aimAngle + off;
         const ex = gunTipX + Math.cos(a) * range;
         const ey = gunTipY + Math.sin(a) * range;
-        localLasersRef.current.push({ x1: gunTipX, y1: gunTipY, x2: ex, y2: ey, color: (wpn?.color) ?? '#f97316', createdAt: now });
+        localLasersRef.current.push({ x1: gunTipX, y1: gunTipY, x2: ex, y2: ey, color: (wpn?.color) ?? '#f97316', createdAt: now, weaponId: 'shotgun' });
       });
       socket.emit('action', { code: roomCode, playerId, actionType: 'shoot_zombie', aimAngle });
     } else {
@@ -626,8 +679,10 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         x1: gunTipX, y1: gunTipY, x2: endX, y2: endY,
         color: (wpn?.color) ?? '#06b6d4',
         createdAt: now,
+        weaponId: weapon,
       });
       let targetId: string | undefined;
+      let hitZombie: { x: number; y: number } | null = null;
       const zombies = gsRef.current?.zombies ?? [];
       let minDistToClick = Infinity;
       zombies.forEach((z: any) => {
@@ -637,6 +692,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         if (distToClick < minDistToClick) {
           minDistToClick = distToClick;
           targetId = typeof z.id === 'string' ? z.id : String(z.id);
+          hitZombie = { x: z.x, y: z.y };
         }
       });
       socket.emit('action', {
@@ -646,7 +702,10 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         targetId: targetId ?? undefined,
         aimAngle,
       });
-      if (targetId) playHitSound();
+      if (targetId && hitZombie) {
+        playHitSound();
+        hitParticlesRef.current.push({ x: hitZombie.x, y: hitZombie.y, createdAt: now });
+      }
     }
     triggerShake(shakeRef.current, weapon === 'sniper' ? 5 : 3);
     playShootSound();
@@ -865,7 +924,9 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                 style={{ borderColor: isActive ? w.color : undefined }}
                 title={w.name}
               >
-                <img src={`/assets/${id}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" />
+                <div className="weapon-icon-wrap">
+                  <img src={`/assets/${id}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" />
+                </div>
                 <span className="hidden min-[400px]:inline truncate max-w-[60px]">{w.name}</span>
               </button>
             );
@@ -965,7 +1026,9 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                               className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-bold border-2 ${isActive ? 'ring-2 ring-cyan-400' : 'hover:bg-slate-700'}`}
                               style={{ borderColor: w.color, background: isActive ? 'rgba(30,41,59,0.9)' : undefined }}
                             >
-                              <img src={`/assets/${id}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" />
+                              <div className="weapon-icon-wrap">
+                                <img src={`/assets/${id}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" />
+                              </div>
                               {w.name}
                             </button>
                           ) : null;
@@ -985,7 +1048,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                       title={w.name}
                       desc={isOwned ? 'במאגר – בחר למעלה' : `נזק ${w.damage} | קצב ${w.fireRate}ms`}
                       cost={w.cost}
-                      icon={<img src={`/assets/${key}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" />}
+                      icon={<div className="weapon-icon-wrap"><img src={`/assets/${key}.png`} alt={w.name} className="weapon-icon w-10 h-10 object-contain" /></div>}
                       canAfford={!isOwned && canAfford}
                       onBuy={() => { if (!isOwned && canAfford) buyUpgrade(key, w.cost); }}
                     />
@@ -1369,9 +1432,11 @@ function drawPlayerWithWeapon(
   drawHPBar(ctx, x, y - 26 * s, 36 * s, 5 * s, pct, barColor);
 }
 
-// ── Sprite: Turret – high-tech automated sentry (heavy base, double-barrel, red LED) ──
+// ── Sprite: Turret – high-tech automated sentry (1.5x scale, heavy base, double-barrel, red LED) ──
+const TURRET_SCALE = 1.5;
 function drawTurret(ctx: CanvasRenderingContext2D, x: number, y: number, t: number, zombies: any[]) {
   ctx.save();
+  const S = TURRET_SCALE;
 
   let targetAngle = t * 0.5;
   const aliveZombies = zombies?.filter((z: any) => (z.hp ?? 0) > 0) ?? [];
@@ -1387,23 +1452,21 @@ function drawTurret(ctx: CanvasRenderingContext2D, x: number, y: number, t: numb
   ctx.strokeStyle = 'rgba(34,211,238,0.06)';
   ctx.lineWidth = 0.5;
   ctx.setLineDash([3, 6]);
-  ctx.beginPath(); ctx.arc(x, y, 150, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, 150 * S, 0, Math.PI * 2); ctx.stroke();
   ctx.setLineDash([]);
 
-  // Heavy mechanical base (dark grey)
   ctx.fillStyle = '#1f2937';
   ctx.strokeStyle = '#374151';
   ctx.lineWidth = 2;
-  roundRect(ctx, x - 16, y - 16, 32, 32, 6);
+  roundRect(ctx, x - 16 * S, y - 16 * S, 32 * S, 32 * S, 6 * S);
   ctx.fill(); ctx.stroke();
   ctx.fillStyle = '#111827';
-  roundRect(ctx, x - 12, y - 12, 24, 24, 4);
+  roundRect(ctx, x - 12 * S, y - 12 * S, 24 * S, 24 * S, 4 * S);
   ctx.fill();
   ctx.strokeStyle = '#4b5563';
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // Turret head (rotating) – dark with double-barrel
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(targetAngle);
@@ -1412,39 +1475,38 @@ function drawTurret(ctx: CanvasRenderingContext2D, x: number, y: number, t: numb
   ctx.strokeStyle = '#4b5563';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.arc(0, 0, 10, 0, Math.PI * 2);
+  ctx.arc(0, 0, 10 * S, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
   ctx.fillStyle = '#1f2937';
-  ctx.fillRect(-8, -4, 16, 8);
-  ctx.strokeRect(-8, -4, 16, 8);
+  ctx.fillRect(-8 * S, -4 * S, 16 * S, 8 * S);
+  ctx.strokeRect(-8 * S, -4 * S, 16 * S, 8 * S);
 
-  const barrelLen = 28;
+  const barrelLen = 28 * S;
   ctx.fillStyle = '#4b5563';
-  ctx.fillRect(0, -3, barrelLen, 3);
-  ctx.fillRect(0, 0, barrelLen, 3);
+  ctx.fillRect(0, -3 * S, barrelLen, 3 * S);
+  ctx.fillRect(0, 0, barrelLen, 3 * S);
   ctx.strokeStyle = '#6b7280';
   ctx.lineWidth = 1;
-  ctx.strokeRect(0, -3, barrelLen, 3);
-  ctx.strokeRect(0, 0, barrelLen, 3);
+  ctx.strokeRect(0, -3 * S, barrelLen, 3 * S);
+  ctx.strokeRect(0, 0, barrelLen, 3 * S);
   ctx.fillStyle = '#1e293b';
   ctx.beginPath();
-  ctx.arc(barrelLen, -1.5, 2, 0, Math.PI * 2);
-  ctx.arc(barrelLen, 1.5, 2, 0, Math.PI * 2);
+  ctx.arc(barrelLen, -1.5 * S, 2 * S, 0, Math.PI * 2);
+  ctx.arc(barrelLen, 1.5 * S, 2 * S, 0, Math.PI * 2);
   ctx.fill();
 
   const flash = Math.sin(t * 0.015) > 0.3;
   ctx.fillStyle = flash ? '#ef4444' : '#7f1d1d';
   ctx.beginPath();
-  ctx.arc(6, -6, 3, 0, Math.PI * 2);
+  ctx.arc(6 * S, -6 * S, 3 * S, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = '#991b1b';
   ctx.lineWidth = 1;
   ctx.stroke();
 
   ctx.restore();
-
   ctx.restore();
 }
 

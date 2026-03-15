@@ -482,7 +482,7 @@ async function startServer() {
         if (upgradeId === 'turret') {
           const baseX = room.globalState.baseX ?? 2000, baseY = room.globalState.baseY ?? 2000;
           const angle = Math.random() * Math.PI * 2;
-          const dist = 120 + Math.random() * 150;
+          const dist = 170 + Math.random() * 150;
           room.globalState.turrets.push({ x: baseX + Math.cos(angle) * dist, y: baseY + Math.sin(angle) * dist, lastShoot: 0 });
         }
         if (upgradeId === 'heal') {
