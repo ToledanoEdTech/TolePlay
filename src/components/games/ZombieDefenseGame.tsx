@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode, type MouseEvent as RMouseEvent, type TouchEvent as RTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QuestionPanel } from '../QuestionPanel';
-import { Wrench, Heart, Crosshair, ShoppingCart, HelpCircle } from 'lucide-react';
+import { Wrench, Heart, Crosshair, ShoppingCart, HelpCircle, Target, Zap, Layers } from 'lucide-react';
 import { socket } from '../../socket';
 import { createInputState, getMoveDirection, setupKeyboardListeners } from '../../engine/input';
 import { VirtualJoystick } from '../../engine/VirtualJoystick';
@@ -28,6 +28,16 @@ const WEAPONS: Record<string, { id: string; name: string; damage: number; fireRa
   sniper: { id: 'sniper', name: 'צלף', damage: 150, fireRate: 1200, color: '#38bdf8', cost: 1500, barrelLength: 50 },
 };
 
+function WeaponIcon({ weaponId, size = 14, color }: { weaponId: string; size?: number; color?: string }) {
+  const c = color ?? (WEAPONS[weaponId]?.color ?? '#94a3b8');
+  const style = { width: size, height: size, color: c, flexShrink: 0 };
+  if (weaponId === 'pistol') return <Target style={style} />;
+  if (weaponId === 'rifle') return <Zap style={style} />;
+  if (weaponId === 'shotgun') return <Layers style={style} />;
+  if (weaponId === 'sniper') return <Crosshair style={style} />;
+  return <Target style={style} />;
+}
+
 const GAME_DURATION_SEC = 6 * 60;
 
 interface Props {
@@ -44,6 +54,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const [showQuestions, setShowQuestions] = useState(false);
   const [showShop, setShowShop] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [optimisticWeapon, setOptimisticWeapon] = useState<string | null>(null);
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
@@ -57,6 +68,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   });
   const inputRef = useRef(createInputState());
   const lastSyncRef = useRef(0);
+  const lastInputTimeRef = useRef(0);
   const particlesRef = useRef<Particle[]>([]);
   const dustRef = useRef<DustMote[]>([]);
   const shakeRef = useRef<ShakeState>({ intensity: 0, offsetX: 0, offsetY: 0 });
@@ -65,9 +77,13 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const localLasersRef = useRef<{ x1: number; y1: number; x2: number; y2: number; color: string; createdAt: number }[]>([]);
   const mouseRef = useRef({ screenX: 0, screenY: 0, worldX: ZOMBIE_BASE_X, worldY: ZOMBIE_BASE_Y + 100, down: false });
   const minimapRef = useRef<HTMLCanvasElement>(null);
+  const rifleIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const playerRef = useRef(player);
+  const weaponDisplayRef = useRef<string>(player?.modeState?.weapon ?? 'pistol');
 
   useEffect(() => { gsRef.current = globalState; }, [globalState]);
   useEffect(() => { playersRef.current = allPlayers; }, [allPlayers]);
+  useEffect(() => { playerRef.current = player; }, [player]);
 
   useEffect(() => {
     const newHp = globalState?.baseHealth ?? 1000;
@@ -79,11 +95,13 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   }, [globalState]);
 
   useEffect(() => {
-    if (player?.x !== undefined && player?.y !== undefined) {
-      const dx = Math.abs(posRef.current.x - player.x);
-      const dy = Math.abs(posRef.current.y - player.y);
-      if (dx > 100 || dy > 100) posRef.current = { x: player.x, y: player.y };
-    }
+    if (player?.x === undefined || player?.y === undefined) return;
+    const dx = Math.abs(posRef.current.x - player.x);
+    const dy = Math.abs(posRef.current.y - player.y);
+    const recentlyMoved = Date.now() - lastInputTimeRef.current < 400;
+    const smallDrift = dx < 400 && dy < 400;
+    if (recentlyMoved && smallDrift) return;
+    if (dx > 350 || dy > 350) posRef.current = { x: player.x, y: player.y };
   }, [player?.x, player?.y]);
 
   // Server lasers are merged in the draw loop (with validation) so we don't get stale refs
@@ -199,6 +217,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       // ── UPDATE: player movement ──
       const dir = getMoveDirection(inputRef.current);
       if (dir.x !== 0 || dir.y !== 0) {
+        lastInputTimeRef.current = now;
         posRef.current.x = Math.max(0, Math.min(WORLD_SIZE, posRef.current.x + dir.x * PLAYER_SPEED * dt));
         posRef.current.y = Math.max(0, Math.min(WORLD_SIZE, posRef.current.y + dir.y * PLAYER_SPEED * dt));
         if (now - lastSyncRef.current > 50) {
@@ -403,7 +422,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         const py = p.id === playerId ? posRef.current.y : (p.y ?? ZOMBIE_BASE_Y);
         const hp = p.modeState?.hp ?? 100;
         const maxHp = p.modeState?.maxHp ?? 100;
-        const weapon = p.modeState?.weapon ?? 'pistol';
+        const weapon = p.id === playerId ? (weaponDisplayRef.current || p.modeState?.weapon || 'pistol') : (p.modeState?.weapon ?? 'pistol');
         const angle = p.id === playerId
           ? Math.atan2(mouseRef.current.worldY - py, mouseRef.current.worldX - px)
           : (Math.atan2(ZOMBIE_BASE_Y - py, ZOMBIE_BASE_X - px));
@@ -423,6 +442,29 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         ctx.fillText(name, px, py - 42);
         ctx.restore();
       });
+
+      // Crosshair at aim point (world space)
+      const cx = mouseRef.current.worldX;
+      const cy = mouseRef.current.worldY;
+      if (isVis(cx, cy, 80)) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        const ch = 18;
+        ctx.moveTo(cx - ch, cy);
+        ctx.lineTo(cx + ch, cy);
+        ctx.moveTo(cx, cy - ch);
+        ctx.lineTo(cx, cy + ch);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
 
       particlesRef.current = tickParticles(ctx, particlesRef.current);
 
@@ -478,10 +520,89 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     mouseRef.current.screenY = clientY - rect.top;
   }, []);
 
+  const fireOneShot = useCallback(() => {
+    const canvas = canvasRef.current;
+    const pl = playerRef.current;
+    const ammo = pl?.modeState?.ammo ?? 0;
+    if (ammo < 1) {
+      if (rifleIntervalRef.current) {
+        clearInterval(rifleIntervalRef.current);
+        rifleIntervalRef.current = null;
+      }
+      playErrorSound();
+      return;
+    }
+    if (!canvas) return;
+    const vpW = canvas.width;
+    const vpH = canvas.height;
+    const playerX = posRef.current.x;
+    const playerY = posRef.current.y;
+    const worldX = playerX + (mouseRef.current.screenX - vpW / 2) / CAMERA_ZOOM;
+    const worldY = playerY + (mouseRef.current.screenY - vpH / 2) / CAMERA_ZOOM;
+    const weapon = weaponDisplayRef.current || (pl?.modeState?.weapon ?? 'pistol');
+    const wpn = WEAPONS[weapon];
+    const weaponRange = wpn ? (weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000) : 1000;
+    const toScreenEdge = Math.hypot(vpW / 2, vpH / 2) / CAMERA_ZOOM;
+    const range = Math.max(weaponRange, toScreenEdge);
+    const aimAngle = Math.atan2(worldY - playerY, worldX - playerX);
+    const now = Date.now();
+
+    if (weapon === 'shotgun') {
+      const spreadOffsets = [-0.2, -0.1, 0, 0.1, 0.2];
+      spreadOffsets.forEach((off) => {
+        const a = aimAngle + off;
+        const ex = playerX + Math.cos(a) * range;
+        const ey = playerY + Math.sin(a) * range;
+        localLasersRef.current.push({ x1: playerX, y1: playerY, x2: ex, y2: ey, color: (wpn?.color) ?? '#f97316', createdAt: now });
+      });
+      socket.emit('action', { code: roomCode, playerId, actionType: 'shoot_zombie', aimAngle });
+    } else {
+      const endX = playerX + Math.cos(aimAngle) * range;
+      const endY = playerY + Math.sin(aimAngle) * range;
+      localLasersRef.current.push({
+        x1: playerX, y1: playerY, x2: endX, y2: endY,
+        color: (wpn?.color) ?? '#06b6d4',
+        createdAt: now,
+      });
+      let targetId: string | undefined;
+      const zombies = gsRef.current?.zombies ?? [];
+      let minDistToClick = Infinity;
+      zombies.forEach((z: any) => {
+        const distFromPlayer = Math.hypot(z.x - playerX, z.y - playerY);
+        if (distFromPlayer > range) return;
+        const distToClick = Math.hypot(z.x - worldX, z.y - worldY);
+        if (distToClick < minDistToClick) {
+          minDistToClick = distToClick;
+          targetId = typeof z.id === 'string' ? z.id : String(z.id);
+        }
+      });
+      socket.emit('action', {
+        code: roomCode,
+        playerId,
+        actionType: 'shoot_zombie',
+        targetId: targetId ?? undefined,
+        aimAngle,
+      });
+      if (targetId) playHitSound();
+    }
+    triggerShake(shakeRef.current, weapon === 'sniper' ? 5 : 3);
+    playShootSound();
+    playLaserSound();
+  }, [roomCode, playerId]);
+
+  useEffect(() => () => {
+    if (rifleIntervalRef.current) {
+      clearInterval(rifleIntervalRef.current);
+      rifleIntervalRef.current = null;
+    }
+  }, []);
+
   const handleCanvasClick = useCallback((e: RMouseEvent<HTMLCanvasElement> | RTouchEvent<HTMLCanvasElement>) => {
-    e.preventDefault?.();
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const target = 'target' in e ? e.target : (e as React.SyntheticEvent).nativeEvent?.target;
+    if (target && target !== canvas) return;
+    e.preventDefault?.();
     const ammo = player?.modeState?.ammo ?? 0;
     if (ammo < 1) {
       playErrorSound();
@@ -497,51 +618,35 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       clientY = e.clientY;
     }
     updateMouse(clientX, clientY);
-    const rect = canvas.getBoundingClientRect();
-    const screenX = clientX - rect.left;
-    const screenY = clientY - rect.top;
-    const playerX = posRef.current.x;
-    const playerY = posRef.current.y;
-    const worldX = playerX + (screenX - canvas.width / 2) / CAMERA_ZOOM;
-    const worldY = playerY + (screenY - canvas.height / 2) / CAMERA_ZOOM;
     const weapon = player?.modeState?.weapon ?? 'pistol';
-    const wpn = WEAPONS[weapon];
-    const weaponRange = wpn ? (weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000) : 1000;
-    const toScreenEdge = Math.hypot(canvas.width / 2, canvas.height / 2) / CAMERA_ZOOM;
-    const range = Math.max(weaponRange, toScreenEdge);
-    const aimAngle = Math.atan2(worldY - playerY, worldX - playerX);
-    const endX = playerX + Math.cos(aimAngle) * range;
-    const endY = playerY + Math.sin(aimAngle) * range;
-    const now = Date.now();
-    localLasersRef.current.push({
-      x1: playerX, y1: playerY, x2: endX, y2: endY,
-      color: wpn?.color ?? '#06b6d4',
-      createdAt: now,
-    });
-    let targetId: string | undefined;
-    const zombies = gsRef.current?.zombies ?? [];
-    let minDistToClick = Infinity;
-    zombies.forEach((z: any) => {
-      const distFromPlayer = Math.hypot(z.x - playerX, z.y - playerY);
-      if (distFromPlayer > range) return;
-      const distToClick = Math.hypot(z.x - worldX, z.y - worldY);
-      if (distToClick < minDistToClick) {
-        minDistToClick = distToClick;
-        targetId = typeof z.id === 'string' ? z.id : String(z.id);
-      }
-    });
-    socket.emit('action', {
-      code: roomCode,
-      playerId,
-      actionType: 'shoot_zombie',
-      targetId: targetId ?? undefined,
-      aimAngle,
-    });
-    triggerShake(shakeRef.current, 3);
-    playShootSound();
-    playLaserSound();
-    if (targetId) playHitSound();
-  }, [roomCode, playerId, player?.modeState?.ammo, player?.modeState?.weapon, updateMouse]);
+    if (weapon === 'rifle') return;
+    fireOneShot();
+  }, [player?.modeState?.ammo, player?.modeState?.weapon, updateMouse, fireOneShot]);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    const canvas = canvasRef.current;
+    if (!canvas || e.target !== canvas) return;
+    const weapon = playerRef.current?.modeState?.weapon ?? 'pistol';
+    if (weapon !== 'rifle') return;
+    if ((playerRef.current?.modeState?.ammo ?? 0) < 1) return;
+    updateMouse(e.clientX, e.clientY);
+    fireOneShot();
+    if (rifleIntervalRef.current) clearInterval(rifleIntervalRef.current);
+    rifleIntervalRef.current = setInterval(fireOneShot, 150);
+  }, [updateMouse, fireOneShot]);
+
+  const handlePointerUp = useCallback(() => {
+    if (rifleIntervalRef.current) {
+      clearInterval(rifleIntervalRef.current);
+      rifleIntervalRef.current = null;
+    }
+  }, []);
+
+  const switchWeaponTo = useCallback((id: string) => {
+    if (!WEAPONS[id]) return;
+    setOptimisticWeapon(id);
+    socket.emit('switchWeapon', { code: roomCode, playerId, weaponId: id });
+  }, [roomCode, playerId]);
 
   const buyUpgrade = (id: string, cost: number) => {
     socket.emit('buyUpgrade', { code: roomCode, playerId, upgradeId: id, cost });
@@ -555,6 +660,15 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
     socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: false });
   }, [roomCode, playerId]);
 
+  const serverWeapon = player?.modeState?.weapon ?? 'pistol';
+  const weaponId = optimisticWeapon ?? serverWeapon;
+  useEffect(() => {
+    setOptimisticWeapon(null);
+  }, [serverWeapon]);
+  useEffect(() => {
+    weaponDisplayRef.current = weaponId;
+  }, [weaponId]);
+
   const baseHp = globalState?.baseHealth ?? 0;
   const maxHp = globalState?.maxBaseHealth ?? 1000;
   const wave = globalState?.wave ?? 1;
@@ -563,8 +677,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const hpPct = maxHp > 0 ? baseHp / maxHp : 1;
   const coins = Math.floor(player?.resources ?? 0);
   const ammo = Math.floor(player?.modeState?.ammo ?? 0);
-  const weaponId = player?.modeState?.weapon ?? 'pistol';
-  const weaponName = WEAPONS[weaponId]?.name ?? 'אקדח';
+  const weaponName = (WEAPONS[weaponId]?.name) ?? 'אקדח';
   const showOutOfAmmo = ammo <= 0 && (globalState?.zombies?.length || 0) > 0;
   const elapsed = startTime ? (now - startTime) / 1000 : 0;
   const timeLeftSec = Math.max(0, Math.floor(GAME_DURATION_SEC - elapsed));
@@ -572,19 +685,25 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
 
   return (
     <div className="fixed inset-0 bg-[#08090d] text-white flex flex-col">
-      {/* Full-screen game canvas */}
-      <div className="absolute inset-0">
+      {/* Full-screen game canvas – z-0 so overlays can sit on top */}
+      <div className="absolute inset-0 z-0">
         <canvas
           ref={canvasRef}
-          className="absolute inset-0 w-full h-full cursor-crosshair"
+          className="absolute inset-0 w-full h-full cursor-crosshair touch-none"
+          style={{ touchAction: 'none' }}
           onClick={handleCanvasClick}
           onTouchStart={handleCanvasClick}
+          onTouchMove={(e) => { e.preventDefault(); if (e.touches[0]) updateMouse(e.touches[0].clientX, e.touches[0].clientY); }}
           onMouseMove={(e) => updateMouse(e.clientX, e.clientY)}
           onMouseDown={() => { mouseRef.current.down = true; }}
           onMouseUp={() => { mouseRef.current.down = false; }}
           onMouseLeave={() => { mouseRef.current.down = false; }}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+          onPointerCancel={handlePointerUp}
         />
-        <div className="absolute top-24 left-4 w-32 h-32 bg-slate-900/80 border-2 border-slate-700 rounded-lg pointer-events-none overflow-hidden backdrop-blur-md opacity-80" dir="ltr">
+        <div className="absolute top-20 right-2 w-24 h-24 min-[480px]:top-24 min-[480px]:left-4 min-[480px]:w-32 min-[480px]:h-32 bg-slate-900/80 border-2 border-slate-700 rounded-lg pointer-events-none overflow-hidden backdrop-blur-md opacity-80" dir="ltr">
           <canvas ref={minimapRef} width={128} height={128} className="w-full h-full" />
         </div>
         <AnimatePresence>
@@ -600,27 +719,22 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         </AnimatePresence>
       </div>
 
-      {/* Compact HUD overlay */}
-      <div className="absolute top-0 left-0 right-0 z-20 p-2 bg-gradient-to-b from-black/80 to-transparent pointer-events-none">
-        <div className="flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-blue-300">הגנת זומבים</span>
-            <span className="text-[11px] bg-emerald-900/60 px-2 py-0.5 rounded font-mono font-bold">⏱ {timerStr}</span>
-            <span className="text-[11px] bg-red-900/60 px-2 py-0.5 rounded">🧟 {zombieCount}</span>
-            <span className="text-[11px] bg-indigo-900/60 px-2 py-0.5 rounded">גל {wave}</span>
-            <span className="text-[11px] bg-cyan-900/60 px-2 py-0.5 rounded">🗼 {turretCount}</span>
+      {/* HUD – responsive for mobile: wrap, no overlap */}
+      <div className="absolute top-0 left-0 right-0 z-20 px-2 pt-1.5 pb-2 min-[480px]:p-2 bg-gradient-to-b from-black/85 to-transparent pointer-events-none">
+        <div className="flex flex-wrap gap-1.5 items-center justify-between">
+          <div className="flex flex-wrap gap-1.5 items-center min-w-0">
+            <span className="text-[10px] min-[480px]:text-xs font-bold text-blue-300 shrink-0">הגנת זומבים</span>
+            <span className="text-[10px] min-[480px]:text-[11px] bg-emerald-900/60 px-1.5 py-0.5 rounded font-mono font-bold shrink-0">⏱ {timerStr}</span>
+            <span className="text-[10px] min-[480px]:text-[11px] bg-red-900/60 px-1.5 py-0.5 rounded shrink-0">🧟 {zombieCount}</span>
+            <span className="text-[10px] min-[480px]:text-[11px] bg-indigo-900/60 px-1.5 py-0.5 rounded shrink-0">גל {wave}</span>
+            <span className="text-[10px] min-[480px]:text-[11px] bg-cyan-900/60 px-1.5 py-0.5 rounded shrink-0">🗼 {turretCount}</span>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="bg-amber-900/70 px-3 py-1 rounded-lg border border-amber-600/50">
-              <span className="text-sm font-bold text-amber-300">🎯 {ammo}</span>
-              <span className="text-[10px] text-amber-400/80 mr-1">תחמושת</span>
-            </div>
-            <div className="bg-yellow-900/50 px-2 py-1 rounded border border-yellow-600/40">
-              <span className="text-sm font-bold text-yellow-300">💰 {coins}</span>
-            </div>
+          <div className="flex flex-wrap gap-1.5 items-center shrink-0">
+            <span className="text-[10px] min-[480px]:text-sm font-bold text-amber-300 bg-amber-900/70 px-2 py-0.5 rounded border border-amber-600/50">🎯 {ammo}</span>
+            <span className="text-[10px] min-[480px]:text-sm font-bold text-yellow-300 bg-yellow-900/50 px-2 py-0.5 rounded border border-yellow-600/40">💰 {coins}</span>
           </div>
         </div>
-        <div className="mt-1.5 h-3 bg-slate-800/90 rounded-full overflow-hidden border border-slate-600/50 relative flex items-center">
+        <div className="mt-1.5 h-7 min-[480px]:h-8 bg-slate-800/90 rounded-full overflow-hidden border-2 border-slate-600/50 relative flex items-center">
           <motion.div
             className="absolute inset-y-0 left-0 rounded-full"
             style={{
@@ -630,48 +744,88 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
             animate={{ width: `${hpPct * 100}%` }}
             transition={{ duration: 0.3 }}
           />
-          <span className="relative z-10 w-full text-center text-[10px] font-bold text-white drop-shadow-md">
+          <span className="relative z-10 w-full text-center text-xs min-[480px]:text-sm font-bold text-white drop-shadow-md">
             בסיס: {Math.floor(baseHp)}/{maxHp}
           </span>
         </div>
-        <div className="text-[11px] text-cyan-400 mt-0.5">{weaponName}</div>
-        <div className="text-[11px] text-slate-400">⭐ {player?.score ?? 0}</div>
+        <div className="flex flex-wrap gap-x-3 gap-y-1 mt-0.5 items-center">
+          <span className="text-[10px] min-[480px]:text-[11px] text-cyan-400">{weaponName}</span>
+          <span className="text-[10px] min-[480px]:text-[11px] text-slate-400">⭐ {player?.score ?? 0}</span>
+        </div>
       </div>
 
-      {/* Out of ammo banner */}
+      {/* Out of ammo banner – below HUD, not overlapping */}
       <AnimatePresence>
         {showOutOfAmmo && (
           <motion.div
             initial={{ y: -50, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: -50, opacity: 0 }}
-            className="absolute top-14 left-1/2 -translate-x-1/2 z-30 bg-amber-900/95 backdrop-blur px-4 py-3 rounded-xl border-2 border-amber-500/60 shadow-xl pointer-events-none"
+            className="absolute top-16 min-[480px]:top-14 left-2 right-2 min-[480px]:left-1/2 min-[480px]:right-auto min-[480px]:-translate-x-1/2 min-[480px]:max-w-sm z-30 bg-amber-900/95 backdrop-blur px-3 py-2 min-[480px]:px-4 min-[480px]:py-3 rounded-xl border-2 border-amber-500/60 shadow-xl pointer-events-none"
           >
-            <p className="text-amber-100 font-bold text-center">💥 נגמרה התחמושת!</p>
-            <p className="text-amber-200/90 text-sm text-center mt-1">לחץ על &quot;שאלות&quot; וענה נכון כדי למלא תחמושת (+10 לכל תשובה נכונה)</p>
+            <p className="text-amber-100 font-bold text-center text-sm min-[480px]:text-base">💥 נגמרה התחמושת!</p>
+            <p className="text-amber-200/90 text-xs min-[480px]:text-sm text-center mt-0.5 min-[480px]:mt-1">לחץ על &quot;שאלות&quot; וענה נכון כדי למלא תחמושת (+10)</p>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Bottom buttons */}
-      <div className="absolute bottom-4 left-0 right-0 z-20 flex justify-center gap-3 px-4 pointer-events-auto">
-        <button
-          onClick={() => setShowQuestions(true)}
-          className="px-5 py-3 rounded-xl font-bold bg-blue-600 hover:bg-blue-500 text-white shadow-lg border border-blue-500/50 flex items-center gap-2"
-        >
-          <HelpCircle size={18} /> שאלות (+תחמושת)
-        </button>
-        <button
-          onClick={() => setShowShop(true)}
-          className="px-5 py-3 rounded-xl font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg border border-emerald-500/50 flex items-center gap-2"
-        >
-          <ShoppingCart size={18} /> חנות
-        </button>
+      {/* Weapon switcher: fixed on RIGHT side, high z-index so it always receives clicks */}
+      <div className="fixed right-2 top-1/2 -translate-y-1/2 z-[100] flex flex-col gap-2 pointer-events-auto py-2" dir="ltr">
+        <span className="text-[10px] text-slate-300 font-bold text-center">נשק</span>
+        {(() => {
+          const owned = Array.isArray(player?.modeState?.ownedWeapons) && player.modeState.ownedWeapons.length > 0
+            ? player.modeState.ownedWeapons
+            : (player?.modeState?.weapon ? ['pistol', player.modeState.weapon] : ['pistol']);
+          const validOwned = owned.filter((id): id is string => !!WEAPONS[id]);
+          if (validOwned.length === 0) return null;
+          return validOwned.map((id, idx) => {
+            const w = WEAPONS[id];
+            const isActive = weaponId === id;
+            return (
+              <button
+                key={`${id}-${idx}`}
+                type="button"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  switchWeaponTo(id);
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  switchWeaponTo(id);
+                }}
+                className={`flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-[11px] font-bold border-2 min-h-[48px] min-w-[48px] touch-manipulation cursor-pointer select-none bg-slate-800/95 backdrop-blur ${isActive ? 'ring-2 ring-cyan-400 bg-slate-600 border-cyan-400' : 'border-slate-500 hover:bg-slate-700 active:scale-95'}`}
+                style={{ borderColor: isActive ? w.color : undefined }}
+                title={w.name}
+              >
+                <WeaponIcon weaponId={id} size={20} color={w.color} />
+                <span className="hidden min-[400px]:inline truncate max-w-[60px]">{w.name}</span>
+              </button>
+            );
+          });
+        })()}
       </div>
 
-      {/* Virtual joystick */}
-      <div className="absolute bottom-4 left-4 z-20 pointer-events-auto">
-        <VirtualJoystick onMove={onJoystickMove} onRelease={onJoystickRelease} size={110} teamColor="rgba(34,211,238,0.5)" />
+      {/* Bottom: joystick left, שאלות + חנות right */}
+      <div className="absolute bottom-3 left-0 right-0 z-20 flex items-end justify-between gap-2 px-2 min-[480px]:px-4 pointer-events-none">
+        <div className="pointer-events-auto">
+          <VirtualJoystick onMove={onJoystickMove} onRelease={onJoystickRelease} size={110} teamColor="rgba(34,211,238,0.5)" />
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2 pointer-events-auto" dir="ltr">
+          <button
+            onClick={() => setShowQuestions(true)}
+            className="px-3 py-2 min-[480px]:px-5 min-[480px]:py-3 rounded-xl font-bold text-sm min-[480px]:text-base bg-blue-600 hover:bg-blue-500 text-white shadow-lg border border-blue-500/50 flex items-center gap-1.5 min-[480px]:gap-2"
+          >
+            <HelpCircle size={16} className="min-[480px]:w-[18px] min-[480px]:h-[18px]" /> <span className="hidden min-[400px]:inline">שאלות (+תחמושת)</span><span className="min-[400px]:hidden">שאלות</span>
+          </button>
+          <button
+            onClick={() => setShowShop(true)}
+            className="px-3 py-2 min-[480px]:px-5 min-[480px]:py-3 rounded-xl font-bold text-sm min-[480px]:text-base bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg border border-emerald-500/50 flex items-center gap-1.5 min-[480px]:gap-2"
+          >
+            <ShoppingCart size={16} className="min-[480px]:w-[18px] min-[480px]:h-[18px]" /> חנות
+          </button>
+        </div>
       </div>
 
       {/* Questions modal - Kahoot style */}
@@ -725,17 +879,46 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                 <button onClick={() => setShowShop(false)} className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 font-bold">סגור</button>
               </div>
               <div className="p-4 space-y-2 overflow-y-auto">
+                {(() => {
+                  const owned = (player?.modeState?.ownedWeapons ?? ['pistol']).filter((id: string) => WEAPONS[id]);
+                  if (owned.length === 0) return null;
+                  return (
+                    <div className="mb-4 p-3 bg-slate-800/70 rounded-xl border border-slate-600">
+                      <p className="text-slate-300 text-sm font-bold mb-2">החלף נשק פעיל</p>
+                      <div className="flex flex-wrap gap-2" dir="ltr">
+                        {owned.map((id: string, idx: number) => {
+                          const w = WEAPONS[id];
+                          const isActive = weaponId === id;
+                          return w ? (
+                            <button
+                              key={`shop-${id}-${idx}`}
+                              type="button"
+                              onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); switchWeaponTo(id); }}
+                              onClick={(e) => { e.preventDefault(); e.stopPropagation(); switchWeaponTo(id); }}
+                              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-bold border-2 ${isActive ? 'ring-2 ring-cyan-400' : 'hover:bg-slate-700'}`}
+                              style={{ borderColor: w.color, background: isActive ? 'rgba(30,41,59,0.9)' : undefined }}
+                            >
+                              <WeaponIcon weaponId={id} size={18} color={w.color} />
+                              {w.name}
+                            </button>
+                          ) : null;
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
                 <p className="text-slate-400 text-sm font-bold mb-2">נשקייה (מטבעות)</p>
                 {Object.entries(WEAPONS).map(([key, w]) => {
-                  const isOwned = weaponId === key;
+                  const ownedList = player?.modeState?.ownedWeapons ?? ['pistol'];
+                  const isOwned = ownedList.includes(key);
                   const canAfford = coins >= w.cost;
                   return (
                     <ShopButton
                       key={key}
                       title={w.name}
-                      desc={isOwned ? 'מצויד' : `נזק ${w.damage} | קצב ${w.fireRate}ms`}
+                      desc={isOwned ? 'במאגר – בחר למעלה' : `נזק ${w.damage} | קצב ${w.fireRate}ms`}
                       cost={w.cost}
-                      icon={<span className="w-8 h-8 rounded-full flex items-center justify-center text-lg" style={{ background: w.color, color: '#000' }}>🔫</span>}
+                      icon={<span className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: w.color + '33', color: w.color }}><WeaponIcon weaponId={key} size={22} color={w.color} /></span>}
                       canAfford={!isOwned && canAfford}
                       onBuy={() => { if (!isOwned && canAfford) buyUpgrade(key, w.cost); }}
                     />
@@ -745,9 +928,9 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                 <ShopButton title="בנה צריח" desc="צריח אוטומטי שיורה בזומבים" cost={500}
                   icon={<Crosshair className="text-cyan-400" size={18} />}
                   canAfford={coins >= 500} onBuy={() => buyUpgrade('turret', 500)} />
-                <ShopButton title="תקן בסיס" desc="שחזר 500 נקודות חיים לבסיס" cost={100}
+                <ShopButton title="תקן בסיס" desc="שחזר 500 נקודות חיים לבסיס" cost={400}
                   icon={<Wrench className="text-blue-400" size={18} />}
-                  canAfford={coins >= 100} onBuy={() => buyUpgrade('repair', 100)} />
+                  canAfford={coins >= 400} onBuy={() => buyUpgrade('repair', 400)} />
                 <ShopButton title="ריפוי קבוצתי" desc="מרפא את כל חברי הקבוצה" cost={300}
                   icon={<Heart className="text-pink-400" size={18} />}
                   canAfford={coins >= 300} onBuy={() => buyUpgrade('heal', 300)} />

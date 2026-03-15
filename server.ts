@@ -193,7 +193,7 @@ async function startServer() {
         const baseX = 2000, baseY = 2000;
         newPlayer.x = baseX + (Math.random() * 120 - 60);
         newPlayer.y = baseY + 120 + Math.random() * 80;
-        newPlayer.modeState = { hp: 100, maxHp: 100, ammo: 10, weapon: 'pistol', lastFire: 0 };
+        newPlayer.modeState = { hp: 100, maxHp: 100, ammo: 10, weapon: 'pistol', lastFire: 0, ownedWeapons: ['pistol'] };
       } else if (room.mode === 'ctf') {
         const redCount = Object.values(room.players).filter(p => p.modeState.team === 'red').length;
         const blueCount = Object.values(room.players).filter(p => p.modeState.team === 'blue').length;
@@ -490,6 +490,8 @@ async function startServer() {
         // Weapon purchases (coins = player.resources; cost already deducted above)
         const wpn = ZOMBIE_WEAPONS[upgradeId];
         if (wpn && wpn.cost > 0 && cost === wpn.cost) {
+          if (!Array.isArray(player.modeState.ownedWeapons)) player.modeState.ownedWeapons = ['pistol'];
+          player.modeState.ownedWeapons.push(upgradeId);
           player.modeState.weapon = upgradeId;
         }
       } else if (room.mode === 'economy') {
@@ -518,6 +520,25 @@ async function startServer() {
 
       io.to(code).emit("playerUpdated", { playerId, player });
       io.to(code).emit("globalStateUpdated", room.globalState);
+    });
+
+    socket.on("switchWeapon", ({ code, playerId, weaponId }) => {
+      const room = rooms[code];
+      if (!room || room.state !== 'playing' || room.mode !== 'zombie') return;
+      const player = room.players[playerId];
+      if (!player) return;
+      if (!player.modeState) player.modeState = {};
+      let owned = player.modeState.ownedWeapons;
+      if (!Array.isArray(owned) || owned.length === 0) {
+        owned = ['pistol'];
+        if (player.modeState.weapon && player.modeState.weapon !== 'pistol') owned.push(player.modeState.weapon);
+        player.modeState.ownedWeapons = owned;
+      }
+      if (!owned.includes(weaponId)) return;
+      if (!ZOMBIE_WEAPONS[weaponId]) return;
+      player.modeState.weapon = weaponId;
+      const payload = { playerId, player: { ...player, modeState: { ...player.modeState } } };
+      io.to(code).emit("playerUpdated", payload);
     });
 
     socket.on("openBox", ({ code, playerId, boxId }) => {
@@ -610,39 +631,93 @@ async function startServer() {
         const aimAngle = typeof clientAimAngle === 'number' ? clientAimAngle : Math.atan2(0, 1);
         const weaponRange = weapon === 'sniper' ? 2000 : weapon === 'shotgun' ? 800 : 1000;
         const maxHitRange = 3000;
-        let endX = px + Math.cos(aimAngle) * weaponRange;
-        let endY = py + Math.sin(aimAngle) * weaponRange;
-        let zombie = targetId ? room.globalState.zombies.find((z: any) => String(z.id) === String(targetId)) : null;
-        if (!zombie && room.globalState.zombies.length > 0) {
-          let best: any = null;
-          let bestScore = -1;
-          room.globalState.zombies.forEach((z: any) => {
+
+        function distPointToSegment(zx: number, zy: number, x1: number, y1: number, x2: number, y2: number): number {
+          const dx = x2 - x1, dy = y2 - y1;
+          const len = Math.hypot(dx, dy) || 1;
+          const t = Math.max(0, Math.min(1, ((zx - x1) * dx + (zy - y1) * dy) / (len * len)));
+          const projX = x1 + t * dx, projY = y1 + t * dy;
+          return Math.hypot(zx - projX, zy - projY);
+        }
+        const ZOMBIE_HIT_RADIUS = 35;
+
+        if (weapon === 'shotgun') {
+          // Shotgun: 5 rays in a cone – only damage zombies that are hit by at least one ray (within hit radius of ray)
+          const state = room.globalState;
+          if (!state.zombies) state.zombies = [];
+          if (!state.lasers) state.lasers = [];
+          const zombies = state.zombies;
+          const spreadOffsets = [-0.2, -0.1, 0, 0.1, 0.2];
+          player.modeState.ammo = ammo - 1;
+          player.modeState.lastFire = now;
+          let killed = 0;
+          for (let i = 0; i < zombies.length; i++) {
+            const z = zombies[i];
             const d = Math.hypot(z.x - px, z.y - py);
-            if (d > maxHitRange) return;
-            const angleToZ = Math.atan2(z.y - py, z.x - px);
-            const angleDiff = Math.abs((angleToZ - aimAngle + Math.PI * 2) % (Math.PI * 2));
-            const score = d < 1 ? 1e6 : 1 / (d * (0.1 + Math.min(angleDiff, Math.PI * 2 - angleDiff)));
-            if (score > bestScore) { bestScore = score; best = z; }
-          });
-          zombie = best;
-        }
-        if (zombie) {
-          endX = zombie.x;
-          endY = zombie.y;
-        }
-        player.modeState.ammo = ammo - 1;
-        player.modeState.lastFire = now;
-        if (zombie) {
-          zombie.hp -= wpn.damage;
-          if (zombie.hp <= 0) {
-            player.resources = (player.resources || 0) + 50;
-            player.score += 10;
+            if (d < 10 || d > weaponRange) continue;
+            let hit = false;
+            for (const off of spreadOffsets) {
+              const a = aimAngle + off;
+              const rx2 = px + Math.cos(a) * weaponRange;
+              const ry2 = py + Math.sin(a) * weaponRange;
+              if (distPointToSegment(z.x, z.y, px, py, rx2, ry2) <= ZOMBIE_HIT_RADIUS) {
+                hit = true;
+                break;
+              }
+            }
+            if (!hit) continue;
+            const prevHp = typeof z.hp === 'number' ? z.hp : (z.maxHp ?? 100);
+            zombies[i].hp = Math.max(0, prevHp - wpn.damage);
+            if (zombies[i].hp <= 0) killed++;
           }
+          spreadOffsets.forEach((off) => {
+            const a = aimAngle + off;
+            state.lasers.push({
+              x1: px, y1: py,
+              x2: px + Math.cos(a) * weaponRange,
+              y2: py + Math.sin(a) * weaponRange,
+              color: wpn.color, createdAt: now,
+            });
+          });
+          player.resources = (player.resources || 0) + 50 * killed;
+          player.score += 10 * killed;
+        } else {
+          // Pistol, rifle, sniper: single ray – only damage zombie if it's on the ray (within hit radius)
+          const endX = px + Math.cos(aimAngle) * weaponRange;
+          const endY = py + Math.sin(aimAngle) * weaponRange;
+          let zombie = targetId ? room.globalState.zombies.find((z: any) => String(z.id) === String(targetId)) : null;
+          if (!zombie && room.globalState.zombies.length > 0) {
+            let best: any = null;
+            let bestDist = Infinity;
+            room.globalState.zombies.forEach((z: any) => {
+              const d = Math.hypot(z.x - px, z.y - py);
+              if (d > maxHitRange) return;
+              const distToRay = distPointToSegment(z.x, z.y, px, py, endX, endY);
+              if (distToRay <= ZOMBIE_HIT_RADIUS && d < bestDist) {
+                bestDist = d;
+                best = z;
+              }
+            });
+            zombie = best;
+          }
+          if (zombie) {
+            const distToRay = distPointToSegment(zombie.x, zombie.y, px, py, endX, endY);
+            if (distToRay > ZOMBIE_HIT_RADIUS) zombie = null;
+          }
+          player.modeState.ammo = ammo - 1;
+          player.modeState.lastFire = now;
+          if (zombie) {
+            zombie.hp -= wpn.damage;
+            if (zombie.hp <= 0) {
+              player.resources = (player.resources || 0) + 50;
+              player.score += 10;
+            }
+          }
+          room.globalState.lasers.push({
+            x1: px, y1: py, x2: zombie ? zombie.x : endX, y2: zombie ? zombie.y : endY,
+            color: wpn.color, createdAt: now,
+          });
         }
-        room.globalState.lasers.push({
-          x1: px, y1: py, x2: endX, y2: endY,
-          color: wpn.color, createdAt: now,
-        });
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
         io.to(code).emit("globalStateUpdated", room.globalState);
       }
@@ -742,17 +817,17 @@ async function startServer() {
           }
         });
 
-        // Turrets shoot
+        // Turrets shoot (weakened: less damage, slower fire)
         (state.turrets || []).forEach((t: any) => {
-          if (now - (t.lastShoot || 0) > 500) {
+          if (now - (t.lastShoot || 0) > 1600) {
             let closest: any = null;
-            let minDist = 300;
+            let minDist = 280;
             state.zombies.forEach((z: any) => {
               const d = Math.hypot(z.x - t.x, z.y - t.y);
               if (d < minDist) { minDist = d; closest = z; }
             });
             if (closest) {
-              closest.hp -= 30;
+              closest.hp -= 12;
               t.lastShoot = now;
               state.lasers.push({ x1: t.x, y1: t.y, x2: closest.x, y2: closest.y, color: '#3b82f6', createdAt: now });
             }
