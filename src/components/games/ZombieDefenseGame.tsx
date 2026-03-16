@@ -1004,8 +1004,8 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         )}
       </AnimatePresence>
 
-      {/* Weapon switcher: list of ALL purchased weapons; on mobile: compact horizontal scroll */}
-      <div className="zombie-weapon-strip fixed left-0 right-0 bottom-20 z-[100] flex flex-row items-center gap-1.5 pointer-events-auto py-1.5 px-2 overflow-x-auto overflow-y-hidden" dir="ltr">
+      {/* Weapon switcher: list of ALL purchased weapons; container ignores clicks except on buttons */}
+      <div className="zombie-weapon-strip fixed left-0 right-0 bottom-20 z-[100] flex flex-row items-center gap-1.5 pointer-events-none py-1.5 px-2 overflow-x-auto overflow-y-hidden" dir="ltr">
         <span className="text-[10px] text-slate-300 font-bold shrink-0 hidden sm:inline">נשק:</span>
         {(() => {
           const owned = player?.modeState?.ownedWeapons;
@@ -1033,7 +1033,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
                   e.stopPropagation();
                   switchWeaponTo(id);
                 }}
-                className={`zombie-weapon-btn flex items-center justify-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2.5 rounded-lg sm:rounded-xl text-[10px] sm:text-[11px] font-bold border-2 min-h-[40px] min-w-[40px] sm:min-h-[48px] sm:min-w-[48px] touch-manipulation cursor-pointer select-none bg-slate-800/95 backdrop-blur shrink-0 ${isActive ? 'ring-2 ring-cyan-400 bg-slate-600 border-cyan-400' : 'border-slate-500 hover:bg-slate-700 active:scale-95'}`}
+                className={`zombie-weapon-btn pointer-events-auto flex items-center justify-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2.5 rounded-lg sm:rounded-xl text-[10px] sm:text-[11px] font-bold border-2 min-h-[40px] min-w-[40px] sm:min-h-[48px] sm:min-w-[48px] touch-manipulation cursor-pointer select-none bg-slate-800/95 backdrop-blur shrink-0 ${isActive ? 'ring-2 ring-cyan-400 bg-slate-600 border-cyan-400' : 'border-slate-500 hover:bg-slate-700 active:scale-95'}`}
                 style={{ borderColor: isActive ? w.color : undefined }}
                 title={w.name}
               >
