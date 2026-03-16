@@ -138,7 +138,17 @@ function checkWinCondition(io: Server, code: string) {
   }
   if (winner) {
     room.state = 'ended';
-    io.to(code).emit("gameOver", { winner });
+    const payload: any = { winner };
+    if (room.mode === 'boss') {
+      payload.mode = 'boss';
+      payload.players = Object.entries(room.players).map(([id, p]: [string, any]) => ({
+        id,
+        name: p.name,
+        score: p.score ?? 0,
+        correctAnswers: p.modeState?.correctAnswers ?? 0
+      }));
+    }
+    io.to(code).emit("gameOver", payload);
     persistGameResult(room, winner);
   }
 }
@@ -278,8 +288,26 @@ async function startServer() {
         newPlayer.x = baseX + (Math.random() * 120 - 60);
         newPlayer.y = baseY + 120 + Math.random() * 80;
         const TACTICAL_COLORS = ['#3b82f6', '#ef4444', '#eab308', '#f97316', '#a855f7'];
-        const playerColor = TACTICAL_COLORS[Math.floor(Math.random() * TACTICAL_COLORS.length)];
-        newPlayer.modeState = { hp: 100, maxHp: 100, ammo: 10, weapon: 'pistol', lastFire: 0, ownedWeapons: ['pistol'], playerColor };
+        const usedColors = new Set(
+          Object.values(room.players)
+            .map((p: any) => p.modeState?.playerColor)
+            .filter(Boolean) as string[]
+        );
+        const available = TACTICAL_COLORS.filter(c => !usedColors.has(c));
+        const playerColor = available.length > 0
+          ? available[Math.floor(Math.random() * available.length)]
+          : TACTICAL_COLORS[Math.floor(Math.random() * TACTICAL_COLORS.length)];
+        newPlayer.modeState = {
+          hp: 100,
+          maxHp: 100,
+          ammo: 10,
+          weapon: 'pistol',
+          lastFire: 0,
+          ownedWeapons: ['pistol'],
+          playerColor,
+          kills: 0,
+          correctAnswers: 0
+        };
       } else if (room.mode === 'ctf') {
         const redCount = Object.values(room.players).filter((p: any) => p.modeState?.team === 'red').length;
         const blueCount = Object.values(room.players).filter((p: any) => p.modeState?.team === 'blue').length;
@@ -308,12 +336,13 @@ async function startServer() {
         newPlayer.x = 2000;
         newPlayer.y = 2000;
       } else if (room.mode === 'farm') {
-        newPlayer.modeState = { laserDamage: 25, magnetRange: 50, hasShield: false, weaponTier: 1, credits: 30 };
+        newPlayer.modeState = { laserDamage: 25, magnetRange: 50, hasShield: false, weaponTier: 1, credits: 30, vx: 0, vy: 0 };
         newPlayer.resources = 50;
-        newPlayer.x = 500;
-        newPlayer.y = 500;
+        newPlayer.x = 2000;
+        newPlayer.y = 2000;
+        newPlayer.angle = 0;
       } else if (room.mode === 'boss') {
-        newPlayer.modeState = { isBoss: false, hp: 2, maxHp: 2, disabledUntil: 0, shields: 0, weaponType: 'rifle' };
+        newPlayer.modeState = { isBoss: false, hp: 2, maxHp: 2, disabledUntil: 0, shields: 0, weaponType: 'rifle', ownedWeapons: ['rifle', 'sniper', 'shotgun'] };
         newPlayer.x = 1500 + (Math.random() - 0.5) * 200;
         newPlayer.y = 1500 + (Math.random() - 0.5) * 200;
       }
@@ -375,8 +404,11 @@ async function startServer() {
         room.state = 'playing';
         room.startTime = Date.now();
         if (room.mode === 'zombie') {
-          const pc = Math.max(1, Object.keys(room.players).length);
-          room.globalState.zombiesToSpawnThisWave = 6 * pc + room.globalState.wave * 3;
+          const pc = Math.min(30, Math.max(1, Object.keys(room.players).length));
+          const baseZombies = 4;
+          const multiplier = 2;
+          const wave = room.globalState.wave ?? 1;
+          room.globalState.zombiesToSpawnThisWave = baseZombies + Math.floor(pc * multiplier * wave);
         }
         if (room.mode === 'boss') {
           const playerIds = Object.keys(room.players);
@@ -403,12 +435,16 @@ async function startServer() {
               : [...playerIds].sort(() => Math.random() - 0.5).slice(0, numBosses);
             room.globalState.bossIds = bossIds;
             room.globalState.aiBoss = null;
+            const heroCount = playerIds.filter(id => !bossIds.includes(id)).length;
+            const bossBaseHp = 8;
+            const bossHpPerHero = 4;
+            const bossMaxHp = Math.max(10, bossBaseHp + heroCount * bossHpPerHero);
             bossIds.forEach((bid, i) => {
               const p = room.players[bid];
               p.modeState = p.modeState || {};
               p.modeState.isBoss = true;
-              p.modeState.maxHp = 10;
-              p.modeState.hp = 10;
+              p.modeState.maxHp = bossMaxHp;
+              p.modeState.hp = bossMaxHp;
               p.x = CENTER + (i === 0 ? -200 : 200) + (Math.random() - 0.5) * 100;
               p.y = CENTER - 150 + (Math.random() - 0.5) * 80;
             });
@@ -437,6 +473,7 @@ async function startServer() {
             p.modeState.hp = 2;
             p.modeState.maxHp = 2;
             p.modeState.weaponType = p.modeState.weaponType || 'rifle';
+            p.modeState.ownedWeapons = [...new Set([...(p.modeState.ownedWeapons || []), 'rifle', 'sniper', 'shotgun'])];
             const angle = (i / Math.max(1, heroIds.length)) * Math.PI * 1.5 + Math.PI * 0.25;
             const dist = 250 + Math.random() * 80;
             p.x = CENTER + Math.cos(angle) * dist + (Math.random() - 0.5) * 60;
@@ -608,13 +645,18 @@ async function startServer() {
           player.modeState.coins = (player.modeState.coins ?? 0) + CTF_COIN_TRIVIA_REWARD;
           earned = 0;
         }
-        if (room.mode === 'boss') earned = 2; // 2 ammo per correct answer for both
+        if (room.mode === 'boss') {
+          earned = 2; // 2 ammo per correct answer for both
+          player.score = (player.score ?? 0) + 5;
+          player.modeState.correctAnswers = (player.modeState.correctAnswers ?? 0) + 1;
+        }
         if (room.mode === 'farm') {
           player.resources += 20; // Plasma Ammo
           player.modeState.credits = (player.modeState.credits || 0) + 10; // Credits
         } else if (room.mode === 'zombie') {
           player.modeState.ammo = (player.modeState.ammo ?? 10) + 10;
           player.score += 10;
+          player.modeState.correctAnswers = (player.modeState.correctAnswers ?? 0) + 1;
         } else {
           player.resources += earned;
           player.score += 10;
@@ -743,13 +785,21 @@ async function startServer() {
       opened.push(boxId);
       room.globalState.openedBoxes = opened;
       player.modeState = player.modeState || {};
-      player.modeState.weaponType = box.type || 'rifle';
+      const type = box.type || 'rifle';
+      // Maintain a boss-mode weapon inventory so client can switch between weapons,
+      // while keeping current weapon in weaponType (used by rendering & attacks).
+      const ownedBossWeapons: string[] = Array.isArray(player.modeState.ownedWeapons)
+        ? [...player.modeState.ownedWeapons]
+        : [];
+      if (!ownedBossWeapons.includes(type)) ownedBossWeapons.push(type);
+      player.modeState.ownedWeapons = ownedBossWeapons;
+      player.modeState.weaponType = type;
       player.resources = (player.resources || 0) + 5;
       io.to(code).emit("playerUpdated", { playerId, player });
       io.to(code).emit("globalStateUpdated", room.globalState);
     });
 
-    socket.on("action", ({ code, playerId, actionType, targetId, aimAngle: clientAimAngle, weaponId }) => {
+    socket.on("action", ({ code, playerId, actionType, targetId, aimAngle: clientAimAngle, weaponId, burst }) => {
       const room = rooms[code];
       if (!room || room.state !== 'playing') return;
       const player = room.players[playerId];
@@ -801,14 +851,35 @@ async function startServer() {
 
       const PROJECTILE_SPEED = 520;
 
+      if (room.mode === 'boss' && actionType === 'equipWeapon' && weaponId) {
+        player.modeState = player.modeState || {};
+        let owned = Array.isArray(player.modeState.ownedWeapons) ? [...player.modeState.ownedWeapons] : [];
+        if (!owned.includes(weaponId)) owned.push(weaponId);
+        player.modeState.ownedWeapons = owned;
+        player.modeState.weaponType = weaponId;
+        io.to(code).emit("playerUpdated", { playerId, player });
+        return;
+      }
+
       if (room.mode === 'boss' && actionType === 'attack' && !player.modeState.isBoss && player.resources >= 1 && (player.modeState?.hp ?? 2) > 0) {
         const angle = typeof clientAimAngle === 'number' ? clientAimAngle : 0;
         player.resources -= 1;
         const projs = room.globalState.projectiles || [];
-        projs.push({
-          x: player.x, y: player.y,
-          vx: Math.cos(angle) * PROJECTILE_SPEED, vy: Math.sin(angle) * PROJECTILE_SPEED,
-          shooterId: playerId, isBoss: false, spawnTime: Date.now()
+        const weaponType = player.modeState?.weaponType || 'rifle';
+        const isShotgun = weaponType === 'shotgun';
+        const isRifleBurst = weaponType === 'rifle' && burst;
+        let angles: number[];
+        if (isRifleBurst) angles = [angle, angle, angle];
+        else if (isShotgun) angles = [angle - 0.15, angle, angle + 0.15];
+        else angles = [angle];
+        const now = Date.now();
+        angles.forEach((a, i) => {
+          projs.push({
+            id: `${playerId}_${now}_${i}`,
+            x: player.x, y: player.y,
+            vx: Math.cos(a) * PROJECTILE_SPEED, vy: Math.sin(a) * PROJECTILE_SPEED,
+            shooterId: playerId, isBoss: false, spawnTime: now, aimAngle: a
+          });
         });
         room.globalState.projectiles = projs;
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
@@ -826,30 +897,36 @@ async function startServer() {
       } else if (room.mode === 'farm' && actionType === 'shoot') {
         const ammoCost = player.modeState?.weaponTier === 4 ? 25 : 10;
         if (player.resources < ammoCost) return;
-        let angle = typeof clientAimAngle === 'number' ? clientAimAngle : null;
+        let angle = typeof clientAimAngle === 'number' && !Number.isNaN(clientAimAngle) ? clientAimAngle : null;
+        const shipX = Number(player.x) || 2000;
+        const shipY = Number(player.y) || 2000;
         if (angle === null && targetId) {
           const ast = room.globalState.asteroids?.find((a: any) => a.id === targetId);
-          if (ast) angle = Math.atan2(ast.y - 500, ast.x - 500);
+          if (ast) angle = Math.atan2(Number(ast.y) - shipY, Number(ast.x) - shipX);
         }
-        if (angle === null) angle = 0;
+        if (angle === null || Number.isNaN(angle)) angle = 0;
+        player.angle = angle;
         player.resources -= ammoCost;
         const tier = player.modeState?.weaponTier || 1;
         const projs = room.globalState.projectiles || [];
-        const dmg = player.modeState.laserDamage || 25;
-        const shipX = player.x ?? 500, shipY = player.y ?? 500;
+        const dmg = Number(player.modeState.laserDamage) || 25;
+        const LASER_SPEED = 520;
+        const PLASMA_SPEED = 280;
+        const num = (v: number) => (typeof v === 'number' && !Number.isNaN(v) ? v : 0);
         if (tier === 1) {
-          projs.push({ x: shipX, y: shipY, vx: Math.cos(angle) * 520, vy: Math.sin(angle) * 520, damage: dmg, shooterId: playerId, type: 'laser', radius: 4 });
+          projs.push({ x: shipX, y: shipY, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 });
         } else if (tier === 2) {
-          const off = 0.08;
-          projs.push({ x: shipX, y: shipY, vx: Math.cos(angle - off) * 520, vy: Math.sin(angle - off) * 520, damage: dmg, shooterId: playerId, type: 'laser', radius: 4 });
-          projs.push({ x: shipX, y: shipY, vx: Math.cos(angle + off) * 520, vy: Math.sin(angle + off) * 520, damage: dmg, shooterId: playerId, type: 'laser', radius: 4 });
+          const nx = Math.cos(angle + Math.PI / 2) * 12, ny = Math.sin(angle + Math.PI / 2) * 12;
+          projs.push({ x: shipX + nx, y: shipY + ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 });
+          projs.push({ x: shipX - nx, y: shipY - ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 });
         } else if (tier === 3) {
-          [-0.15, 0, 0.15].forEach(off => projs.push({ x: shipX, y: shipY, vx: Math.cos(angle + off) * 520, vy: Math.sin(angle + off) * 520, damage: dmg, shooterId: playerId, type: 'laser', radius: 4 }));
+          [-0.25, 0, 0.25].forEach(off => projs.push({ x: shipX, y: shipY, vx: num(Math.cos(angle + off) * LASER_SPEED), vy: num(Math.sin(angle + off) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 }));
         } else {
-          projs.push({ x: shipX, y: shipY, vx: Math.cos(angle) * 280, vy: Math.sin(angle) * 280, damage: dmg * 2, shooterId: playerId, type: 'plasma', radius: 18 });
+          projs.push({ x: shipX, y: shipY, vx: num(Math.cos(angle) * PLASMA_SPEED), vy: num(Math.sin(angle) * PLASMA_SPEED), damage: dmg * 3, shooterId: playerId, type: 'plasma', radius: 12 });
         }
         room.globalState.projectiles = projs;
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
+        io.to(code).emit("globalStateUpdated", room.globalState);
       } else if (room.mode === 'zombie' && actionType === 'shoot_zombie') {
         const ammo = player.modeState?.ammo ?? 0;
         const weapon = player.modeState?.weapon ?? 'pistol';
@@ -913,6 +990,7 @@ async function startServer() {
             console.log("HIT! Zombie took damage. Remaining HP:", zombies[i].hp);
             if (zombies[i].hp <= 0) killed++;
           }
+          player.modeState.kills = (player.modeState.kills ?? 0) + killed;
           spreadOffsets.forEach((off) => {
             const a = aimAngle + off;
             state.lasers.push({
@@ -964,6 +1042,7 @@ async function startServer() {
             if (hitZombie.hp <= 0) {
               player.resources = (player.resources || 0) + 50;
               player.score += 10;
+              player.modeState.kills = (player.modeState.kills ?? 0) + 1;
             }
           }
           room.globalState.lasers.push({
@@ -971,6 +1050,9 @@ async function startServer() {
             color: wpn.color, createdAt: now,
           });
         }
+        const broadcastVx = weapon === 'pistol' ? Math.cos(aimAngle) * 12000 / 30 : Math.cos(aimAngle) * 2000;
+        const broadcastVy = weapon === 'pistol' ? Math.sin(aimAngle) * 12000 / 30 : Math.sin(aimAngle) * 2000;
+        socket.to(code).emit('remoteShoot', { x: gunTipX, y: gunTipY, vx: broadcastVx, vy: broadcastVy, weaponType: weapon, playerId: player.id });
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
         io.to(code).emit("globalStateUpdated", room.globalState);
       }
@@ -1013,15 +1095,18 @@ async function startServer() {
         const BASE_Y = state.baseY ?? 2000;
         const BASE_RADIUS = state.baseRadius ?? 85;
         const wave = state.wave ?? 1;
-        const playerCount = Math.max(1, Object.keys(room.players).length);
-        const toSpawn = state.zombiesToSpawnThisWave ?? 6 * playerCount;
+        const playerCount = Math.min(30, Math.max(1, Object.keys(room.players).length));
+        const baseZombies = 4;
+        const multiplier = 2;
+        const toSpawn = state.zombiesToSpawnThisWave ?? baseZombies + Math.floor(playerCount * multiplier * wave);
         let spawned = state.zombiesSpawnedThisWave ?? 0;
         const gameDurationMs = state.gameDurationMs ?? 6 * 60 * 1000;
 
         // 6-minute timer: if time's up and base alive, players win
         if (room.startTime && now - room.startTime >= gameDurationMs) {
           room.state = 'ended';
-          io.to(room.code).emit("gameOver", { winner: "השחקנים!" });
+          const summary = Object.entries(room.players).map(([id, p]: [string, any]) => ({ id, name: p.name, kills: p.modeState?.kills ?? 0, score: p.score ?? 0, correctAnswers: p.modeState?.correctAnswers ?? 0 }));
+          io.to(room.code).emit("gameOver", { winner: "השחקנים!", mode: 'zombie', players: summary });
           persistGameResult(room, "השחקנים!");
           return;
         }
@@ -1030,11 +1115,14 @@ async function startServer() {
         if (state.zombies.length === 0 && spawned >= toSpawn) {
           state.wave = wave + 1;
           state.zombiesSpawnedThisWave = 0;
-          state.zombiesToSpawnThisWave = 6 * playerCount + state.wave * 3;
+          const baseZombies = 4;
+          const multiplier = 2;
+          const cappedPlayers = Math.min(30, Math.max(1, playerCount));
+          state.zombiesToSpawnThisWave = baseZombies + Math.floor(cappedPlayers * multiplier * state.wave);
         }
 
         // Spawn zombies from edges (~6 per player per wave, scales with wave)
-        if (spawned < (state.zombiesToSpawnThisWave ?? 6 * playerCount)) {
+        if (spawned < (state.zombiesToSpawnThisWave ?? baseZombies + Math.floor(playerCount * multiplier * wave))) {
           const spawnChance = Math.min(0.25, (0.08 + state.wave * 0.02) * 0.55);
           if (Math.random() < spawnChance) {
             const side = Math.floor(Math.random() * 4);
@@ -1101,11 +1189,13 @@ async function startServer() {
             if ((z.hp ?? 0) <= 0) continue;
             if (!segmentIntersectsCircle(prevX, prevY, proj.x, proj.y, z.x, z.y, ZOMBIE_HIT_R)) continue;
             const prevHp = typeof z.hp === 'number' ? z.hp : (z.maxHp ?? 100);
-            state.zombies[i].hp = Math.max(0, prevHp - (proj.damage ?? 25));
+            const newHp = Math.max(0, prevHp - (proj.damage ?? 25));
+            state.zombies[i].hp = newHp;
             const shooter = room.players[proj.playerId];
-            if (shooter) {
+            if (shooter && newHp <= 0) {
               shooter.resources = (shooter.resources || 0) + 50;
               shooter.score += 10;
+              shooter.modeState.kills = (shooter.modeState.kills ?? 0) + 1;
             }
             state.recentHits.push({ x: z.x, y: z.y });
             return false;
@@ -1141,7 +1231,8 @@ async function startServer() {
 
         if (state.baseHealth <= 0) {
           room.state = 'ended';
-          io.to(room.code).emit("gameOver", { winner: "הזומבים" });
+          const summary = Object.entries(room.players).map(([id, p]: [string, any]) => ({ id, name: p.name, kills: p.modeState?.kills ?? 0, score: p.score ?? 0, correctAnswers: p.modeState?.correctAnswers ?? 0 }));
+          io.to(room.code).emit("gameOver", { winner: "הזומבים", mode: 'zombie', players: summary });
           persistGameResult(room, "הזומבים");
         }
       }
@@ -1217,9 +1308,9 @@ async function startServer() {
               const sweepDist = pointToSegmentDist(aiBoss.x, aiBoss.y, prevX, prevY, proj.x, proj.y);
               const hitRadius = 90;
               if (dist < hitRadius || sweepDist < hitRadius) {
-                aiBoss.hp -= 1;
+                aiBoss.hp = Math.max(0, (aiBoss.hp || 0) - 1);
                 state.lasers.push({ x1: proj.x, y1: proj.y, x2: aiBoss.x, y2: aiBoss.y, color: '#ef4444' });
-                io.to(room.code).emit("globalStateUpdated", state);
+                io.to(room.code).emit("globalStateUpdated", { ...state });
                 checkWinCondition(io, room.code);
                 return false;
               }
@@ -1234,10 +1325,11 @@ async function startServer() {
                   boss.modeState.shields -= 1;
                   state.lasers.push({ x1: proj.x, y1: proj.y, x2: boss.x, y2: boss.y, color: '#3b82f6', blocked: true });
                 } else {
-                  boss.modeState.hp -= 1;
+                  boss.modeState.hp = Math.max(0, (boss.modeState.hp ?? 0) - 1);
                   state.lasers.push({ x1: proj.x, y1: proj.y, x2: boss.x, y2: boss.y, color: '#ef4444' });
                 }
                 io.to(room.code).emit("playerUpdated", { playerId: boss.id, player: boss });
+                io.to(room.code).emit("globalStateUpdated", { ...state });
                 checkWinCondition(io, room.code);
                 return false;
               }
@@ -1250,7 +1342,7 @@ async function startServer() {
               const sweepDist = pointToSegmentDist(hero.x, hero.y, prevX, prevY, proj.x, proj.y);
               const hitRadius = 55;
               if (dist < hitRadius || sweepDist < hitRadius) {
-                hero.modeState.hp = (hero.modeState.hp ?? 2) - 1;
+                hero.modeState.hp = Math.max(0, (hero.modeState.hp ?? 2) - 1);
                 if (hero.modeState.hp <= 0) hero.modeState.respawnAt = now + 15000;
                 state.lasers.push({ x1: proj.x, y1: proj.y, x2: hero.x, y2: hero.y, color: '#ef4444' });
                 io.to(room.code).emit("playerUpdated", { playerId: hero.id, player: hero });
@@ -1277,7 +1369,13 @@ async function startServer() {
           if (state.timeLeft <= 0) {
             room.state = 'ended';
             const bossWinner = state.useAiBoss ? "המפלצת הענקית" : (bossIds.length ? room.players[bossIds[0]]?.name || "הבוס" : "הבוס");
-            io.to(room.code).emit("gameOver", { winner: bossWinner });
+            const players = Object.entries(room.players).map(([id, p]: [string, any]) => ({
+              id,
+              name: p.name,
+              score: p.score ?? 0,
+              correctAnswers: p.modeState?.correctAnswers ?? 0
+            }));
+            io.to(room.code).emit("gameOver", { winner: bossWinner, mode: 'boss', players });
             persistGameResult(room, bossWinner);
           }
         }
@@ -1492,85 +1590,134 @@ async function startServer() {
         }
       }
 
-      // --- FARM MODE ---
+      // --- FARM MODE (4000x4000 world) ---
       else if (room.mode === 'farm') {
-        if (state.asteroids.length < 15 && Math.random() < 0.05) {
+        const FARM_WORLD = 4000;
+        const PLAYER_RADIUS = 26;
+        const MOVE_SPEED = 14;
+        const dt = 1 / 30;
+
+        // Spawn asteroids across full world
+        if (state.asteroids.length < 100 && Math.random() < 0.1) {
+          const rand = Math.random();
+          let type: string, color: string, value: number, hp: number, radius: number, craterCount: number;
+          if (rand < 0.6) {
+            type = 'iron'; color = '#737373'; value = Math.floor(Math.random() * 70); hp = 50; radius = 25 + Math.random() * 15; craterCount = 3;
+          } else if (rand < 0.9) {
+            type = 'ice'; color = '#2dd4bf'; value = 70 + Math.floor(Math.random() * 30); hp = 100; radius = 20 + Math.random() * 10; craterCount = 2;
+          } else {
+            type = 'crystal'; color = '#c084fc'; value = 100 + Math.floor(Math.random() * 50); hp = 200; radius = 15 + Math.random() * 8; craterCount = 1;
+          }
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 0.4 + Math.random() * 1.2;
+          const vertices = Array.from({ length: 10 }, () => 0.75 + Math.random() * 0.3);
+          const craters = Array.from({ length: craterCount }, () => ({
+            dist: Math.random() * 0.5,
+            angle: Math.random() * Math.PI * 2,
+            size: 0.15 + Math.random() * 0.2
+          }));
           state.asteroids.push({
-            id: Math.random().toString(),
-            x: 100 + Math.random() * 800,
-            y: 100 + Math.random() * 800,
-            hp: 100, maxHp: 100,
-            value: 50 + Math.floor(Math.random() * 100),
-            vx: (Math.random() - 0.5) * 2,
-            vy: (Math.random() - 0.5) * 2
+            id: Math.random().toString(36).slice(2),
+            x: Math.random() * FARM_WORLD,
+            y: Math.random() * FARM_WORLD,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            radius, type, color, value, hp, maxHp: hp,
+            rotation: 0,
+            rotSpeed: (Math.random() - 0.5) * 0.03,
+            vertices,
+            craters
           });
         }
 
         state.asteroids.forEach((a: any) => {
           a.x += a.vx; a.y += a.vy;
-          if (a.x < 0 || a.x > 1000) a.vx *= -1;
-          if (a.y < 0 || a.y > 1000) a.vy *= -1;
+          a.rotation = (a.rotation || 0) + (a.rotSpeed || 0);
+          if (a.x < -100) a.x = FARM_WORLD + 100;
+          if (a.x > FARM_WORLD + 100) a.x = -100;
+          if (a.y < -100) a.y = FARM_WORLD + 100;
+          if (a.y > FARM_WORLD + 100) a.y = -100;
         });
 
-        const MOVE_SPEED = 14;
         Object.values(room.players).forEach((pl: any) => {
           const vx = (pl.modeState?.vx || 0) * MOVE_SPEED;
           const vy = (pl.modeState?.vy || 0) * MOVE_SPEED;
-          pl.x = Math.max(80, Math.min(920, (pl.x || 500) + vx));
-          pl.y = Math.max(80, Math.min(920, (pl.y || 500) + vy));
+          pl.x = Math.max(PLAYER_RADIUS, Math.min(FARM_WORLD - PLAYER_RADIUS, (pl.x ?? 2000) + vx));
+          pl.y = Math.max(PLAYER_RADIUS, Math.min(FARM_WORLD - PLAYER_RADIUS, (pl.y ?? 2000) + vy));
         });
 
-        const projs = state.projectiles || [];
-        const dt = 1 / 30;
+        const projs = (state.projectiles || []).filter((p: any) =>
+          typeof p.x === 'number' && !Number.isNaN(p.x) &&
+          typeof p.y === 'number' && !Number.isNaN(p.y) &&
+          typeof p.vx === 'number' && !Number.isNaN(p.vx) &&
+          typeof p.vy === 'number' && !Number.isNaN(p.vy)
+        );
         projs.forEach((p: any) => {
-          p.x += p.vx * dt;
-          p.y += p.vy * dt;
+          p.x = (Number(p.x) || 0) + (Number(p.vx) || 0) * dt;
+          p.y = (Number(p.y) || 0) + (Number(p.vy) || 0) * dt;
         });
         state.projectiles = projs.filter((p: any) => {
-          if (p.x < -50 || p.x > 1050 || p.y < -50 || p.y > 1050) return false;
-          const aoeRadius = p.type === 'plasma' ? 80 : 0;
-          const hits = state.asteroids.filter((a: any) => {
-            const d = Math.hypot(a.x - p.x, a.y - p.y);
-            const astRadius = 20 + (a.value || 50) / 20;
-            return d < (aoeRadius || astRadius) + (p.radius || 4);
-          });
-          if (hits.length > 0) {
-            hits.forEach((hit: any) => {
-              hit.hp -= p.damage;
-              if (hit.hp <= 0) {
-                const player = room.players[p.shooterId];
-                if (player) player.score += hit.value;
-                (state.collectibles || []).push({ id: Math.random().toString(), x: hit.x, y: hit.y, value: hit.value, vx: 0, vy: 0 });
-              }
+          const px = Number(p.x);
+          const py = Number(p.y);
+          if (Number.isNaN(px) || Number.isNaN(py)) return false;
+          if (px < -50 || px > FARM_WORLD + 50 || py < -50 || py > FARM_WORLD + 50) return false;
+          const hitRadius = p.radius || 4;
+          let primaryHit: any = null;
+          for (const ast of state.asteroids) {
+            const d = Math.hypot(ast.x - p.x, ast.y - p.y);
+            const astR = ast.radius ?? (20 + (ast.value || 50) / 20);
+            if (d < astR + hitRadius) { primaryHit = ast; break; }
+          }
+          if (!primaryHit) return true;
+          primaryHit.hp -= p.damage;
+          if (p.type === 'plasma') {
+            state.asteroids.forEach((other: any) => {
+              if (other === primaryHit) return;
+              const od = Math.hypot(primaryHit.x - other.x, primaryHit.y - other.y);
+              if (od < 150) other.hp -= p.damage * 0.5;
+            });
+          }
+          state.asteroids = state.asteroids.filter((a: any) => {
+            if (a.hp > 0) return true;
+            const shooter = room.players[p.shooterId];
+            if (shooter) shooter.score = (shooter.score || 0) + (a.value || 0);
+            (state.collectibles || []).push({
+              id: Math.random().toString(36).slice(2),
+              x: a.x,
+              y: a.y,
+              value: a.value || 0,
+              vx: (Math.random() - 0.5) * 3,
+              vy: (Math.random() - 0.5) * 3,
+              color: a.color || '#9ca3af'
             });
             return false;
-          }
-          return true;
+          });
+          return false;
         });
 
         const coll = state.collectibles || [];
         coll.forEach((c: any) => {
-          c.vy += 0.3;
-          c.x += c.vx; c.y += c.vy;
+          c.vx = (c.vx || 0) * 0.95;
+          c.vy = (c.vy || 0) * 0.95;
+          c.x += c.vx || 0;
+          c.y += c.vy || 0;
         });
         Object.values(room.players).forEach((pl: any) => {
           const mag = pl.modeState?.magnetRange || 50;
-          const shipX = pl.x ?? 500, shipY = pl.y ?? 500;
+          const shipX = pl.x ?? 2000, shipY = pl.y ?? 2000;
           state.collectibles = (state.collectibles || []).filter((c: any) => {
             const d = Math.hypot(c.x - shipX, c.y - shipY);
             if (d < mag) {
-              pl.score += c.value;
+              pl.score = (pl.score || 0) + (c.value || 0);
               return false;
             }
-            if (c.y > 1100) return false;
+            if (c.x < -100 || c.x > FARM_WORLD + 100 || c.y < -100 || c.y > FARM_WORLD + 100) return false;
             return true;
           });
         });
 
-        state.asteroids = state.asteroids.filter((a: any) => a.hp > 0);
-        
-        if (room.startTime && now - room.startTime > 7 * 60 * 1000) { // 7 minutes
-          const winner = Object.values(room.players).sort((a,b) => b.score - a.score)[0];
+        if (room.startTime && now - room.startTime >= 7 * 60 * 1000) {
+          const winner = Object.values(room.players).sort((a: any, b: any) => (b.score || 0) - (a.score || 0))[0];
           room.state = 'ended';
           const farmWinner = winner?.name || "unknown";
           io.to(room.code).emit("gameOver", { winner: farmWinner });

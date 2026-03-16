@@ -10,12 +10,18 @@ import {
   type Particle, type DustMote, type ShakeState,
   tickParticles, tickShake, triggerShake,
   createDust, drawDust, drawGlow, colorAlpha, roundRect,
+  emitBurst,
 } from './renderUtils';
 import type { CameraState } from '../../engine/types';
 
 const WORLD_SIZE = 4000;
 const PLAYER_SPEED = 280;
 const MAP_CENTER = 2000;
+const COLLECTIBLE_SCALE = 1.85; // 1.5x–2x more prominent
+const COLLECTIBLE_ROTATION_SPEED = 0.6;
+const COLLECTIBLE_FLOAT_AMPLITUDE = 10;
+const COLLECTIBLE_FLOAT_SPEED = 2.5;
+const PICKUP_RADIUS = 85; // match server
 
 interface Props {
   roomCode: string;
@@ -42,6 +48,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   const camInitRef = useRef(false);
   const lastSyncRef = useRef(0);
   const lastMoveTimeRef = useRef(0);
+  const prevPosRef = useRef({ x: MAP_CENTER, y: MAP_CENTER });
   const particlesRef = useRef<Particle[]>([]);
   const dustRef = useRef<DustMote[]>([]);
   const shakeRef = useRef<ShakeState>({ intensity: 0, offsetX: 0, offsetY: 0 });
@@ -54,6 +61,10 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
     coin_pile: HTMLImageElement | null;
     money_bills: HTMLImageElement | null;
   }>({ treasure_chest: null, coin_pile: null, money_bills: null });
+  const prevCollectiblesRef = useRef<{ id: string; x: number; y: number; type: string; value: number }[]>([]);
+  const floatingTextsRef = useRef<{ x: number; y: number; text: string; life: number; maxLife: number; vy: number }[]>([]);
+  const lastFacingAngleRef = useRef(0);
+  const dustTrailRef = useRef<{ x: number; y: number; r: number; life: number; maxLife: number }[]>([]);
 
   useEffect(() => {
     const base = import.meta.env.BASE_URL || '/';
@@ -102,7 +113,8 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
     let raf: number;
 
     const loop = (now: number) => {
-      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      let dt = Math.min((now - lastTime) / 1000, 0.05);
+      if (dt <= 0) dt = 1 / 60;
       lastTime = now;
       timeRef.current += dt;
       const t = timeRef.current;
@@ -166,24 +178,81 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
       updateCamera(cam, posRef.current, vpW, vpH, WORLD_SIZE, WORLD_SIZE, 0.12);
 
       const shake = tickShake(shakeRef.current);
-      ctx.save();
-      ctx.translate(shake.x, shake.y);
+
+      const collectibles = gs?.collectibles || [];
+      const prevCollectibles = prevCollectiblesRef.current;
+      const myX = posRef.current.x;
+      const myY = posRef.current.y;
+      prevCollectibles.forEach((prev: { id: string; x: number; y: number; type: string; value: number }) => {
+        const stillExists = collectibles.some((c: any) => (c.id && c.id === prev.id) || (Math.hypot(c.x - prev.x, c.y - prev.y) < 5));
+        if (stillExists) return;
+        const dist = Math.hypot(myX - prev.x, myY - prev.y);
+        if (dist > PICKUP_RADIUS) return;
+        const value = prev.value ?? (prev.type === 'treasure_chest' ? 40 : prev.type === 'coin_pile' ? 20 : 10);
+        const isGreen = prev.type === 'money_bills';
+        const particleColor = isGreen ? '#4ade80' : '#fbbf24';
+        const burst = emitBurst(prev.x, prev.y, 12, 90, 0.65, particleColor, 5, { friction: 0.92, scaleDown: true });
+        particlesRef.current = [...particlesRef.current, ...burst];
+        floatingTextsRef.current.push({
+          x: prev.x,
+          y: prev.y,
+          text: `+$${value}`,
+          life: 1,
+          maxLife: 1,
+          vy: 48,
+        });
+      });
+      prevCollectiblesRef.current = collectibles.map((c: any) => ({
+        id: c.id || `${c.x}-${c.y}`,
+        x: c.x,
+        y: c.y,
+        type: c.type || 'money_bills',
+        value: c.value ?? 10,
+      }));
+
+      const myPos = posRef.current;
+      const vel = {
+        x: (myPos.x - prevPosRef.current.x) / dt,
+        y: (myPos.y - prevPosRef.current.y) / dt,
+      };
+      const isMoving = Math.hypot(vel.x, vel.y) > 20;
+      const speed = Math.hypot(vel.x, vel.y);
+      const facingAngle = speed > 10
+        ? Math.atan2(vel.y, vel.x) + Math.PI / 2
+        : lastFacingAngleRef.current;
+      if (speed > 10) lastFacingAngleRef.current = facingAngle;
+
+      if (isMoving && Math.random() < 0.5) {
+        const fx = myPos.x - 55 * Math.sin(facingAngle);
+        const fy = myPos.y + 55 * Math.cos(facingAngle);
+        dustTrailRef.current.push({
+          x: fx + (Math.random() - 0.5) * 20,
+          y: fy + (Math.random() - 0.5) * 10,
+          r: 3 + Math.random() * 4,
+          life: 0.3 + Math.random() * 0.2,
+          maxLife: 0.3 + Math.random() * 0.2,
+        });
+      }
 
       ctx.fillStyle = '#050a0f';
       ctx.fillRect(0, 0, vpW, vpH);
-
+      ctx.save();
+      ctx.translate(shake.x, shake.y);
       ctx.save();
       ctx.scale(cam.zoom, cam.zoom);
       ctx.translate(-cam.x, -cam.y);
 
       drawWorld(ctx, cam, vpW, vpH, t);
-      drawCollectiblesWorld(ctx, gs?.collectibles || [], t, collectibleImgsRef.current, cam, vpW, vpH);
-      drawPlayers(ctx, players, playerId, posRef.current, t);
-      particlesRef.current = tickParticles(ctx, particlesRef.current);
+      drawCollectiblesWorld(ctx, collectibles, collectibleImgsRef.current, cam, vpW, vpH);
+      drawPlayers(ctx, players, playerId, myPos, t, isMoving, vel, facingAngle);
 
+      particlesRef.current = tickParticles(ctx, particlesRef.current);
+      tickDustTrail(ctx, dustTrailRef.current, dt);
+      tickFloatingTexts(ctx, floatingTextsRef.current, dt);
       ctx.restore();
       drawDust(ctx, dustRef.current, vpW, vpH, '#fbbf24');
       ctx.restore();
+      prevPosRef.current = { x: myPos.x, y: myPos.y };
 
       raf = requestAnimationFrame(loop);
     };
@@ -423,33 +492,27 @@ function ShopItem({ title, desc, cost, icon, canAfford, onBuy }: {
   );
 }
 
-function seededRandom(seed: number) {
+function seededRandom(seed: number): number {
   const x = Math.sin(seed) * 10000;
   return x - Math.floor(x);
 }
 
 function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number, vpH: number, t: number) {
-  const cx = cam.x + vpW / (2 * cam.zoom);
-  const cy = cam.y + vpH / (2 * cam.zoom);
   const viewLeft = cam.x - 100;
   const viewTop = cam.y - 100;
   const viewW = vpW / cam.zoom + 200;
   const viewH = vpH / cam.zoom + 200;
-
-  const grassGrad = ctx.createLinearGradient(viewLeft, viewTop, viewLeft + viewW, viewTop + viewH);
-  grassGrad.addColorStop(0, '#0d2818');
-  grassGrad.addColorStop(0.2, '#134e2a');
-  grassGrad.addColorStop(0.5, '#166534');
-  grassGrad.addColorStop(0.8, '#15803d');
-  grassGrad.addColorStop(1, '#22c55e');
-  ctx.fillStyle = grassGrad;
+  const g = ctx.createLinearGradient(viewLeft, viewTop, viewLeft + viewW, viewTop + viewH);
+  g.addColorStop(0, '#0d2818');
+  g.addColorStop(0.5, '#166534');
+  g.addColorStop(1, '#22c55e');
+  ctx.fillStyle = g;
   ctx.fillRect(viewLeft, viewTop, viewW, viewH);
-
+  ctx.strokeStyle = colorAlpha('#22c55e', 0.06);
+  ctx.lineWidth = 1;
   const gridSize = 200;
   const startX = Math.floor(viewLeft / gridSize) * gridSize;
   const startY = Math.floor(viewTop / gridSize) * gridSize;
-  ctx.strokeStyle = colorAlpha('#22c55e', 0.06);
-  ctx.lineWidth = 1;
   for (let i = startX; i < viewLeft + viewW; i += gridSize) {
     ctx.beginPath();
     ctx.moveTo(i, viewTop);
@@ -463,332 +526,119 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
     ctx.stroke();
   }
 
+  const now = Date.now();
+  const windSkew = Math.sin(now / 1000) * 0.05;
+  ctx.shadowColor = 'rgba(0,0,0,0.3)';
+  ctx.shadowBlur = 10;
+  ctx.shadowOffsetX = 2;
+  ctx.shadowOffsetY = 4;
+
   for (let gx = startX; gx < viewLeft + viewW + gridSize; gx += gridSize) {
     for (let gy = startY; gy < viewTop + viewH + gridSize; gy += gridSize) {
       const seed = gx * 7 + gy * 13;
       const r = seededRandom(seed);
       const rx = gx + r * gridSize * 0.8;
       const ry = gy + seededRandom(seed + 1) * gridSize * 0.8;
-
       if (r < 0.12) {
-        drawTree(ctx, rx, ry, seed, t);
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(windSkew + seededRandom(seed + 2) * 0.02);
+        ctx.fillStyle = '#2d1a0a';
+        ctx.fillRect(-8, 0, 16, 50);
+        ctx.fillStyle = '#0d2818';
+        ctx.beginPath();
+        ctx.ellipse(0, -20, 28, 32, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#14532d';
+        ctx.beginPath();
+        ctx.ellipse(0, -28, 22, 26, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#166534';
+        ctx.beginPath();
+        ctx.ellipse(0, -32, 16, 20, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
       } else if (r < 0.22) {
-        drawBush(ctx, rx, ry, seed, t);
-      } else if (r < 0.28) {
-        drawRock(ctx, rx, ry, seed);
-      } else if (r < 0.32 && Math.abs(rx - 2000) > 300 && Math.abs(ry - 2000) > 300) {
-        drawPath(ctx, rx, ry, seed);
-      } else if (r < 0.36) {
-        drawFlower(ctx, rx, ry, seed, t);
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(windSkew * 0.7 + seededRandom(seed + 3) * 0.03);
+        ctx.fillStyle = '#0d2818';
+        ctx.beginPath();
+        ctx.ellipse(0, 2, 24, 20, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#14532d';
+        ctx.beginPath();
+        ctx.ellipse(0, -2, 18, 16, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#166534';
+        ctx.beginPath();
+        ctx.ellipse(0, -6, 12, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
       }
     }
   }
 
-  for (let i = 0; i < 25; i++) {
-    const seed = i * 7919;
-    const ax = (seededRandom(seed) * WORLD_SIZE * 0.9) + 200;
-    const ay = (seededRandom(seed + 1) * WORLD_SIZE * 0.9) + 200;
-    if (ax > viewLeft - 100 && ax < viewLeft + viewW + 100 && ay > viewTop - 100 && ay < viewTop + viewH + 100) {
-      drawAnimal(ctx, ax, ay, i % 3, t);
-    }
-  }
-
-  drawGlow(ctx, cx, cy, 800, '#f59e0b', 0.02 + 0.01 * Math.sin(t * 0.5));
-}
-
-function drawTree(ctx: CanvasRenderingContext2D, x: number, y: number, seed: number, t: number) {
-  const sway = Math.sin(t * 2 + seed) * 4;
-  const treeType = Math.floor(seededRandom(seed + 5) * 3);
-  ctx.save();
-  ctx.translate(x + sway, y);
-
-  ctx.shadowColor = 'rgba(0,0,0,0.4)';
-  ctx.shadowBlur = 12;
-  ctx.shadowOffsetX = 4;
-  ctx.shadowOffsetY = 8;
-
-  const trunkGrad = ctx.createLinearGradient(-12, 0, 12, 55);
-  trunkGrad.addColorStop(0, '#5c3317');
-  trunkGrad.addColorStop(0.3, '#422006');
-  trunkGrad.addColorStop(0.7, '#3d1f05');
-  trunkGrad.addColorStop(1, '#2d1a0a');
-  ctx.fillStyle = trunkGrad;
-  ctx.fillRect(-10, 0, 20, 55);
-  ctx.strokeStyle = '#2d1a0a';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(-10, 0, 20, 55);
-
   ctx.shadowBlur = 0;
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = 0;
-
-  const leafColors = ['#166534', '#15803d', '#14532d', '#1a472a'];
-  const leafColor = leafColors[Math.floor(seededRandom(seed + 2) * 4)];
-  const size = treeType === 0 ? 1 : treeType === 1 ? 1.2 : 0.9;
-  ctx.fillStyle = leafColor;
-  ctx.beginPath();
-  ctx.ellipse(0, -28, 42 * size, 48 * size, sway * 0.015, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#0f3d1a';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.ellipse(0, -28, 42 * size, 48 * size, sway * 0.015, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = colorAlpha('#22c55e', 0.4);
-  ctx.beginPath();
-  ctx.ellipse(sway * 2, -32, 28 * size, 32 * size, sway * 0.02, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.restore();
-}
-
-function drawBush(ctx: CanvasRenderingContext2D, x: number, y: number, seed: number, t: number) {
-  const bob = Math.sin(t * 3 + seed) * 3;
-  ctx.save();
-  ctx.translate(x, y + bob);
-
-  ctx.shadowColor = 'rgba(0,0,0,0.25)';
-  ctx.shadowBlur = 8;
-  ctx.shadowOffsetY = 4;
-
-  ctx.fillStyle = '#0d3d1a';
-  ctx.beginPath();
-  ctx.ellipse(0, 2, 26, 22, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#166534';
-  ctx.beginPath();
-  ctx.ellipse(0, 0, 24, 20, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#15803d';
-  ctx.beginPath();
-  ctx.ellipse(-10, -4, 14, 12, 0.2, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(12, 2, 16, 14, -0.15, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = colorAlpha('#22c55e', 0.6);
-  ctx.beginPath();
-  ctx.ellipse(2, -8, 10, 9, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetY = 0;
-  ctx.restore();
-}
-
-function drawRock(ctx: CanvasRenderingContext2D, x: number, y: number, seed: number) {
-  ctx.save();
-  ctx.translate(x, y);
-
-  ctx.shadowColor = 'rgba(0,0,0,0.35)';
-  ctx.shadowBlur = 6;
-  ctx.shadowOffsetX = 2;
-  ctx.shadowOffsetY = 4;
-
-  const rot = seededRandom(seed) * 0.6;
-  const rockGrad = ctx.createRadialGradient(-5, -5, 0, 0, 0, 25);
-  rockGrad.addColorStop(0, '#6b7280');
-  rockGrad.addColorStop(0.5, '#4b5563');
-  rockGrad.addColorStop(1, '#374151');
-  ctx.fillStyle = rockGrad;
-  ctx.beginPath();
-  ctx.ellipse(0, 0, 18, 12, rot, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = colorAlpha('#9ca3af', 0.3);
-  ctx.beginPath();
-  ctx.ellipse(-4, -4, 6, 4, rot, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#1f2937';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-  ctx.restore();
-}
-
-function drawPath(ctx: CanvasRenderingContext2D, x: number, y: number, seed: number) {
-  ctx.save();
-  ctx.translate(x, y);
-
-  const rot = seededRandom(seed) * 0.4;
-  const pathGrad = ctx.createLinearGradient(-50, 0, 50, 0);
-  pathGrad.addColorStop(0, 'rgba(120,113,108,0.5)');
-  pathGrad.addColorStop(0.5, 'rgba(139,119,101,0.7)');
-  pathGrad.addColorStop(1, 'rgba(120,113,108,0.5)');
-  ctx.fillStyle = pathGrad;
-  ctx.beginPath();
-  ctx.ellipse(0, 0, 55, 22, rot, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = colorAlpha('#57534e', 0.4);
-  ctx.beginPath();
-  ctx.ellipse(0, 0, 48, 18, rot, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = colorAlpha('#44403c', 0.5);
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.ellipse(0, 0, 48, 18, rot, 0, Math.PI * 2);
-  ctx.stroke();
-
-  ctx.restore();
-}
-
-function drawFlower(ctx: CanvasRenderingContext2D, x: number, y: number, seed: number, t: number) {
-  const sway = Math.sin(t * 4 + seed) * 2;
-  const colors = ['#f472b6', '#fbbf24', '#a78bfa', '#34d399', '#fb7185', '#c084fc'];
-  const petalColor = colors[Math.floor(seededRandom(seed) * 6)];
-  ctx.save();
-  ctx.translate(x + sway, y);
-
-  ctx.fillStyle = '#166534';
-  ctx.beginPath();
-  ctx.ellipse(0, 4, 2, 6, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = petalColor;
-  for (let i = 0; i < 5; i++) {
-    const a = (i / 5) * Math.PI * 2 + seed * 0.1;
-    ctx.save();
-    ctx.translate(Math.cos(a) * 5, Math.sin(a) * 5 - 2);
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 4, 6, a, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-  ctx.fillStyle = '#fde68a';
-  ctx.beginPath();
-  ctx.arc(0, -2, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#fbbf24';
-  ctx.beginPath();
-  ctx.arc(0, -2, 3, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.restore();
-}
-
-function drawAnimal(ctx: CanvasRenderingContext2D, x: number, y: number, type: number, t: number) {
-  const walk = Math.sin(t * 4) * 6;
-  const bob = Math.abs(Math.sin(t * 4)) * 2;
-  ctx.save();
-  ctx.translate(x + walk, y + bob);
-
-  ctx.shadowColor = 'rgba(0,0,0,0.2)';
-  ctx.shadowBlur = 4;
-  ctx.shadowOffsetY = 2;
-
-  if (type === 0) {
-    ctx.fillStyle = '#a16207';
-    ctx.beginPath();
-    ctx.ellipse(0, 2, 22, 14, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ca8a04';
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 20, 12, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#fbbf24';
-    ctx.beginPath();
-    ctx.arc(14, -6, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#0f172a';
-    ctx.beginPath();
-    ctx.arc(16, -7, 2, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (type === 1) {
-    ctx.fillStyle = '#4b5563';
-    ctx.beginPath();
-    ctx.ellipse(0, 2, 18, 12, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#6b7280';
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 16, 10, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#9ca3af';
-    ctx.beginPath();
-    ctx.arc(12, -4, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#374151';
-    ctx.beginPath();
-    ctx.arc(14, -5, 2, 0, Math.PI * 2);
-    ctx.fill();
-  } else {
-    ctx.fillStyle = '#57534e';
-    ctx.beginPath();
-    ctx.ellipse(0, 2, 14, 10, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#78716c';
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 12, 8, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#a8a29e';
-    ctx.beginPath();
-    ctx.arc(10, -3, 4, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetY = 0;
-  ctx.restore();
 }
 
 function drawCollectiblesWorld(
   ctx: CanvasRenderingContext2D,
   collectibles: any[],
-  t: number,
   imgs: { treasure_chest: HTMLImageElement | null; coin_pile: HTMLImageElement | null; money_bills: HTMLImageElement | null },
   cam: CameraState,
   vpW: number,
-  vpH: number,
+  vpH: number
 ) {
   const margin = 200;
   const viewLeft = cam.x - margin;
   const viewTop = cam.y - margin;
   const viewRight = cam.x + vpW / cam.zoom + margin;
   const viewBottom = cam.y + vpH / cam.zoom + margin;
+  const now = Date.now();
+  const hoverY = Math.sin(now / 200) * 6;
+
+  const pulseScale = 1 + Math.sin(now / 300) * 0.08;
 
   collectibles.forEach((c: any) => {
     if (c.x < viewLeft || c.x > viewRight || c.y < viewTop || c.y > viewBottom) return;
-
-    const floatY = Math.sin(t * 2.5 + c.x * 0.005) * 6;
-    ctx.save();
-    ctx.translate(c.x, c.y + floatY);
-
-    const ringR = 38 + Math.sin(t * 3 + c.y * 0.01) * 6;
-    ctx.globalAlpha = 0.6 + 0.35 * Math.sin(t * 4);
-    ctx.strokeStyle = '#fbbf24';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(0, 0, ringR, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-
-    ctx.globalAlpha = 0.25;
-    ctx.fillStyle = '#fbbf24';
-    ctx.beginPath();
-    ctx.arc(0, 0, 45, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-
-    const type = c.type || 'money_bills';
+    const rawType = c.type || 'money_bills';
+    const type = rawType === 'chest' ? 'treasure_chest' : rawType === 'coin' ? 'coin_pile' : rawType;
     const value = c.value ?? (type === 'treasure_chest' ? 40 : type === 'coin_pile' ? 20 : 10);
 
-    const drawImg = (img: HTMLImageElement | null, w: number, h: number): boolean => {
-      if (img?.complete && img.naturalWidth > 0) {
-        ctx.drawImage(img, -w / 2, -h / 2, w, h);
-        return true;
-      }
-      return false;
-    };
+    ctx.save();
+    ctx.translate(c.x, c.y + hoverY);
+    ctx.scale(pulseScale, pulseScale);
+
+    ctx.shadowColor = type === 'money_bills' ? '#22c55e' : '#fbbf24';
+    ctx.shadowBlur = 18;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
 
     if (type === 'treasure_chest') {
-      const w = 56, h = 40;
-      if (!drawImg(imgs.treasure_chest, w, h)) {
-        ctx.fillStyle = '#fbbf24';
+      const w = 56; const h = 40;
+      if (imgs.treasure_chest?.complete && imgs.treasure_chest.naturalWidth > 0) {
+        ctx.drawImage(imgs.treasure_chest, -w / 2, -h / 2, w, h);
+      } else {
+        const bg = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
+        bg.addColorStop(0, '#fde68a');
+        bg.addColorStop(0.5, '#fbbf24');
+        bg.addColorStop(1, '#b45309');
+        ctx.fillStyle = bg;
         ctx.fillRect(-w / 2, -h / 2, w, h);
         ctx.strokeStyle = '#78350f';
         ctx.lineWidth = 2;
         ctx.strokeRect(-w / 2, -h / 2, w, h);
+        ctx.fillStyle = '#5c3317';
+        ctx.fillRect(-8, -h / 2 + 8, 16, 14);
+        ctx.strokeStyle = '#2d1a0a';
+        ctx.strokeRect(-8, -h / 2 + 8, 16, 14);
+        ctx.fillStyle = '#1a1a1a';
+        ctx.beginPath();
+        ctx.arc(0, -h / 2 + 15, 4, 0, Math.PI * 2);
+        ctx.fill();
       }
       ctx.font = 'bold 14px sans-serif';
       ctx.textAlign = 'center';
@@ -796,37 +646,34 @@ function drawCollectiblesWorld(
       ctx.fillText(`$${value}`, 2, h / 2 + 12);
       ctx.fillStyle = '#fde68a';
       ctx.fillText(`$${value}`, 0, h / 2 + 10);
-
     } else if (type === 'coin_pile') {
-      const w = 48, h = 40;
-      if (!drawImg(imgs.coin_pile, w, h)) {
-        [{ x: -10, y: 6 }, { x: 10, y: 3 }, { x: 0, y: -8 }].forEach(p => {
-          ctx.fillStyle = '#b45309';
+      const w = 48; const h = 40;
+      if (imgs.coin_pile?.complete && imgs.coin_pile.naturalWidth > 0) {
+        ctx.drawImage(imgs.coin_pile, -w / 2, -h / 2, w, h);
+      } else {
+        [{ x: -10, y: 6 }, { x: 10, y: 3 }, { x: 0, y: -8 }].forEach((p: { x: number; y: number }) => {
+          ctx.fillStyle = '#b8860b';
           ctx.beginPath(); ctx.arc(p.x + 1, p.y + 1, 12, 0, Math.PI * 2); ctx.fill();
-          ctx.fillStyle = '#fbbf24';
+          ctx.fillStyle = '#FFD700';
           ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2); ctx.fill();
           ctx.strokeStyle = '#92400e';
           ctx.lineWidth = 2;
           ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2); ctx.stroke();
-          ctx.fillStyle = '#92400e';
-          ctx.font = 'bold 12px sans-serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText('$', p.x, p.y);
         });
       }
       ctx.font = 'bold 14px sans-serif';
       ctx.textBaseline = 'alphabetic';
       ctx.fillStyle = '#000';
       ctx.fillText(`$${value}`, 2, 28);
-      ctx.fillStyle = '#fde68a';
+      ctx.fillStyle = '#FFD700';
       ctx.fillText(`$${value}`, 0, 26);
-
     } else {
-      const w = 48, h = 32;
-      if (!drawImg(imgs.money_bills, w, h)) {
+      const w = 48; const h = 32;
+      if (imgs.money_bills?.complete && imgs.money_bills.naturalWidth > 0) {
+        ctx.drawImage(imgs.money_bills, -w / 2, -h / 2, w, h);
+      } else {
         for (let i = 2; i >= 0; i--) {
-          const ox = i * 3 - 3, oy = i * -3 + 3;
+          const ox = i * 3 - 3; const oy = i * -3 + 3;
           ctx.fillStyle = '#065f46';
           ctx.fillRect(-22 + ox + 1, -12 + oy + 1, 44, 24);
           ctx.fillStyle = '#4ade80';
@@ -835,11 +682,6 @@ function drawCollectiblesWorld(
           ctx.lineWidth = 2;
           ctx.strokeRect(-22 + ox, -12 + oy, 44, 24);
         }
-        ctx.fillStyle = '#14532d';
-        ctx.font = 'bold 16px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('$', 0, 0);
       }
       ctx.font = 'bold 14px sans-serif';
       ctx.textBaseline = 'alphabetic';
@@ -849,139 +691,279 @@ function drawCollectiblesWorld(
       ctx.fillText(`$${value}`, 0, 24);
     }
 
+    ctx.shadowBlur = 0;
     ctx.restore();
   });
 }
 
-function drawPlayer(ctx: CanvasRenderingContext2D, x: number, y: number, isMe: boolean, t: number, name: string, colors: { main: string; dark: string; light: string }) {
+function drawPlayer(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  isMe: boolean,
+  name: string,
+  colors: { main: string; dark: string; light: string },
+  velocityX: number,
+  velocityY: number,
+  facingAngle: number
+) {
+  const now = Date.now();
+  const speed = Math.hypot(velocityX, velocityY);
+  const moving = speed > 8;
+  const runPhase = now / 120;
+  const stride = moving ? Math.sin(runPhase) * 14 : 0;
+  const strideAlt = moving ? Math.sin(runPhase + Math.PI) * 14 : 0;
+  const armSwing = moving ? Math.sin(runPhase) * 22 : 0;
+  const armSwingAlt = moving ? Math.sin(runPhase + Math.PI) * 22 : 0;
+  const bob = moving ? Math.abs(Math.sin(runPhase * 2)) * 3 : 0;
+  const breathScale = moving ? 1 : 1 + Math.sin(now / 500) * 0.02;
+  const lean = moving ? Math.sin(runPhase) * 0.04 : 0;
+
   ctx.save();
   ctx.translate(x, y);
+  ctx.rotate(facingAngle);
 
-  const runPhase = t * 12;
-  const legSwing = Math.sin(runPhase) * 24;
-  const armSwing = Math.sin(runPhase) * 20;
-  const bodyBounce = Math.abs(Math.sin(runPhase)) * 3;
-  const tilt = Math.sin(runPhase) * 0.04;
-  const headBob = Math.sin(runPhase * 2) * 2;
-
-  ctx.font = 'bold 16px sans-serif';
+  ctx.font = 'bold 17px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.shadowColor = 'rgba(0,0,0,0.6)';
-  ctx.shadowBlur = 4;
-  ctx.shadowOffsetY = 2;
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillText(name, 0, -82 - headBob);
-  ctx.fillText(name, 1, -81 - headBob);
-  ctx.fillText(name, -1, -81 - headBob);
+  ctx.fillText(name, 1, -92 - bob);
   ctx.fillStyle = colors.light;
-  ctx.fillText(name, 0, -81 - headBob);
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetY = 0;
+  ctx.fillText(name, 0, -91 - bob);
 
-  ctx.rotate(tilt);
-  ctx.translate(0, -bodyBounce);
+  ctx.translate(0, -bob);
 
-  ctx.shadowColor = 'rgba(0,0,0,0.5)';
-  ctx.shadowBlur = 12;
-  ctx.shadowOffsetX = 3;
-  ctx.shadowOffsetY = 6;
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.shadowColor = 'rgba(0,0,0,0.35)';
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 5;
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath();
-  ctx.ellipse(0, 54, 44, 20, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 58, 46, 22, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
 
-  const legGrad = ctx.createLinearGradient(0, 20, 0, 70);
-  legGrad.addColorStop(0, colors.main);
-  legGrad.addColorStop(0.6, colors.dark);
-  legGrad.addColorStop(1, colorAlpha(colors.dark, 0.8));
+  const legGrad = ctx.createLinearGradient(0, 0, 0, 52);
+  legGrad.addColorStop(0, colors.light);
+  legGrad.addColorStop(0.5, colors.main);
+  legGrad.addColorStop(0.85, colors.dark);
+  legGrad.addColorStop(1, colorAlpha(colors.dark, 0.95));
+
+  const legShadow = ctx.createLinearGradient(0, 0, 0, 52);
+  legShadow.addColorStop(0, colorAlpha(colors.dark, 0.4));
+  legShadow.addColorStop(0.6, colorAlpha(colors.dark, 0.15));
+  legShadow.addColorStop(1, 'transparent');
+
+  ctx.save();
+  ctx.translate(-12, 26);
+  ctx.translate(0, stride);
+  ctx.fillStyle = legShadow;
+  ctx.fillRect(-8, 2, 16, 50);
   ctx.fillStyle = legGrad;
-  ctx.fillRect(-20, 22, 15, 50);
-  ctx.fillRect(5, 22 + legSwing * 0.35, 15, 50);
-  ctx.strokeStyle = colorAlpha(colors.dark, 0.8);
-  ctx.lineWidth = 2;
-  ctx.strokeRect(-20, 22, 15, 50);
-  ctx.strokeRect(5, 22 + legSwing * 0.35, 15, 50);
+  ctx.beginPath();
+  roundRect(ctx, -8, 0, 16, 52, 4);
+  ctx.fill();
+  ctx.strokeStyle = colorAlpha(colors.dark, 0.85);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
 
-  const bodyGrad = ctx.createLinearGradient(-14, -20, 14, 22);
+  ctx.save();
+  ctx.translate(12, 26);
+  ctx.translate(0, strideAlt);
+  ctx.fillStyle = legShadow;
+  ctx.fillRect(-8, 2, 16, 50);
+  ctx.fillStyle = legGrad;
+  ctx.beginPath();
+  roundRect(ctx, -8, 0, 16, 52, 4);
+  ctx.fill();
+  ctx.strokeStyle = colorAlpha(colors.dark, 0.85);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(0, -4);
+  ctx.rotate(lean);
+  ctx.scale(1, breathScale);
+  ctx.translate(0, 4);
+  const bodyGrad = ctx.createLinearGradient(-22, -32, 22, 28);
   bodyGrad.addColorStop(0, colors.light);
-  bodyGrad.addColorStop(0.25, colorAlpha(colors.light, 0.9));
-  bodyGrad.addColorStop(0.5, colors.main);
-  bodyGrad.addColorStop(0.85, colors.main);
-  bodyGrad.addColorStop(1, colors.dark);
+  bodyGrad.addColorStop(0.35, colors.main);
+  bodyGrad.addColorStop(0.7, colors.dark);
+  bodyGrad.addColorStop(1, colorAlpha(colors.dark, 0.95));
   ctx.fillStyle = bodyGrad;
   ctx.beginPath();
-  roundRect(ctx, -30, -30, 60, 52, 12);
+  roundRect(ctx, -32, -34, 64, 56, 14);
   ctx.fill();
   ctx.strokeStyle = colorAlpha(colors.dark, 0.9);
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = 2;
   ctx.stroke();
+  ctx.restore();
 
-  ctx.fillStyle = colorAlpha('#0f172a', 0.6);
-  ctx.fillRect(-22, -10, 18, 14);
-  ctx.fillRect(4, -10, 18, 14);
+  const armGrad = ctx.createLinearGradient(0, 0, 0, 40);
+  armGrad.addColorStop(0, colors.light);
+  armGrad.addColorStop(0.6, colors.main);
+  armGrad.addColorStop(1, colors.dark);
 
-  ctx.strokeStyle = colors.light;
-  ctx.lineWidth = 10;
+  ctx.save();
+  ctx.translate(-28, -14);
+  ctx.rotate(armSwing * (Math.PI / 180));
+  ctx.strokeStyle = armGrad;
+  ctx.lineWidth = 12;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.beginPath();
-  ctx.moveTo(-28, -14);
-  ctx.lineTo(-46 - armSwing, 6);
+  ctx.moveTo(0, 0);
+  ctx.lineTo(-18, 24);
   ctx.stroke();
+  ctx.fillStyle = colorAlpha(colors.dark, 0.5);
   ctx.beginPath();
-  ctx.moveTo(28, -14);
-  ctx.lineTo(50 + armSwing * 0.65, -8);
+  ctx.arc(0, 0, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = colorAlpha(colors.dark, 0.8);
+  ctx.lineWidth = 1.5;
   ctx.stroke();
+  ctx.restore();
 
-  const skinGrad = ctx.createRadialGradient(-5, -50, 0, 0, -46, 30);
-  skinGrad.addColorStop(0, '#fffef5');
-  skinGrad.addColorStop(0.3, '#fef9e7');
-  skinGrad.addColorStop(0.6, '#fef3c7');
-  skinGrad.addColorStop(0.85, '#fde68a');
-  skinGrad.addColorStop(1, '#fcd34d');
+  ctx.save();
+  ctx.translate(28, -14);
+  ctx.rotate(armSwingAlt * (Math.PI / 180));
+  ctx.strokeStyle = armGrad;
+  ctx.lineWidth = 12;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(18, 20);
+  ctx.stroke();
+  ctx.fillStyle = colorAlpha(colors.dark, 0.5);
+  ctx.beginPath();
+  ctx.arc(0, 0, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = colorAlpha(colors.dark, 0.8);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+
+  const headY = -50;
+  const skinGrad = ctx.createRadialGradient(-10, -12, 0, 0, 0, 32);
+  skinGrad.addColorStop(0, '#fffef9');
+  skinGrad.addColorStop(0.5, '#fef3c7');
+  skinGrad.addColorStop(0.85, '#f59e0b');
+  skinGrad.addColorStop(1, '#d97706');
   ctx.fillStyle = skinGrad;
   ctx.beginPath();
-  ctx.arc(0, -46 + headBob, 25, 0, Math.PI * 2);
+  ctx.arc(0, headY, 28, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = '#f59e0b';
+  ctx.strokeStyle = colorAlpha('#b45309', 0.75);
   ctx.lineWidth = 2;
   ctx.stroke();
-
   ctx.fillStyle = '#1e293b';
   ctx.beginPath();
-  ctx.ellipse(-8, -48 + headBob, 5, 6, 0, 0, Math.PI * 2);
+  ctx.ellipse(-9, headY - 2, 5.5, 6.5, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
-  ctx.ellipse(8, -48 + headBob, 5, 6, 0, 0, Math.PI * 2);
+  ctx.ellipse(9, headY - 2, 5.5, 6.5, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = '#ffffff';
+  ctx.globalAlpha = 0.95;
   ctx.beginPath();
-  ctx.ellipse(-7, -49 + headBob, 2, 2.5, 0, 0, Math.PI * 2);
+  ctx.ellipse(-8, headY - 3, 2.2, 2.8, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
-  ctx.ellipse(9, -49 + headBob, 2, 2.5, 0, 0, Math.PI * 2);
+  ctx.ellipse(9.5, headY - 3, 2.2, 2.8, 0, 0, Math.PI * 2);
   ctx.fill();
-
+  ctx.globalAlpha = 1;
   ctx.strokeStyle = '#78716c';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(0, -40 + headBob, 6, 0.2 * Math.PI, 0.8 * Math.PI);
+  ctx.arc(0, headY + 7, 6.5, 0.2 * Math.PI, 0.8 * Math.PI);
   ctx.stroke();
 
   if (isMe) {
-    drawGlow(ctx, 0, -46, 60, colors.main, 0.35);
-    ctx.strokeStyle = colorAlpha(colors.main, 0.9);
+    drawGlow(ctx, 0, headY, 60, colors.main, 0.35);
+    ctx.strokeStyle = colorAlpha(colors.main, 0.95);
     ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.arc(0, -46 + headBob, 27, 0, Math.PI * 2);
+    ctx.arc(0, headY, 30, 0, Math.PI * 2);
     ctx.stroke();
   }
 
   ctx.restore();
+}
+
+function drawPlayers(
+  ctx: CanvasRenderingContext2D,
+  players: Record<string, any>,
+  playerId: string,
+  myPos: { x: number; y: number },
+  t: number,
+  isMoving: boolean,
+  vel: { x: number; y: number },
+  facingAngle: number
+) {
+  const list = Object.values(players || {}).sort((a: any, b: any) => (a.id || '').localeCompare(b.id || ''));
+  list.forEach((p: any, idx: number) => {
+    const px = p.id === playerId ? myPos.x : p.x;
+    const py = p.id === playerId ? myPos.y : p.y;
+    const colors = PLAYER_COLORS[idx % PLAYER_COLORS.length];
+    const vx = p.id === playerId ? vel.x : 0;
+    const vy = p.id === playerId ? vel.y : 0;
+    const rot = p.id === playerId ? facingAngle : 0;
+    drawPlayer(ctx, px, py, p.id === playerId, p.name || '?', colors, vx, vy, rot);
+  });
+}
+
+function tickDustTrail(
+  ctx: CanvasRenderingContext2D,
+  list: { x: number; y: number; r: number; life: number; maxLife: number }[],
+  dt: number
+) {
+  for (let i = list.length - 1; i >= 0; i--) {
+    const d = list[i];
+    d.life -= dt;
+    if (d.life <= 0) {
+      list.splice(i, 1);
+      continue;
+    }
+    const t = 1 - d.life / d.maxLife;
+    const alpha = d.life / d.maxLife;
+    const r = d.r * (1 + t * 0.8);
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.6;
+    ctx.fillStyle = t > 0.5 ? '#e5e7eb' : '#f3f4f6';
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function tickFloatingTexts(
+  ctx: CanvasRenderingContext2D,
+  list: { x: number; y: number; text: string; life: number; maxLife: number; vy: number }[],
+  dt: number
+) {
+  for (let i = list.length - 1; i >= 0; i--) {
+    const ft = list[i];
+    ft.life -= dt;
+    ft.y -= ft.vy * dt;
+    if (ft.life <= 0) {
+      list.splice(i, 1);
+      continue;
+    }
+    const alpha = Math.max(0, ft.life / ft.maxLife);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#000';
+    ctx.fillText(ft.text, ft.x + 2, ft.y + 2);
+    ctx.fillStyle = '#fde68a';
+    ctx.fillText(ft.text, ft.x, ft.y);
+    ctx.restore();
+  }
 }
 
 const PLAYER_COLORS = [
@@ -995,12 +977,3 @@ const PLAYER_COLORS = [
   { main: '#f97316', dark: '#ea580c', light: '#fdba74' },
 ];
 
-function drawPlayers(ctx: CanvasRenderingContext2D, players: Record<string, any>, playerId: string, myPos: { x: number; y: number }, t: number) {
-  const list = Object.values(players || {}).sort((a: any, b: any) => (a.id || '').localeCompare(b.id || ''));
-  list.forEach((p: any, idx: number) => {
-    const px = p.id === playerId ? myPos.x : p.x;
-    const py = p.id === playerId ? myPos.y : p.y;
-    const colors = PLAYER_COLORS[idx % PLAYER_COLORS.length];
-    drawPlayer(ctx, px, py, p.id === playerId, t, p.name || '?', colors);
-  });
-}

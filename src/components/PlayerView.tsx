@@ -19,6 +19,7 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
   const [globalState, setGlobalState] = useState<any>({});
   const [allPlayers, setAllPlayers] = useState<Record<string, any>>({});
   const [winner, setWinner] = useState<string | null>(null);
+  const [gameOverPayload, setGameOverPayload] = useState<{ winner: string; mode?: string; players?: { id: string; name: string; kills: number; score: number; correctAnswers: number }[] } | null>(null);
   const [error, setError] = useState('');
   const [lobbyCount, setLobbyCount] = useState(0);
   const [ctfHudSnapshot, setCtfHudSnapshot] = useState<{ redScore: number; blueScore: number; gameOver: any; myPlayer: any } | null>(null);
@@ -120,7 +121,7 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
         });
       }
     };
-    const onGameOver = ({ winner: w }: any) => { setWinner(w); setGameState('ended'); };
+    const onGameOver = (data: any) => { setWinner(data?.winner ?? null); setGameOverPayload(data ?? null); setGameState('ended'); };
     const onKicked = () => {
       setGameState('join');
       setPlayer(null);
@@ -226,9 +227,38 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
 
   // LOBBY
   if (gameState === 'lobby') {
+    const instructionsByMode: Record<string, { objective: string; rules: string; controls: string }> = {
+      zombie: {
+        objective: 'מטרה: לשרוד את גלי הזומבים ולהגן על הבסיס.',
+        rules: 'כל הריגת זומבי מקנה נקודות ותחמושת. ענה על שאלות כדי לקבל תחמושת ולקנות נשקים וצריחים.',
+        controls: 'בקרים: W,A,S,D (או ג׳ויסטיק) לתזוזה, עכבר/מגע לכוון ולירות, לחצן "שאלות" לתחמושת.',
+      },
+      economy: {
+        objective: 'מטרה: לאסוף הכי הרבה זהב במפה.',
+        rules: 'אספו מטבעות וענו נכון על שאלות כדי להגדיל את הכפילים.',
+        controls: 'בקרים: תזוזה עם מקשים או ג׳ויסטיק, לחץ על שאלות כשמופיעות.',
+      },
+      boss: {
+        objective: 'מטרה: להביס את הבוס (או כגיבור – לשרוד ולהנחית נזק).',
+        rules: 'שחקן אחד יכול להיות הבוס. שאר השחקנים צריכים לעבוד יחד נגדו.',
+        controls: 'בקרים: תזוזה, ירי עם עכבר/מגע, שאלות לתחמושת.',
+      },
+      ctf: {
+        objective: 'מטרה: לתפוס את דגל היריב ולהביאו לבסיס שלכם.',
+        rules: 'קבוצה אדומה נגד כחולה. גנבו את הדגל והגנו על הבסיס.',
+        controls: 'בקרים: תזוזה, ירי, שאלות לתחמושת ומטבעות.',
+      },
+      farm: {
+        objective: 'מטרה: לאסוף משאבים ולהשמיד אסטרואידים בחלל.',
+        rules: 'פוצצו אסטרואידים וענו על שאלות כדי לשדרג כלי נשק.',
+        controls: 'בקרים: תזוזה, ירי עם עכבר/מגע.',
+      },
+    };
+    const inst = room?.mode ? instructionsByMode[room.mode] : null;
+
     return (
       <div className="h-full min-h-screen flex flex-col items-center justify-center p-6 bg-[#070b18] text-center text-white" dir="rtl">
-        <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="max-w-sm">
+        <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="max-w-lg w-full">
           <motion.div
             animate={{ y: [0, -6, 0], scale: [1, 1.05, 1] }}
             transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
@@ -238,13 +268,21 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
           </motion.div>
           <h2 className="text-3xl font-bold mb-2">אתה בפנים!</h2>
           <p className="text-xl text-indigo-300 font-bold mb-4">{player?.name}</p>
-          <div className="bg-slate-800 px-6 py-4 rounded-2xl border border-slate-700 space-y-2">
+          <div className="bg-slate-800 px-6 py-4 rounded-2xl border border-slate-700 space-y-2 mb-6">
             <p className="text-slate-400 text-sm">ממתין למורה שיתחיל את המשחק...</p>
             <div className="flex items-center justify-center gap-2">
               <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
               <span className="text-emerald-400 font-bold">{lobbyCount} שחקנים מחוברים</span>
             </div>
           </div>
+          {inst && (
+            <div className="bg-slate-800/80 rounded-2xl border border-slate-600 p-5 text-right">
+              <h3 className="text-lg font-bold text-amber-400 mb-3">הוראות משחק</h3>
+              <p className="text-slate-200 text-sm font-bold mb-1">{inst.objective}</p>
+              <p className="text-slate-400 text-sm mb-2">{inst.rules}</p>
+              <p className="text-cyan-300/90 text-xs">{inst.controls}</p>
+            </div>
+          )}
         </motion.div>
       </div>
     );
@@ -252,9 +290,14 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
 
   // ENDED
   if (gameState === 'ended') {
+    const isZombieEnd = room?.mode === 'zombie' && gameOverPayload?.mode === 'zombie';
+    const isBossEnd = room?.mode === 'boss' && (gameOverPayload?.mode === 'boss' || !!gameOverPayload?.players);
+    const mySummaryZombie = isZombieEnd && gameOverPayload?.players ? gameOverPayload.players.find((p: any) => p.id === playerIdRef.current) : null;
+    const mySummaryBoss = isBossEnd && gameOverPayload?.players ? gameOverPayload.players.find((p: any) => p.id === playerIdRef.current) : null;
+
     return (
       <div className="h-full min-h-screen flex items-center justify-center p-6 bg-[#070b18] text-center text-white" dir="rtl">
-        <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}>
+        <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="max-w-lg w-full">
           <motion.div
             animate={{ rotate: [0, 5, -5, 0] }}
             transition={{ repeat: Infinity, duration: 2 }}
@@ -264,8 +307,22 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
           <h2 className="text-4xl font-black mb-4 text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500">
             המשחק נגמר!
           </h2>
-          <p className="text-lg text-slate-400 mb-2">המנצח:</p>
-          <p className="text-3xl font-black text-indigo-400 mb-8">{winner}</p>
+          {isZombieEnd && mySummaryZombie ? (
+            <div className="bg-slate-800/80 rounded-2xl border border-slate-600 p-8 mb-8 text-right">
+              <p className="text-2xl font-black text-cyan-300 mb-2">הריגות שלך: {mySummaryZombie.kills}</p>
+              <p className="text-2xl font-black text-amber-400">הנקודות שלך: {mySummaryZombie.score}</p>
+            </div>
+          ) : isBossEnd && mySummaryBoss ? (
+            <div className="bg-slate-800/80 rounded-2xl border border-slate-600 p-8 mb-8 text-right">
+              <p className="text-2xl font-black text-amber-400">הנקודות שלך: {mySummaryBoss.score}</p>
+              <p className="text-xl font-bold text-violet-300">תשובות נכונות: {mySummaryBoss.correctAnswers}</p>
+            </div>
+          ) : (
+            <>
+              <p className="text-lg text-slate-400 mb-2">המנצח:</p>
+              <p className="text-3xl font-black text-indigo-400 mb-8">{winner}</p>
+            </>
+          )}
           <motion.button
             whileTap={{ scale: 0.95 }}
             onClick={onBack}

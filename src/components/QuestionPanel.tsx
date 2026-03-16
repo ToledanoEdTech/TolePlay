@@ -15,6 +15,8 @@ interface Props {
   earnLabel?: string;
   penaltySeconds?: number;
   compact?: boolean;
+  /** When true, question text is static and readable (no rapid transitions). */
+  staticDisplay?: boolean;
 }
 
 interface ConfettiPiece {
@@ -25,7 +27,7 @@ interface ConfettiPiece {
   life: number;
 }
 
-export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLabel = '+10', penaltySeconds = 3, compact }: Props) {
+export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLabel = '+10', penaltySeconds = 3, compact, staticDisplay = false }: Props) {
   const [qIndex, setQIndex] = useState(() => Math.floor(Math.random() * Math.max(1, questions.length)));
   const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null);
   const [locked, setLocked] = useState(false);
@@ -34,6 +36,7 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
   const confettiRef = useRef<ConfettiPiece[]>([]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number>(0);
+  const lastAnswerAtRef = useRef(0);
 
   useEffect(() => {
     if (lockTime <= 0) { setLocked(false); return; }
@@ -104,6 +107,8 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
 
   const answer = (i: number) => {
     if (feedback || locked || disabled || !questions.length) return;
+    if (staticDisplay && Date.now() - lastAnswerAtRef.current < 800) return;
+    lastAnswerAtRef.current = Date.now();
     const correct = i === questions[qIndex % questions.length]?.a;
 
     if (correct) {
@@ -111,13 +116,13 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
       setShowFloat(true);
       spawnConfetti();
       onCorrect();
-      setTimeout(() => { setShowFloat(false); next(); }, 1200);
+      setTimeout(() => { setShowFloat(false); next(); }, staticDisplay ? 1800 : 1200);
     } else {
       setFeedback('wrong');
       onWrong?.();
       setLocked(true);
       setLockTime(penaltySeconds);
-      setTimeout(next, 1200);
+      setTimeout(next, staticDisplay ? 1800 : 1200);
     }
   };
 
@@ -165,16 +170,26 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
       </AnimatePresence>
 
       <motion.div
-        key={`q-${qIndex}`}
-        initial={{ opacity: 0.85 }}
+        key={staticDisplay ? 'static' : `q-${qIndex}`}
+        initial={staticDisplay ? false : { opacity: 0.85 }}
         animate={{ opacity: 1, ...(feedback === 'wrong' ? { x: [-8, 8, -8, 8, -4, 4, 0] } : {}) }}
-        transition={{ duration: 0.3 }}
+        transition={{ duration: staticDisplay ? 0 : 0.3 }}
         className={`relative z-20 transition-colors duration-300 rounded-xl ${
           feedback === 'wrong' ? 'bg-red-500/8 -m-2 p-2' :
           feedback === 'correct' ? 'bg-emerald-500/5 -m-2 p-2' : ''
         }`}
       >
-        <h3 className={`font-bold text-center mb-4 text-white drop-shadow-sm ${compact ? 'text-lg' : 'text-xl'}`} style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{q.q}</h3>
+        <h3
+          className={`font-bold text-center mb-4 text-white drop-shadow-sm ${compact ? 'text-lg' : 'text-xl'}`}
+          style={{
+            textShadow: '0 1px 2px rgba(0,0,0,0.5)',
+            whiteSpace: 'normal',
+            wordBreak: 'break-word',
+            minHeight: staticDisplay ? '3em' : undefined,
+          }}
+        >
+          {q.q}
+        </h3>
         <div className="grid grid-cols-2 gap-2">
           {q.opts.map((opt, i) => {
             const isCorrectOpt = feedback && i === q.a;

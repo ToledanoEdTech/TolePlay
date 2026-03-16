@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, type MouseEvent as RMouseEvent, type TouchEvent as RTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QuestionPanel } from '../QuestionPanel';
-import { Clock, HelpCircle, ShoppingCart, X } from 'lucide-react';
+import { Clock, HelpCircle, ShoppingCart, X, Trophy } from 'lucide-react';
 import { socket } from '../../socket';
 import {
   type Particle, type Star, type ShakeState,
@@ -15,10 +15,8 @@ import {
   type ParallaxLayer,
 } from './renderUtils';
 
-const VW = 1000;
-const VH = 1000;
-const SHIP_X = 500;
-const SHIP_Y = 500;
+const WORLD_SIZE = 4000;
+const VIEW_SIZE = 1000;
 
 interface Props {
   roomCode: string;
@@ -31,8 +29,8 @@ interface Props {
 }
 
 const ASTEROID_TYPES = [
-  { minVal: 0, name: 'iron', body: '#6b7280', crater: '#4b5563', glow: '#9ca3af', outline: '#78716c' },
-  { minVal: 70, name: 'ice', body: '#7dd3fc', crater: '#38bdf8', glow: '#67e8f9', outline: '#0ea5e9' },
+  { minVal: 0, name: 'iron', body: '#737373', crater: '#4b5563', glow: '#9ca3af', outline: '#78716c' },
+  { minVal: 70, name: 'ice', body: '#2dd4bf', crater: '#38bdf8', glow: '#67e8f9', outline: '#0ea5e9' },
   { minVal: 100, name: 'crystal', body: '#c084fc', crater: '#a855f7', glow: '#d8b4fe', outline: '#9333ea' },
 ];
 
@@ -41,6 +39,14 @@ function getAsteroidType(value: number) {
     if (value >= ASTEROID_TYPES[i].minVal) return ASTEROID_TYPES[i];
   }
   return ASTEROID_TYPES[0];
+}
+
+const PLAYER_COLORS = ['#38bdf8', '#f43f5e', '#a855f7', '#10b981', '#f59e0b', '#06b6d4', '#ec4899', '#84cc16'];
+
+function playerColor(playerId: string): string {
+  let h = 0;
+  for (let i = 0; i < playerId.length; i++) h = (h * 31 + playerId.charCodeAt(i)) >>> 0;
+  return PLAYER_COLORS[h % PLAYER_COLORS.length];
 }
 
 export function AsteroidHuntGame({ roomCode, playerId, player, questions, globalState, allPlayers, startTime }: Props) {
@@ -54,9 +60,9 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const nebulasRef = useRef<ParallaxLayer[]>([]);
   const particlesRef = useRef<Particle[]>([]);
   const shakeRef = useRef<ShakeState>({ intensity: 0, offsetX: 0, offsetY: 0 });
-  const mouseRef = useRef({ x: SHIP_X, y: SHIP_Y });
+  const mouseRef = useRef({ worldX: WORLD_SIZE / 2, worldY: WORLD_SIZE / 2 });
   const keysRef = useRef({ up: false, down: false, left: false, right: false });
-  const shipPosRef = useRef({ x: SHIP_X, y: SHIP_Y });
+  const cameraRef = useRef({ x: WORLD_SIZE / 2 - VIEW_SIZE / 2, y: WORLD_SIZE / 2 - VIEW_SIZE / 2 });
   const muzzleFlashRef = useRef({ active: false, angle: 0, intensity: 1 });
   const modalOpenRef = useRef(false);
   const floatTextsRef = useRef<{ x: number; y: number; text: string; life: number }[]>([]);
@@ -80,29 +86,40 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const seconds = timeLeft % 60;
   const ammo = Math.floor(player?.resources || 0);
   const ore = player?.score || 0;
-  const credits = player?.modeState?.credits || 0;
-  const weaponTier = player?.modeState?.weaponTier || 1;
-  const laserDmg = player?.modeState?.laserDamage || 25;
-  const magnetRange = player?.modeState?.magnetRange || 50;
+  const credits = player?.modeState?.credits ?? 0;
+  const weaponTier = player?.modeState?.weaponTier ?? 1;
+  const laserDmg = player?.modeState?.laserDamage ?? 25;
+  const magnetRange = player?.modeState?.magnetRange ?? 50;
+  const hasShield = !!player?.modeState?.hasShield;
+  const px = player?.x ?? WORLD_SIZE / 2;
+  const py = player?.y ?? WORLD_SIZE / 2;
+  const playerAngle = typeof player?.angle === 'number' ? player.angle : 0;
 
-  const handleMouseMove = useCallback((e: RMouseEvent<HTMLCanvasElement>) => {
+  const updateMouseWorld = useCallback((clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const scaleX = VW / rect.width;
-    const scaleY = VH / rect.height;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const viewW = canvas.width;
+    const viewH = canvas.height;
+    const cam = cameraRef.current;
+    const screenX = (clientX - rect.left) * scaleX;
+    const screenY = (clientY - rect.top) * scaleY;
     mouseRef.current = {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
+      worldX: cam.x + (screenX / viewW) * viewW,
+      worldY: cam.y + (screenY / viewH) * viewH,
     };
   }, []);
+
+  const handleMouseMove = useCallback((e: RMouseEvent<HTMLCanvasElement>) => {
+    updateMouseWorld(e.clientX, e.clientY);
+  }, [updateMouseWorld]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
-      if (['w','s','a','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) {
-        e.preventDefault();
-      }
+      if (['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
       if (k === 'w' || k === 'arrowup') keysRef.current.up = true;
       if (k === 's' || k === 'arrowdown') keysRef.current.down = true;
       if (k === 'a' || k === 'arrowleft') keysRef.current.left = true;
@@ -134,25 +151,10 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     return () => clearInterval(interval);
   }, [roomCode, playerId, quizOpen, shopOpen]);
 
-  useEffect(() => {
-    const px = player?.x ?? SHIP_X;
-    const py = player?.y ?? SHIP_Y;
-    shipPosRef.current.x = px;
-    shipPosRef.current.y = py;
-  }, [player?.x, player?.y]);
-
   const handleTouchMove = useCallback((e: RTouchEvent<HTMLCanvasElement>) => {
     if (!e.touches[0]) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = VW / rect.width;
-    const scaleY = VH / rect.height;
-    mouseRef.current = {
-      x: (e.touches[0].clientX - rect.left) * scaleX,
-      y: (e.touches[0].clientY - rect.top) * scaleY,
-    };
-  }, []);
+    updateMouseWorld(e.touches[0].clientX, e.touches[0].clientY);
+  }, [updateMouseWorld]);
 
   const handleCanvasClick = useCallback((e: RMouseEvent<HTMLCanvasElement> | RTouchEvent<HTMLCanvasElement>) => {
     if (quizOpen || shopOpen) return;
@@ -161,7 +163,6 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     const ammoCost = weaponTier === 4 ? 25 : 10;
     if ((player?.resources || 0) < ammoCost) return;
 
-    const rect = canvas.getBoundingClientRect();
     let clientX: number, clientY: number;
     if ('touches' in e) {
       if (!e.touches[0]) return;
@@ -171,16 +172,13 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       clientX = e.clientX;
       clientY = e.clientY;
     }
-    const scaleX = VW / rect.width;
-    const scaleY = VH / rect.height;
-    const clickX = (clientX - rect.left) * scaleX;
-    const clickY = (clientY - rect.top) * scaleY;
-    const pos = shipPosRef.current;
-    const angle = Math.atan2(clickY - pos.y, clickX - pos.x);
+    updateMouseWorld(clientX, clientY);
+    const { worldX, worldY } = mouseRef.current;
+    const angle = Math.atan2(worldY - py, worldX - px);
 
     muzzleFlashRef.current = { active: true, angle, intensity: 1 };
     socket.emit('action', { code: roomCode, playerId, actionType: 'shoot', aimAngle: angle });
-  }, [roomCode, playerId, player?.resources, weaponTier, quizOpen, shopOpen]);
+  }, [roomCode, playerId, player?.resources, weaponTier, quizOpen, shopOpen, px, py, updateMouseWorld]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -188,129 +186,233 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     if (!canvas || !container) return;
 
     const resize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
     };
     resize();
     window.addEventListener('resize', resize);
 
+    const safeNum = (v: unknown, def: number): number =>
+      typeof v === 'number' && !Number.isNaN(v) ? v : def;
+
     let raf: number;
     const render = (now: number) => {
       const ctx = canvas.getContext('2d');
-      if (!ctx) { raf = requestAnimationFrame(render); return; }
+      if (!ctx) {
+        raf = requestAnimationFrame(render);
+        return;
+      }
+      resize();
 
+      try {
       const dt = Math.min(0.05, (now - prevTimeRef.current) / 1000);
       prevTimeRef.current = now;
       const t = now * 0.001;
-
-      const gs = gsRef.current;
+      const gs = gsRef.current || {};
       const p = playerRef.current;
+      const viewW = Math.max(320, canvas.width);
+      const viewH = Math.max(240, canvas.height);
 
-      if (!modalOpenRef.current) {
-        const k = keysRef.current;
-        const dx = (k.right ? 1 : 0) - (k.left ? 1 : 0);
-        const dy = (k.down ? 1 : 0) - (k.up ? 1 : 0);
-        const MOVE_SPEED = 400;
-        shipPosRef.current.x = Math.max(80, Math.min(920, shipPosRef.current.x + dx * MOVE_SPEED * dt));
-        shipPosRef.current.y = Math.max(80, Math.min(920, shipPosRef.current.y + dy * MOVE_SPEED * dt));
-      }
+      const cam = cameraRef.current;
+      const plX = safeNum(p?.x, WORLD_SIZE / 2);
+      const plY = safeNum(p?.y, WORLD_SIZE / 2);
+      cam.x = plX - viewW / 2;
+      cam.y = plY - viewH / 2;
+      cam.x = Math.max(0, Math.min(WORLD_SIZE - viewW, cam.x));
+      cam.y = Math.max(0, Math.min(WORLD_SIZE - viewH, cam.y));
 
-      const shipX = shipPosRef.current.x;
-      const shipY = shipPosRef.current.y;
-      const w = canvas.width;
-      const h = canvas.height;
-      const sx = VW / w;
-      const sy = VH / h;
-      const scale = Math.min(w / VW, h / VH);
-      const offsetX = (w - VW * scale) / 2;
-      const offsetY = (h - VH * scale) / 2;
-
-      const toScreen = (vx: number, vy: number) => ({
-        x: vx * scale + offsetX,
-        y: vy * scale + offsetY,
-      });
+      ctx.clearRect(0, 0, viewW, viewH);
 
       const shake = tickShake(shakeRef.current);
       ctx.save();
-      ctx.translate(shake.x, shake.y);
+      ctx.translate(safeNum(shake.x, 0), safeNum(shake.y, 0));
 
-      const bg = ctx.createLinearGradient(0, 0, 0, h);
+      const bg = ctx.createLinearGradient(0, 0, 0, viewH);
       bg.addColorStop(0, '#020210');
       bg.addColorStop(0.3, '#070720');
       bg.addColorStop(0.6, '#0a0a35');
       bg.addColorStop(1, '#020210');
       ctx.fillStyle = bg;
-      ctx.fillRect(-20, -20, w + 40, h + 40);
+      ctx.fillRect(-20, -20, viewW + 40, viewH + 40);
 
       const scrollY = t * 30;
-      drawParallaxNebulas(ctx, nebulasRef.current, w, h, t, scrollY);
-      drawStarfield(ctx, starsRef.current, w, h, 0.5);
+      drawParallaxNebulas(ctx, nebulasRef.current, viewW, viewH, t, scrollY);
+      drawStarfield(ctx, starsRef.current, viewW, viewH, 0.5);
 
-      const mouse = mouseRef.current;
-      const shipAngle = Math.atan2(mouse.y - shipY, mouse.x - shipX);
+      ctx.save();
+      ctx.translate(-cam.x, -cam.y);
 
-      (gs?.collectibles || []).forEach((c: any) => {
-        if (!seenCollectiblesRef.current.has(c.id)) {
-          seenCollectiblesRef.current.add(c.id);
-          const { x: cx, y: cy } = toScreen(c.x, c.y);
-          const gemColor = c.value >= 100 ? '#c084fc' : c.value >= 70 ? '#67e8f9' : '#9ca3af';
-          particlesRef.current.push(...emitAsteroidExplosion(cx, cy, gemColor, gemColor, 28));
-          triggerShake(shakeRef.current, 6);
-          floatTextsRef.current.push({ x: cx, y: cy, text: `+${c.value}`, life: 1 });
-        }
+      ctx.strokeStyle = 'rgba(255, 0, 0, 0.2)';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
+
+      const toScreen = (wx: number, wy: number) => ({
+        x: safeNum(wx, 0) - cam.x,
+        y: safeNum(wy, 0) - cam.y,
       });
 
-      gs?.asteroids?.forEach((a: any) => {
-        const { x: ax, y: ay } = toScreen(a.x, a.y);
-        const type = getAsteroidType(a.value);
-        const size = (16 + (a.value / 150) * 14) * scale * 0.5;
-        const rotation = t * 0.5 + a.x * 0.01;
-        const hpPct = a.hp / a.maxHp;
-
-        drawAsteroid(ctx, ax, ay, size, type, rotation, hpPct);
-
+      (gs.asteroids || []).forEach((a: any) => {
+        const ax = safeNum(a.x, WORLD_SIZE / 2);
+        const ay = safeNum(a.y, WORLD_SIZE / 2);
+        const { x: sx, y: sy } = toScreen(ax, ay);
+        if (Number.isNaN(sx) || Number.isNaN(sy) || sx < -200 || sx > viewW + 200 || sy < -200 || sy > viewH + 200) return;
+        const type = getAsteroidType(safeNum(a.value, 50));
+        const scale = Math.max(0.3, (viewW / VIEW_SIZE) * 0.5);
+        const size = Math.max(8, safeNum(a.radius, 25) * scale);
+        const rotation = safeNum(a.rotation, 0) + ax * 0.01;
+        const maxHp = Math.max(1, safeNum(a.maxHp, 100));
+        const hpPct = Math.max(0, Math.min(1, safeNum(a.hp, maxHp) / maxHp));
+        drawAsteroid(ctx, sx, sy, size, type, rotation, hpPct);
         const barColor = hpPct > 0.5 ? type.glow : hpPct > 0.25 ? '#f59e0b' : '#ef4444';
-        drawHPBar(ctx, ax, ay - size - 6, size * 1.6, 3, hpPct, barColor);
+        drawHPBar(ctx, sx, sy - size - 6, size * 1.6, 3, hpPct, barColor);
       });
 
-      (gs?.collectibles || []).forEach((c: any) => {
-        const { x: cx, y: cy } = toScreen(c.x, c.y);
-        const gemColor = c.value >= 100 ? '#c084fc' : c.value >= 70 ? '#67e8f9' : '#9ca3af';
-        drawOreGem(ctx, cx, cy, c.value, gemColor, t, scale);
+      (gs.collectibles || []).forEach((c: any) => {
+        const cx = safeNum(c.x, 0);
+        const cy = safeNum(c.y, 0);
+        const { x: scrX, y: scrY } = toScreen(cx, cy);
+        if (Number.isNaN(scrX) || Number.isNaN(scrY) || scrX < -30 || scrX > viewW + 30 || scrY < -30 || scrY > viewH + 30) return;
+        const gemColor = c.color || (safeNum(c.value, 50) >= 100 ? '#c084fc' : safeNum(c.value, 50) >= 70 ? '#67e8f9' : '#9ca3af');
+        drawOreGem(ctx, scrX, scrY, safeNum(c.value, 50), gemColor, t, viewW / VIEW_SIZE);
       });
 
-      gs?.projectiles?.forEach((proj: any) => {
+      (gs.projectiles || []).filter((proj: any) => {
+        const projX = proj.x;
+        const projY = proj.y;
+        return typeof projX === 'number' && !Number.isNaN(projX) && typeof projY === 'number' && !Number.isNaN(projY);
+      }).forEach((proj: any) => {
         const { x: px, y: py } = toScreen(proj.x, proj.y);
+        if (Number.isNaN(px) || Number.isNaN(py) || px < -30 || px > viewW + 30 || py < -30 || py > viewH + 30) return;
         if (proj.type === 'plasma') {
-          drawGlow(ctx, px, py, 25 * scale, '#a855f7', 0.4);
+          drawGlow(ctx, px, py, 25 * (viewW / VIEW_SIZE), '#a855f7', 0.4);
           ctx.fillStyle = colorAlpha('#a855f7', 0.9);
           ctx.shadowBlur = 15;
           ctx.shadowColor = '#a855f7';
           ctx.beginPath();
-          ctx.arc(px, py, 12 * scale, 0, Math.PI * 2);
+          ctx.arc(px, py, 12 * (viewW / VIEW_SIZE), 0, Math.PI * 2);
           ctx.fill();
           ctx.shadowBlur = 0;
         } else {
-          const color = weaponTier >= 3 ? '#60a5fa' : '#a855f7';
-          drawBeam(ctx, toScreen(shipX, shipY).x, toScreen(shipX, shipY).y, px, py, color, 2 * scale, 10);
+          ctx.beginPath();
+          ctx.arc(px, py, (proj.radius || 4) * (viewW / VIEW_SIZE), 0, Math.PI * 2);
+          ctx.fillStyle = proj.color || '#60a5fa';
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = proj.color || '#60a5fa';
+          ctx.fill();
+          ctx.shadowBlur = 0;
         }
       });
 
-      drawShip(ctx, toScreen(shipX, shipY).x, toScreen(shipX, shipY).y, scale, t, weaponTier, ammo, shipAngle);
+      const allPlayersMap = allPlayers || {};
+      const playersList: Array<{ id: string; x?: number; y?: number; angle?: number; name?: string; modeState?: any }> = Object.entries(allPlayersMap).map(([id, pl]) => ({ ...pl, id }));
+      if (!playersList.some((pl: any) => pl.id === playerId)) {
+        playersList.push({
+          id: playerId,
+          x: plX,
+          y: plY,
+          angle: typeof p?.angle === 'number' ? p.angle : 0,
+          name: p?.name,
+          modeState: p?.modeState,
+        });
+      }
+      playersList.forEach((pl: any) => {
+        const plx = safeNum(pl.x, WORLD_SIZE / 2);
+        const ply = safeNum(pl.y, WORLD_SIZE / 2);
+        const { x: sx, y: sy } = toScreen(plx, ply);
+        if (Number.isNaN(sx) || Number.isNaN(sy) || sx < -80 || sx > viewW + 80 || sy < -80 || sy > viewH + 80) return;
+        const angle = safeNum(pl.angle, 0);
+        const color = pl.color || playerColor(pl.id);
+        const scale = Math.max(0.3, (viewW / VIEW_SIZE) * 0.5);
+        const radius = Math.max(12, 26 * scale);
+        const isLocal = pl.id === playerId;
 
-      if (muzzleFlashRef.current.active) {
-        drawMuzzleFlash(ctx, toScreen(shipX, shipY).x, toScreen(shipX, shipY).y, shipAngle, muzzleFlashRef.current.intensity);
-        muzzleFlashRef.current.intensity -= dt * 8;
+        if (isLocal) {
+          drawGlow(ctx, sx, sy, radius + 25, color, 0.2);
+          ctx.beginPath();
+          ctx.arc(sx, sy, (pl.modeState?.magnetRange ?? 50) * scale, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        if (pl.modeState?.hasShield) {
+          ctx.beginPath();
+          ctx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(59, 130, 246, 0.9)';
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
+          ctx.fill();
+        }
+
+        ctx.save();
+        ctx.translate(safeNum(sx, viewW / 2), safeNum(sy, viewH / 2));
+        ctx.rotate(angle);
+        ctx.strokeStyle = colorAlpha('#fff', 0.35);
+        ctx.lineWidth = 2;
+        ctx.fillStyle = color;
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = color;
+        ctx.beginPath();
+        ctx.moveTo(radius, 0);
+        ctx.lineTo(-radius * 0.5, radius * 0.4);
+        ctx.lineTo(-radius * 0.8, 0);
+        ctx.lineTo(-radius * 0.5, -radius * 0.4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        ctx.moveTo(-radius * 0.2, radius * 0.3);
+        ctx.lineTo(-radius, radius * 0.9);
+        ctx.lineTo(-radius * 0.7, radius * 0.3);
+        ctx.closePath();
+        ctx.fillStyle = '#334155';
+        ctx.fill();
+        ctx.strokeStyle = colorAlpha('#fff', 0.15);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-radius * 0.2, -radius * 0.3);
+        ctx.lineTo(-radius, -radius * 0.9);
+        ctx.lineTo(-radius * 0.7, -radius * 0.3);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#bae6fd';
+        ctx.beginPath();
+        ctx.ellipse(radius * 0.2, 0, radius * 0.4, radius * 0.15, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.font = `bold ${14 * (viewW / VIEW_SIZE)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText(pl.name || pl.id, sx, sy - radius - 18);
+      });
+
+      if (muzzleFlashRef.current.active && p?.id === playerId) {
+        const mf = muzzleFlashRef.current;
+        const sx = safeNum(plX - cam.x, viewW / 2);
+        const sy = safeNum(plY - cam.y, viewH / 2);
+        const mfAngle = safeNum(mf.angle, 0);
+        const mfIntensity = safeNum(mf.intensity, 0.5);
+        if (!Number.isNaN(sx) && !Number.isNaN(sy)) {
+          drawMuzzleFlash(ctx, sx, sy, mfAngle, mfIntensity);
+        }
+        muzzleFlashRef.current.intensity = mfIntensity - dt * 8;
         if (muzzleFlashRef.current.intensity <= 0) muzzleFlashRef.current.active = false;
       }
 
-      floatTextsRef.current = floatTextsRef.current.filter(ft => {
+      floatTextsRef.current = floatTextsRef.current.filter((ft) => {
         ft.life -= dt * 1.5;
         ft.y -= 40 * dt;
         if (ft.life <= 0) return false;
         ctx.globalAlpha = ft.life;
         ctx.fillStyle = '#22c55e';
-        ctx.font = `bold ${14 * scale}px sans-serif`;
+        ctx.font = `bold ${14 * (viewW / VIEW_SIZE)}px sans-serif`;
         ctx.textAlign = 'center';
         ctx.fillText(ft.text, ft.x, ft.y);
         ctx.globalAlpha = 1;
@@ -320,6 +422,37 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       particlesRef.current = tickParticles(ctx, particlesRef.current);
 
       ctx.restore();
+
+      const mmSize = 180;
+      const mmX = 20;
+      const mmY = viewH - mmSize - 20;
+      const scale = mmSize / WORLD_SIZE;
+      ctx.fillStyle = 'rgba(10, 10, 25, 0.85)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 2;
+      ctx.fillRect(mmX, mmY, mmSize, mmSize);
+      ctx.strokeRect(mmX, mmY, mmSize, mmSize);
+      ctx.fillStyle = 'rgba(150, 150, 150, 0.5)';
+      (gs.asteroids || []).forEach((a: any) => {
+        const ax = safeNum(a.x, 0);
+        const ay = safeNum(a.y, 0);
+        if (Number.isNaN(ax) || Number.isNaN(ay)) return;
+        ctx.fillRect(mmX + ax * scale, mmY + ay * scale, 2, 2);
+      });
+      playersList.forEach((pl: any) => {
+        ctx.fillStyle = pl.color || playerColor(pl.id);
+        ctx.beginPath();
+        ctx.arc(mmX + safeNum(pl.x, 0) * scale, mmY + safeNum(pl.y, 0) * scale, pl.id === playerId ? 5 : 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(mmX + cam.x * scale, mmY + cam.y * scale, viewW * scale, viewH * scale);
+
+      ctx.restore();
+      } catch (_) {
+        ctx.restore();
+      }
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -356,7 +489,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.9, opacity: 0 }}
         transition={{ type: 'spring', damping: 22, stiffness: 300 }}
-        onClick={e => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
         className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 shadow-2xl"
         style={{
           background: 'rgb(2, 6, 23)',
@@ -412,12 +545,34 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
           <span className="px-3 py-1.5 rounded-xl bg-cyan-500/20 backdrop-blur-md border border-cyan-400/30 text-cyan-300 font-bold text-sm">
             ⚡ {ammo}
           </span>
-          <span className="px-3 py-1.5 rounded-xl bg-amber-500/15 backdrop-blur-md border border-amber-400/25 text-amber-300 font-bold text-sm">
+          <span className="px-3 py-1.5 rounded-xl bg-green-500/20 backdrop-blur-md border border-green-400/30 text-green-300 font-bold text-sm">
+            💰 {credits}
+          </span>
+          <span className="px-3 py-1.5 rounded-xl bg-slate-800/60 backdrop-blur-md border border-slate-600/40 text-slate-300 font-bold text-sm">
             T{weaponTier}
           </span>
           <span className="px-3 py-1.5 rounded-xl bg-slate-800/60 backdrop-blur-md border border-slate-600/40 text-slate-300 font-bold text-sm">
             #{myRank}
           </span>
+        </div>
+      </div>
+
+      <div className="absolute right-4 top-24 z-20 pointer-events-auto min-w-[200px] rounded-xl bg-slate-900/90 backdrop-blur-md border border-white/10 p-3">
+        <h3 className="text-lg font-bold mb-2 flex items-center gap-2 text-amber-400">
+          <Trophy size={18} /> מובילים
+        </h3>
+        <div className="space-y-1 max-h-40 overflow-y-auto">
+          {sorted.slice(0, 8).map((pl: any, i: number) => (
+            <div
+              key={pl.id}
+              className={`flex justify-between text-sm ${pl.id === playerId ? 'text-amber-300 font-bold' : 'text-slate-300'}`}
+            >
+              <span>
+                {i + 1}. {pl.name || pl.id}
+              </span>
+              <span>{pl.score ?? 0}</span>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -428,20 +583,20 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
           onClick={() => setQuizOpen(true)}
           className="px-6 py-3 rounded-xl font-bold flex items-center gap-2 bg-purple-600/90 hover:bg-purple-500 border border-purple-400/30 shadow-lg shadow-purple-500/20 backdrop-blur-sm"
         >
-          <HelpCircle size={18} /> טרמינל / שאלות
+          <HelpCircle size={18} /> טרמינל שאלות
         </motion.button>
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={() => setShopOpen(true)}
-          className="px-6 py-3 rounded-xl font-bold flex items-center gap-2 bg-blue-600/90 hover:bg-blue-500 border border-blue-400/30 shadow-lg shadow-blue-500/20 backdrop-blur-sm"
+          className="px-6 py-3 rounded-xl font-bold flex items-center gap-2 bg-orange-600/90 hover:bg-orange-500 border border-orange-400/30 shadow-lg shadow-orange-500/20 backdrop-blur-sm"
         >
           <ShoppingCart size={18} /> חנות נשק
         </motion.button>
       </div>
 
       <AnimatePresence>
-        {ammo < 10 && !quizOpen && (
+        {ammo < 15 && !quizOpen && (
           <motion.div
             key="low-ammo"
             initial={{ opacity: 0, y: 10 }}
@@ -456,7 +611,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         )}
       </AnimatePresence>
       <div className="absolute bottom-20 right-4 z-20 pointer-events-none text-[10px] text-slate-500">
-        לחץ על המשחק ואז WASD / חצים לזוז
+        WASD / חצים לזוז • לחץ לירי (כיוון העכבר)
       </div>
 
       <AnimatePresence>
@@ -465,8 +620,8 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
             <div className="p-6 pt-12 overflow-y-auto max-h-[90vh] rounded-2xl bg-slate-950 text-white border border-slate-700/50">
               <h2 className="text-xl font-bold text-center mb-4 text-white">טרמינל שאלות</h2>
               <p className="text-slate-300 text-sm text-center mb-4">תשובה נכונה = +20 ⚡ + 10 💰</p>
-              <div className="min-h-[200px] relative">
-                <QuestionPanel questions={questions} onCorrect={onCorrect} onWrong={onWrong} earnLabel="+20 ⚡ +10 💰" compact />
+              <div className="min-h-[220px] relative" style={{ overflow: 'visible' }}>
+                <QuestionPanel questions={questions} onCorrect={onCorrect} onWrong={onWrong} earnLabel="+20 ⚡ +10 💰" compact staticDisplay />
               </div>
             </div>
           </ModalBackdrop>
@@ -477,65 +632,65 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         {shopOpen && (
           <ModalBackdrop key="shop-modal" onClose={() => setShopOpen(false)}>
             <div className="p-6 pt-12 overflow-y-auto max-h-[85vh]">
-              <h2 className="text-xl font-bold text-center mb-2 text-blue-200">חנות נשק</h2>
+              <h2 className="text-xl font-bold text-center mb-2 text-orange-400">חנות שדרוגים</h2>
               <p className="text-slate-400 text-sm text-center mb-4">מטבעות: {credits} 💰</p>
               <div className="space-y-3">
                 <WeaponTierItem
                   tier={2}
                   title="תאומים"
                   desc="שני לייזרים מקבילים"
-                  cost={200}
+                  cost={100}
                   icon="🔫🔫"
-                  canAfford={credits >= 200}
+                  canAfford={credits >= 100}
                   owned={weaponTier >= 2}
-                  onBuy={() => buyUpgrade('weapon_tier_2', 200)}
+                  onBuy={() => buyUpgrade('weapon_tier_2', 100)}
                 />
                 <WeaponTierItem
                   tier={3}
                   title="פזורה"
                   desc="3 לייזרים בצורת קונוס"
-                  cost={350}
+                  cost={150}
                   icon="🔫🔫🔫"
-                  canAfford={credits >= 350}
+                  canAfford={credits >= 150}
                   owned={weaponTier >= 3}
-                  onBuy={() => buyUpgrade('weapon_tier_3', 350)}
+                  onBuy={() => buyUpgrade('weapon_tier_3', 150)}
                 />
                 <WeaponTierItem
                   tier={4}
                   title="פלזמה"
                   desc="פגז גדול עם נזק אזורי"
-                  cost={500}
+                  cost={250}
                   icon="💥"
-                  canAfford={credits >= 500}
+                  canAfford={credits >= 250}
                   owned={weaponTier >= 4}
-                  onBuy={() => buyUpgrade('weapon_tier_4', 500)}
+                  onBuy={() => buyUpgrade('weapon_tier_4', 250)}
                 />
                 <SpaceShopItem
                   title="שדרוג נזק"
                   desc={`נזק +25 (כרגע: ${laserDmg})`}
-                  cost={200}
+                  cost={100}
                   icon="⚔️"
                   accentColor="#a855f7"
-                  canAfford={credits >= 200}
-                  onBuy={() => buyUpgrade('laser', 200)}
+                  canAfford={credits >= 100}
+                  onBuy={() => buyUpgrade('laser', 100)}
                 />
                 <SpaceShopItem
                   title="מגנט"
                   desc={`משוך עפרות (טווח +50, כרגע: ${magnetRange})`}
-                  cost={300}
+                  cost={150}
                   icon="🧲"
                   accentColor="#3b82f6"
-                  canAfford={credits >= 300}
-                  onBuy={() => buyUpgrade('magnet', 300)}
+                  canAfford={credits >= 150}
+                  onBuy={() => buyUpgrade('magnet', 150)}
                 />
                 <SpaceShopItem
                   title="מגן"
                   desc="הגנה מפני התנגשויות"
-                  cost={400}
+                  cost={200}
                   icon="🛡️"
                   accentColor="#14b8a6"
-                  canAfford={credits >= 400}
-                  onBuy={() => buyUpgrade('shield', 400)}
+                  canAfford={credits >= 200}
+                  onBuy={() => buyUpgrade('shield', 200)}
                 />
               </div>
             </div>
@@ -547,8 +702,14 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
 }
 
 function WeaponTierItem({ tier, title, desc, cost, icon, canAfford, owned, onBuy }: {
-  tier: number; title: string; desc: string; cost: number; icon: string;
-  canAfford: boolean; owned: boolean; onBuy: () => void;
+  tier: number;
+  title: string;
+  desc: string;
+  cost: number;
+  icon: string;
+  canAfford: boolean;
+  owned: boolean;
+  onBuy: () => void;
 }) {
   return (
     <motion.button
@@ -567,7 +728,9 @@ function WeaponTierItem({ tier, title, desc, cost, icon, canAfford, owned, onBuy
         {icon}
       </div>
       <div className="flex-1 text-right min-w-0">
-        <h4 className="font-bold">Tier {tier}: {title}</h4>
+        <h4 className="font-bold">
+          Tier {tier}: {title}
+        </h4>
         <p className="text-xs text-slate-400">{desc}</p>
       </div>
       {owned ? (
@@ -581,9 +744,22 @@ function WeaponTierItem({ tier, title, desc, cost, icon, canAfford, owned, onBuy
   );
 }
 
-function SpaceShopItem({ title, desc, cost, icon, canAfford, onBuy, accentColor }: {
-  title: string; desc: string; cost: number; icon: string;
-  canAfford: boolean; onBuy: () => void; accentColor: string;
+function SpaceShopItem({
+  title,
+  desc,
+  cost,
+  icon,
+  canAfford,
+  onBuy,
+  accentColor,
+}: {
+  title: string;
+  desc: string;
+  cost: number;
+  icon: string;
+  canAfford: boolean;
+  onBuy: () => void;
+  accentColor: string;
 }) {
   return (
     <motion.button
@@ -598,7 +774,10 @@ function SpaceShopItem({ title, desc, cost, icon, canAfford, onBuy, accentColor 
     >
       <div
         className="w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0"
-        style={{ background: canAfford ? `${accentColor}15` : '#1e293b', border: `1px solid ${canAfford ? accentColor + '30' : '#334155'}` }}
+        style={{
+          background: canAfford ? `${accentColor}15` : '#1e293b',
+          border: `1px solid ${canAfford ? accentColor + '30' : '#334155'}`,
+        }}
       >
         {icon}
       </div>
@@ -621,8 +800,13 @@ function SpaceShopItem({ title, desc, cost, icon, canAfford, onBuy, accentColor 
 }
 
 function drawAsteroid(
-  ctx: CanvasRenderingContext2D, x: number, y: number, size: number,
-  type: typeof ASTEROID_TYPES[number], rotation: number, hpPct: number
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  type: (typeof ASTEROID_TYPES)[number],
+  rotation: number,
+  hpPct: number
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -644,14 +828,22 @@ function drawAsteroid(
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = colorAlpha(type.crater, 0.4);
-  ctx.beginPath(); ctx.arc(-size * 0.25, -size * 0.15, size * 0.2, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(size * 0.15, size * 0.2, size * 0.15, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-size * 0.25, -size * 0.15, size * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(size * 0.15, size * 0.2, size * 0.15, 0, Math.PI * 2);
+  ctx.fill();
   if (type.name === 'crystal' || type.name === 'ice') {
     ctx.fillStyle = '#fff';
     const sparkle = 0.5 + 0.5 * Math.sin(rotation * 3);
     ctx.globalAlpha = sparkle * 0.6;
-    ctx.beginPath(); ctx.arc(-size * 0.1, -size * 0.3, 1.5, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(size * 0.3, size * 0.05, 1, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath();
+    ctx.arc(-size * 0.1, -size * 0.3, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(size * 0.3, size * 0.05, 1, 0, Math.PI * 2);
+    ctx.fill();
     ctx.globalAlpha = 1;
   }
   if (hpPct < 0.6) {
@@ -663,90 +855,5 @@ function drawAsteroid(
     ctx.lineTo(size * 0.2, -size * 0.2);
     ctx.stroke();
   }
-  ctx.restore();
-}
-
-function drawShip(
-  ctx: CanvasRenderingContext2D, x: number, y: number,
-  scale: number, t: number, weaponTier: number, ammo: number, angle: number
-) {
-  const s = scale * 2.2;
-
-  const thrustIntensity = 0.5 + 0.5 * Math.sin(t * 12);
-  const thrustX = x - Math.cos(angle) * 14 * s;
-  const thrustY = y - Math.sin(angle) * 14 * s;
-  drawGlow(ctx, thrustX, thrustY, 18 * s, '#3b82f6', 0.2 * thrustIntensity);
-  drawGlow(ctx, thrustX, thrustY, 10 * s, '#60a5fa', 0.3 * thrustIntensity);
-
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-
-  ctx.fillStyle = colorAlpha('#3b82f6', 0.5 + 0.3 * thrustIntensity);
-  ctx.beginPath();
-  ctx.moveTo(-5 * s, 4 * s);
-  ctx.lineTo(0, (14 + thrustIntensity * 5) * s);
-  ctx.lineTo(5 * s, 4 * s);
-  ctx.closePath();
-  ctx.fill();
-
-  const shipColor = weaponTier >= 4 ? '#a855f7' : weaponTier >= 3 ? '#3b82f6' : weaponTier >= 2 ? '#14b8a6' : '#6b7280';
-  ctx.fillStyle = shipColor;
-  ctx.strokeStyle = colorAlpha('#fff', 0.2);
-  ctx.lineWidth = 1;
-
-  ctx.beginPath();
-  ctx.moveTo(0, -16 * s);
-  ctx.lineTo(10 * s, 5 * s);
-  ctx.lineTo(6 * s, 7 * s);
-  ctx.lineTo(-6 * s, 7 * s);
-  ctx.lineTo(-10 * s, 5 * s);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.fillStyle = colorAlpha(shipColor, 0.8);
-  ctx.beginPath();
-  ctx.moveTo(-7 * s, 0);
-  ctx.lineTo(-18 * s, 7 * s);
-  ctx.lineTo(-16 * s, 4 * s);
-  ctx.lineTo(-6 * s, -2 * s);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(7 * s, 0);
-  ctx.lineTo(18 * s, 7 * s);
-  ctx.lineTo(16 * s, 4 * s);
-  ctx.lineTo(6 * s, -2 * s);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = '#22d3ee';
-  ctx.shadowBlur = 6;
-  ctx.shadowColor = '#22d3ee';
-  ctx.beginPath();
-  ctx.ellipse(0, -8 * s, 3 * s, 4 * s, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-
-  if (weaponTier >= 2) {
-    ctx.fillStyle = '#a855f7';
-    ctx.shadowBlur = 4;
-    ctx.shadowColor = '#a855f7';
-    ctx.beginPath(); ctx.arc(-14 * s, 5 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(14 * s, 5 * s, 2.5 * s, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0;
-  }
-
-  if (ammo >= 10) {
-    ctx.strokeStyle = colorAlpha('#a855f7', 0.2 + 0.1 * Math.sin(t * 3));
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.arc(0, -2 * s, 22 * s, 0, Math.PI * 2 * Math.min(1, ammo / 100));
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
   ctx.restore();
 }

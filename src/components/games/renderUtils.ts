@@ -7,12 +7,14 @@ export interface Particle {
   color: string; size: number;
   gravity: number; friction: number;
   type: 'circle' | 'square' | 'spark';
+  /** When true, particle scale goes to 0 as life decreases (for collection VFX). */
+  scaleDown?: boolean;
 }
 
 export function createParticle(
   x: number, y: number, angle: number, speed: number,
   life: number, color: string, size: number,
-  opts?: Partial<Pick<Particle, 'gravity' | 'friction' | 'type'>>
+  opts?: Partial<Pick<Particle, 'gravity' | 'friction' | 'type' | 'scaleDown'>>
 ): Particle {
   return {
     x, y,
@@ -23,13 +25,14 @@ export function createParticle(
     gravity: opts?.gravity ?? 0,
     friction: opts?.friction ?? 1,
     type: opts?.type ?? 'circle',
+    scaleDown: opts?.scaleDown,
   };
 }
 
 export function emitBurst(
   x: number, y: number, count: number,
   speed: number, life: number, color: string, size: number,
-  opts?: Partial<Pick<Particle, 'gravity' | 'friction' | 'type'>>
+  opts?: Partial<Pick<Particle, 'gravity' | 'friction' | 'type' | 'scaleDown'>>
 ): Particle[] {
   const out: Particle[] = [];
   for (let i = 0; i < count; i++) {
@@ -78,8 +81,9 @@ export function tickParticles(ctx: CanvasRenderingContext2D, particles: Particle
       const s = p.size * alpha;
       ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
     } else {
+      const r = p.scaleDown ? p.size * alpha : Math.max(0.2, p.size * alpha);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, Math.max(0.2, p.size * alpha), 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -212,13 +216,17 @@ export function lerp(a: number, b: number, t: number): number {
 }
 
 export function colorAlpha(color: string, alpha: number): string {
-  if (color.startsWith('#')) {
+  const safeAlpha = typeof alpha === 'number' && !Number.isNaN(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.8;
+  if (color && typeof color === 'string' && color.startsWith('#')) {
     const r = parseInt(color.slice(1, 3), 16);
     const g = parseInt(color.slice(3, 5), 16);
     const b = parseInt(color.slice(5, 7), 16);
-    return `rgba(${r},${g},${b},${alpha})`;
+    const sr = Number.isNaN(r) ? 96 : Math.max(0, Math.min(255, r));
+    const sg = Number.isNaN(g) ? 165 : Math.max(0, Math.min(255, g));
+    const sb = Number.isNaN(b) ? 250 : Math.max(0, Math.min(255, b));
+    return `rgba(${sr},${sg},${sb},${safeAlpha})`;
   }
-  return color;
+  return `rgba(96,165,250,${safeAlpha})`;
 }
 
 export function lerpColor(a: string, b: string, t: number): string {
@@ -374,17 +382,26 @@ export function drawMuzzleFlash(
   x: number, y: number, angle: number,
   intensity: number, color: string = '#60a5fa'
 ) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-  ctx.globalAlpha = intensity;
-  const g = ctx.createLinearGradient(-15, 0, 15, 0);
-  g.addColorStop(0, 'transparent');
-  g.addColorStop(0.3, colorAlpha(color, 0.8));
-  g.addColorStop(0.5, colorAlpha('#fff', 0.9));
-  g.addColorStop(0.7, colorAlpha(color, 0.8));
-  g.addColorStop(1, 'transparent');
-  ctx.fillStyle = g;
-  ctx.fillRect(-15, -4, 30, 8);
-  ctx.restore();
+  const safeX = typeof x === 'number' && !Number.isNaN(x) ? x : 0;
+  const safeY = typeof y === 'number' && !Number.isNaN(y) ? y : 0;
+  const safeAngle = typeof angle === 'number' && !Number.isNaN(angle) ? angle : 0;
+  const safeIntensity = typeof intensity === 'number' && !Number.isNaN(intensity) ? Math.max(0, Math.min(1, intensity)) : 0.5;
+  const safeColor = color && typeof color === 'string' && color.startsWith('#') ? color : '#60a5fa';
+  try {
+    ctx.save();
+    ctx.translate(safeX, safeY);
+    ctx.rotate(safeAngle);
+    ctx.globalAlpha = safeIntensity;
+    const g = ctx.createLinearGradient(-15, 0, 15, 0);
+    g.addColorStop(0, 'transparent');
+    g.addColorStop(0.3, colorAlpha(safeColor, 0.8));
+    g.addColorStop(0.5, colorAlpha('#ffffff', 0.9));
+    g.addColorStop(0.7, colorAlpha(safeColor, 0.8));
+    g.addColorStop(1, 'transparent');
+    ctx.fillStyle = g;
+    ctx.fillRect(-15, -4, 30, 8);
+    ctx.restore();
+  } catch (_) {
+    try { ctx.restore(); } catch (_) {}
+  }
 }

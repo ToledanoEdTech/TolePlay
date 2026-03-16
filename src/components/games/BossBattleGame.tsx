@@ -1,90 +1,463 @@
-import { useState, useEffect, useRef, useCallback, type MutableRefObject } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import * as THREE from 'three';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QuestionPanel } from '../QuestionPanel';
 import { Shield, ZapOff, Clock, HelpCircle, Crosshair } from 'lucide-react';
 import { socket } from '../../socket';
-import { createInputState, getMoveDirection, setupKeyboardListeners } from '../../engine/input';
-import { createCamera, updateCamera, screenToWorld } from '../../engine/camera';
-import { VirtualJoystick } from '../../engine/VirtualJoystick';
-import type { CameraState } from '../../engine/types';
-import {
-  type Particle, type ShakeState,
-  emitBurst, emitDirectional, tickParticles,
-  triggerShake, tickShake, drawGlow, drawBeam, colorAlpha,
-  roundRect, lerp,
-} from './renderUtils';
-import { getObjectsInView, type WorldObject } from './bossWorld';
-import { playShootSound } from '../../utils/shootSound';
 
-const WORLD_SIZE = 3000;
-const PLAYER_SPEED = 420;
-const MOVE_SYNC_MS = 20;
-const CENTER = WORLD_SIZE / 2;
-
-interface Props {
+type Props = {
   roomCode: string;
   playerId: string;
   player: any;
   questions: any[];
   globalState: any;
   allPlayers: Record<string, any>;
+};
+
+const MAP_SIZE = 400;
+const WORLD_FALLBACK_SIZE = 3000;
+
+type KeysState = Record<string, boolean>;
+
+type PlayerEntity = {
+  mesh: THREE.Group;
+  gun: THREE.Mesh;
+  baseGunPos: THREE.Vector3;
+  radius: number;
+  isBoss: boolean;
+};
+
+type ProjectileRuntime = {
+  mesh: THREE.Group;
+  isBoss: boolean;
+  vx: number;
+  vz: number;
+  life: number;
+  maxLife: number;
+  trailMeshes: THREE.Mesh[];
+  trailPositions: THREE.Vector3[];
+};
+
+type Obstacle = { minX: number; maxX: number; minZ: number; maxZ: number };
+
+// Weapon config: fireRate (ms), projectileSpeed (scene units/s), projectileColor (hex), projectileSize, meshColor (hex), spreadCount (1 = single, 3 = spread)
+const WEAPON_CONFIG: Record<string, { fireRate: number; projectileSpeed: number; projectileColor: number; projectileSize: number; meshColor: number; spreadCount: number; spreadAngle: number }> = {
+  blaster: { fireRate: 120, projectileSpeed: 90, projectileColor: 0x3498db, projectileSize: 0.8, meshColor: 0x3498db, spreadCount: 1, spreadAngle: 0 },
+  sniper: { fireRate: 1200, projectileSpeed: 180, projectileColor: 0x00ff00, projectileSize: 0.5, meshColor: 0x2ecc71, spreadCount: 1, spreadAngle: 0 },
+  spreadgun: { fireRate: 800, projectileSpeed: 70, projectileColor: 0xff8800, projectileSize: 0.6, meshColor: 0xe67e22, spreadCount: 3, spreadAngle: 0.15 },
+  rifle: { fireRate: 120, projectileSpeed: 90, projectileColor: 0x3498db, projectileSize: 0.8, meshColor: 0x222222, spreadCount: 1, spreadAngle: 0 },
+  shotgun: { fireRate: 800, projectileSpeed: 70, projectileColor: 0xff8800, projectileSize: 0.6, meshColor: 0xe67e22, spreadCount: 3, spreadAngle: 0.15 },
+};
+const WEAPONS = [
+  { id: 'pistol', name: 'אקדח', color: 0xaaaaaa, speed: 60, cooldown: 250, spread: 0, bullets: 1 },
+  { id: 'shotgun', name: 'שוטגאן', color: 0xff8800, speed: 50, cooldown: 800, spread: 0.35, bullets: 6 },
+  { id: 'sniper', name: 'רובה צלפים', color: 0x00ff00, speed: 120, cooldown: 1200, spread: 0, bullets: 1 },
+  { id: 'rifle', name: 'רובה סער', color: 0x3498db, speed: 80, cooldown: 120, spread: 0.08, bullets: 1 },
+  { id: 'plasma', name: 'רובה פלזמה', color: 0x00ffff, speed: 40, cooldown: 600, spread: 0, bullets: 1 },
+];
+const GUN_PLANE_Y = 2.5; // scene-space height for aim plane (gun height)
+
+const PLAYER_COLLISION_RADIUS = 3;
+const PROJECTILE_MAX_LIFE = 2.5;
+const LOCAL_LERP = 0.15;
+const REMOTE_LERP = 0.25;
+const SNAP_DIST = 40;
+
+function createGroundTexture(): THREE.CanvasTexture {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const baseGreen = '#2d5016';
+  const darkGreen = '#1e3d0f';
+  const dirt = '#4a3728';
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const n = Math.sin(x * 0.2) * Math.cos(y * 0.15) + Math.random() * 0.3;
+      ctx.fillStyle = n > 0.3 ? baseGreen : n > 0 ? darkGreen : dirt;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(24, 24);
+  return tex;
 }
 
-interface TravelingProjectile {
-  x: number; y: number; vx: number; vy: number; spawnTime: number; isBoss: boolean;
+function createWorld(scene: THREE.Scene, obstacles2D: Array<{ minX: number; maxX: number; minZ: number; maxZ: number }>) {
+  const addObstacle = (x: number, z: number, width: number, depth: number) => {
+    obstacles2D.push({ minX: x - width / 2, maxX: x + width / 2, minZ: z - depth / 2, maxZ: z + depth / 2 });
+  };
+
+  const floorGeo = new THREE.PlaneGeometry(MAP_SIZE * 3, MAP_SIZE * 3);
+  const floorMat = new THREE.MeshStandardMaterial({
+    map: createGroundTexture(),
+    roughness: 0.92,
+    metalness: 0.05,
+  });
+  const floor = new THREE.Mesh(floorGeo, floorMat);
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  const wallThickness = 10;
+  const wallHeight = 15;
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.7 });
+  const createWall = (w: number, d: number, x: number, z: number) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, wallHeight, d), wallMat);
+    mesh.position.set(x, wallHeight / 2, z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+    addObstacle(x, z, w, d);
+  };
+  const halfMap = MAP_SIZE / 2;
+  createWall(MAP_SIZE, wallThickness, 0, -halfMap);
+  createWall(MAP_SIZE, wallThickness, 0, halfMap);
+  createWall(wallThickness, MAP_SIZE, -halfMap, 0);
+  createWall(wallThickness, MAP_SIZE, halfMap, 0);
+
+  const pathMat = new THREE.MeshStandardMaterial({ color: 0xd7ccc8, roughness: 1 });
+  const path1 = new THREE.Mesh(new THREE.PlaneGeometry(30, MAP_SIZE), pathMat);
+  path1.rotation.x = -Math.PI / 2;
+  path1.position.y = 0.1;
+  path1.receiveShadow = true;
+  scene.add(path1);
+  const path2 = new THREE.Mesh(new THREE.PlaneGeometry(MAP_SIZE, 30), pathMat);
+  path2.rotation.x = -Math.PI / 2;
+  path2.position.y = 0.1;
+  path2.receiveShadow = true;
+  scene.add(path2);
+
+  const plazaGeo = new THREE.CylinderGeometry(35, 35, 0.2, 32);
+  const plazaMat = new THREE.MeshStandardMaterial({ color: 0x9e9e9e, roughness: 0.8 });
+  const plaza = new THREE.Mesh(plazaGeo, plazaMat);
+  plaza.position.set(0, 0.15, 0);
+  plaza.receiveShadow = true;
+  scene.add(plaza);
+
+  const crateGeo = new THREE.BoxGeometry(6, 6, 6);
+  const crateMat = new THREE.MeshStandardMaterial({ color: 0x8d6e63, roughness: 0.9 });
+  const houseBaseGeo = new THREE.BoxGeometry(14, 10, 14);
+  const roofGeo = new THREE.ConeGeometry(11, 8, 4);
+  roofGeo.rotateY(Math.PI / 4);
+  const treeTrunkGeo = new THREE.CylinderGeometry(1.5, 2, 6, 8);
+  const treeLeavesGeo = new THREE.ConeGeometry(7, 14, 8);
+  const colors = {
+    houseBase: [0xfff59d, 0xffcc80, 0xbcaaa4, 0xe0e0e0],
+    roof: [0xe53935, 0x5e35b1, 0x0288d1, 0x455a64],
+    trunk: 0x5d4037,
+    leaves: [0x2e7d32, 0x388e3c, 0x43a047],
+  };
+
+  for (let i = 0; i < 150; i++) {
+    let x = (Math.random() - 0.5) * (MAP_SIZE - 40);
+    let z = (Math.random() - 0.5) * (MAP_SIZE - 40);
+    if (Math.abs(x) < 30 || Math.abs(z) < 30) continue;
+    const randType = Math.random();
+    if (randType > 0.7) {
+      const baseColor = colors.houseBase[Math.floor(Math.random() * colors.houseBase.length)];
+      const roofColor = colors.roof[Math.floor(Math.random() * colors.roof.length)];
+      const base = new THREE.Mesh(houseBaseGeo, new THREE.MeshStandardMaterial({ color: baseColor }));
+      base.position.set(x, 5, z);
+      base.castShadow = true;
+      base.receiveShadow = true;
+      scene.add(base);
+      const roof = new THREE.Mesh(roofGeo, new THREE.MeshStandardMaterial({ color: roofColor }));
+      roof.position.set(x, 14, z);
+      roof.castShadow = true;
+      scene.add(roof);
+      addObstacle(x, z, 14, 14);
+    } else if (randType > 0.2) {
+      const leafColor = colors.leaves[Math.floor(Math.random() * colors.leaves.length)];
+      const trunk = new THREE.Mesh(treeTrunkGeo, new THREE.MeshStandardMaterial({ color: colors.trunk }));
+      trunk.position.set(x, 3, z);
+      trunk.castShadow = true;
+      trunk.receiveShadow = true;
+      scene.add(trunk);
+      const leaves = new THREE.Mesh(treeLeavesGeo, new THREE.MeshStandardMaterial({ color: leafColor }));
+      leaves.position.set(x, 11 + Math.random() * 2, z);
+      leaves.castShadow = true;
+      scene.add(leaves);
+      addObstacle(x, z, 3, 3);
+    } else {
+      const crate = new THREE.Mesh(crateGeo, crateMat);
+      crate.position.set(x, 3, z);
+      crate.castShadow = true;
+      crate.receiveShadow = true;
+      scene.add(crate);
+      addObstacle(x, z, 6, 6);
+    }
+  }
 }
 
-interface DamageNumber {
-  x: number; y: number; value: number; spawnTime: number; vx: number; vy: number;
+function canMoveTo(x: number, z: number, obstacles: Obstacle[], radius: number) {
+  for (const o of obstacles) {
+    const inX = x + radius > o.minX && x - radius < o.maxX;
+    const inZ = z + radius > o.minZ && z - radius < o.maxZ;
+    if (inX && inZ) return false;
+  }
+  return true;
 }
 
-interface MuzzleFlash {
-  x: number; y: number; angle: number; spawnTime: number;
+const PROJECTILE_COLLISION_RADIUS = 1.5;
+function projectileHitsObstacle(px: number, pz: number, obstacles: Obstacle[], radius: number = PROJECTILE_COLLISION_RADIUS) {
+  for (const o of obstacles) {
+    if (px >= o.minX - radius && px <= o.maxX + radius && pz >= o.minZ - radius && pz <= o.maxZ + radius) return true;
+  }
+  return false;
 }
 
-interface LerpedEntity {
-  x: number; y: number;
-  vx: number; vy: number;
-  lastTargetTime: number;
+type ShopProps = {
+  open: boolean;
+  onClose: () => void;
+  coins: number;
+  onBuy: (weaponId: string, cost: number) => void;
+};
+
+const SHOP_WEAPONS = [
+  { id: 'rifle', label: 'רובה סער', cost: 10, color: '#3498db' },
+  { id: 'shotgun', label: 'שוטגאן', cost: 15, color: '#ff8800' },
+  { id: 'sniper', label: 'רובה צלפים', cost: 20, color: '#2ecc71' },
+];
+
+function WeaponShop({ open, onClose, coins, onBuy }: ShopProps) {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl w-full max-w-md p-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex justify-between items-center mb-3">
+          <span className="font-bold text-indigo-300">חנות נשק</span>
+          <span className="font-mono text-yellow-300">💰 {coins}</span>
+        </div>
+        <div className="space-y-2">
+          {SHOP_WEAPONS.map(w => (
+            <button
+              key={w.id}
+              disabled={coins < w.cost}
+              onClick={() => onBuy(w.id, w.cost)}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40"
+            >
+              <span style={{ color: w.color }} className="font-bold">
+                {w.label}
+              </span>
+              <span className="text-sm text-slate-300">עלות: {w.cost}</span>
+            </button>
+          ))}
+        </div>
+        <div className="mt-3 text-right">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-100"
+          >
+            סגור
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-const PROJECTILE_SPEED = 520;
-const PROJECTILE_MAX_AGE_MS = 2500;
-const ARENA_MARGIN = 80;
+function createPlayerEntity(
+  scene: THREE.Scene,
+  color: number,
+  size: number,
+  isBoss: boolean
+): PlayerEntity {
+  const mesh = new THREE.Group();
+  const radius = size;
+
+  if (isBoss) {
+    const bodyGeo = new THREE.CylinderGeometry(size * 1.6, size * 2, size * 3, 12);
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: 0x2a0a2a,
+      roughness: 0.35,
+      metalness: 0.5,
+    });
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.position.y = size * 1.5;
+    body.castShadow = body.receiveShadow = true;
+    mesh.add(body);
+    for (let i = 0; i < 6; i++) {
+      const plateGeo = new THREE.BoxGeometry(size * 1.2, size * 0.5, size * 0.4);
+      const plateMat = new THREE.MeshStandardMaterial({ color: 0x4a1a4a, roughness: 0.3, metalness: 0.6 });
+      const plate = new THREE.Mesh(plateGeo, plateMat);
+      const angle = (i / 6) * Math.PI * 2;
+      plate.position.set(Math.cos(angle) * size * 1.5, size * (0.4 + (i % 3) * 0.9), Math.sin(angle) * size * 1.5);
+      plate.rotation.y = -angle;
+      plate.castShadow = plate.receiveShadow = true;
+      mesh.add(plate);
+    }
+    const eyeGeo = new THREE.SphereGeometry(size * 0.55, 10, 10);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff1166 });
+    const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+    eyeL.position.set(size * 0.85, size * 2.5, size * 1.35);
+    const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+    eyeR.position.set(-size * 0.85, size * 2.5, size * 1.35);
+    mesh.add(eyeL, eyeR);
+    const armGeo = new THREE.BoxGeometry(size * 0.9, size * 2.4, size * 0.9);
+    const armMat = new THREE.MeshStandardMaterial({ color: 0x3b1b3b, metalness: 0.6, roughness: 0.3 });
+    const armL = new THREE.Mesh(armGeo, armMat);
+    armL.position.set(size * 2.2, size * 1.9, 0);
+    const armR = new THREE.Mesh(armGeo, armMat);
+    armR.position.set(-size * 2.2, size * 1.9, 0);
+    armL.castShadow = armR.castShadow = true;
+    mesh.add(armL, armR);
+    const clawGeo = new THREE.BoxGeometry(size * 1.2, size * 0.8, size * 2.5);
+    const clawMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.9, roughness: 0.2 });
+    const gun = new THREE.Mesh(clawGeo, clawMat);
+    gun.position.set(0, size * 2.1, size * 1.8);
+    const baseGunPos = gun.position.clone();
+    gun.castShadow = true;
+    mesh.userData.gunMat = clawMat;
+    mesh.add(gun);
+    mesh.castShadow = mesh.receiveShadow = true;
+    scene.add(mesh);
+    return { mesh, gun, baseGunPos, radius, isBoss };
+  }
+
+  const bodyGeo = new THREE.CapsuleGeometry(size * 0.75, size * 1.3, 8, 12);
+  const bodyMat = new THREE.MeshStandardMaterial({ color, roughness: 0.3, metalness: 0.45 });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.position.y = size * 1.15;
+  body.castShadow = body.receiveShadow = true;
+  mesh.add(body);
+  const shoulderL = new THREE.Mesh(
+    new THREE.BoxGeometry(size * 0.9, size * 0.35, size * 0.6),
+    new THREE.MeshStandardMaterial({ color, roughness: 0.25, metalness: 0.5 })
+  );
+  shoulderL.position.set(size * 0.7, size * 1.9, 0);
+  shoulderL.castShadow = true;
+  const shoulderR = new THREE.Mesh(
+    new THREE.BoxGeometry(size * 0.9, size * 0.35, size * 0.6),
+    new THREE.MeshStandardMaterial({ color, roughness: 0.25, metalness: 0.5 })
+  );
+  shoulderR.position.set(-size * 0.7, size * 1.9, 0);
+  shoulderR.castShadow = true;
+  mesh.add(shoulderL, shoulderR);
+  const helmetGeo = new THREE.SphereGeometry(size * 0.75, 14, 14, 0, Math.PI * 2, 0, Math.PI * 0.55);
+  const helmetMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.2, metalness: 0.6 });
+  const helmet = new THREE.Mesh(helmetGeo, helmetMat);
+  helmet.position.y = size * 2.35;
+  helmet.castShadow = true;
+  mesh.add(helmet);
+  const visorGeo = new THREE.SphereGeometry(size * 0.5, 8, 8, 0, Math.PI * 2, Math.PI * 0.2, Math.PI * 0.4);
+  const visorMat = new THREE.MeshStandardMaterial({
+    color: 0x00ffff,
+    emissive: 0x00ffff,
+    emissiveIntensity: 1.2,
+    transparent: true,
+    opacity: 0.9,
+  });
+  const visor = new THREE.Mesh(visorGeo, visorMat);
+  visor.position.set(0, size * 2.4, size * 0.45);
+  mesh.add(visor);
+  const gunGroup = new THREE.Group();
+  gunGroup.position.set(size * 0.9, size * 1.55, size * 1.35);
+  const baseGunPosHero = gunGroup.position.clone();
+  const barrelGeo = new THREE.CylinderGeometry(size * 0.15, size * 0.15, size * 1.8, 10);
+  const barrelMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.95, roughness: 0.15 });
+  const barrel = new THREE.Mesh(barrelGeo, barrelMat);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.z = size * 1.1;
+  barrel.castShadow = true;
+  const stockGeo = new THREE.BoxGeometry(size * 0.4, size * 0.5, size * 0.9);
+  const stockMat = new THREE.MeshStandardMaterial({ color: 0x3d2817, roughness: 0.8, metalness: 0.1 });
+  const stock = new THREE.Mesh(stockGeo, stockMat);
+  stock.position.z = -size * 0.6;
+  stock.castShadow = true;
+  const scopeGeo = new THREE.CylinderGeometry(size * 0.12, size * 0.12, size * 0.5, 8);
+  const scopeMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.9, roughness: 0.2 });
+  const scope = new THREE.Mesh(scopeGeo, scopeMat);
+  scope.rotation.x = Math.PI / 2;
+  scope.position.set(0, size * 0.35, size * 0.6);
+  scope.castShadow = true;
+  const muzzleGeo = new THREE.CylinderGeometry(size * 0.18, size * 0.15, size * 0.25, 8);
+  const muzzle = new THREE.Mesh(muzzleGeo, barrelMat);
+  muzzle.rotation.x = Math.PI / 2;
+  muzzle.position.z = size * 2.05;
+  muzzle.castShadow = true;
+  gunGroup.add(barrel, stock, scope, muzzle);
+  mesh.userData.gunMat = barrelMat;
+  mesh.add(gunGroup);
+  mesh.castShadow = mesh.receiveShadow = true;
+  scene.add(mesh);
+  return { mesh, gun: gunGroup as unknown as THREE.Mesh, baseGunPos: baseGunPosHero, radius, isBoss };
+}
+
+function worldToScene(
+  x: number,
+  y: number,
+  worldSize: number
+): { sx: number; sz: number } {
+  const center = worldSize / 2;
+  const scale = MAP_SIZE / worldSize;
+  const sx = (x - center) * scale;
+  const sz = (y - center) * scale;
+  return { sx, sz };
+}
+
+function sceneToWorld(
+  sx: number,
+  sz: number,
+  worldSize: number
+): { x: number; y: number } {
+  const center = worldSize / 2;
+  const scale = worldSize / MAP_SIZE;
+  const x = sx * scale + center;
+  const y = sz * scale + center;
+  return { x, y };
+}
 
 export function BossBattleGame({ roomCode, playerId, player, questions, globalState, allPlayers }: Props) {
   const [showQuestions, setShowQuestions] = useState(false);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const particlesRef = useRef<Particle[]>([]);
-  const projectilesRef = useRef<TravelingProjectile[]>([]);
-  const mouseScreenRef = useRef({ x: 0, y: 0 });
-  const crosshairScreenRef = useRef({ x: 0, y: 0 });
-  const isBossRef = useRef(false);
+  const [showShop, setShowShop] = useState(false);
+  const [coins, setCoins] = useState(0);
+  const [equippedWeapon, setEquippedWeapon] = useState<string>(player?.modeState?.weaponType || 'rifle');
+  const equippedWeaponRef = useRef(equippedWeapon);
+  const [ownedWeapons, setOwnedWeapons] = useState<string[]>(() => [...(player?.modeState?.ownedWeapons || ['rifle', 'sniper', 'shotgun'])]);
+  const ownedWeaponsRef = useRef<string[]>(ownedWeapons);
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const keysRef = useRef<KeysState>({});
+  const roomCodeRef = useRef(roomCode);
+  const playerIdRef = useRef(playerId);
+
+  const obstaclesRef = useRef<Obstacle[]>([]);
+  const playerEntitiesRef = useRef<Record<string, PlayerEntity & { targetX: number; targetZ: number; isLocal: boolean }>>({});
+  const aiBossRef = useRef<(PlayerEntity & { targetX: number; targetZ: number }) | null>(null);
+  const projectilesRef = useRef<Record<string, ProjectileRuntime>>({});
+
+  const aimDirRef = useRef(new THREE.Vector3(0, 0, 1));
+  const lastShootTimeRef = useRef(0);
+  const canShootRef = useRef(true);
+  const lastAttackSentAtRef = useRef(0);
+  const ATTACK_THROTTLE_MS = 200;
   const isDisabledRef = useRef(false);
   const isDeadRef = useRef(false);
-  const shootRef = useRef<() => void>(() => {});
-  const shakeRef = useRef<ShakeState>({ intensity: 0, offsetX: 0, offsetY: 0 });
-  const timeRef = useRef(0);
-  const prevLasers = useRef(0);
-  const gsRef = useRef(globalState);
-  const allPlayersRef = useRef(allPlayers);
-  const posRef = useRef({ x: player?.x ?? CENTER, y: player?.y ?? CENTER });
-  const lastServerPosRef = useRef({ x: posRef.current.x, y: posRef.current.y });
-  const lastMoveTimeRef = useRef(0);
-  const aimRef = useRef({ x: 1, y: 0 });
-  const inputRef = useRef(createInputState());
-  const cameraRef = useRef<CameraState>(createCamera());
-  const camInitRef = useRef(false);
-  const lastSyncRef = useRef(0);
-  const lastShootRef = useRef(0);
-  const lastOpenBoxRef = useRef(0);
-  const lerpedPlayersRef = useRef<Record<string, LerpedEntity>>({});
-  const damageNumbersRef = useRef<DamageNumber[]>([]);
-  const muzzleFlashesRef = useRef<MuzzleFlash[]>([]);
-  const healthBarDisplayRef = useRef<Record<string, number>>({});
+  const ammoRef = useRef(0);
 
-  gsRef.current = globalState;
-  allPlayersRef.current = allPlayers;
+  const gameStateRef = useRef<{
+    worldSize: number;
+    players: Record<string, any>;
+    aiBoss: any;
+    projectiles: any[];
+  }>({
+    worldSize: globalState?.worldSize || WORLD_FALLBACK_SIZE,
+    players: allPlayers,
+    aiBoss: globalState?.aiBoss,
+    projectiles: globalState?.projectiles || [],
+  });
 
   const bossIds = globalState?.bossIds || [];
   const aiBoss = globalState?.aiBoss;
@@ -101,247 +474,516 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
   const seconds = timeLeft % 60;
   const ammo = Math.floor(player?.resources || 0);
 
-  isBossRef.current = isBoss;
-  isDisabledRef.current = isDisabled;
-  isDeadRef.current = isDead;
-
-  const [, setRespawnTick] = useState(0);
+  // Sync ownedWeapons from server
   useEffect(() => {
-    if (!isDead || !player?.modeState?.respawnAt) return;
-    const id = setInterval(() => setRespawnTick(t => t + 1), 1000);
-    return () => clearInterval(id);
-  }, [isDead, player?.modeState?.respawnAt]);
-
-  useEffect(() => setupKeyboardListeners(inputRef.current), []);
-
-  const onJoystickMove = useCallback((dx: number, dy: number) => {
-    inputRef.current.joystickDir = { x: dx, y: dy };
-    inputRef.current.joystickActive = true;
-    if (Math.hypot(dx, dy) > 0.2) aimRef.current = { x: dx, y: dy };
-  }, []);
-  const onJoystickRelease = useCallback(() => {
-    inputRef.current.joystickDir = { x: 0, y: 0 };
-    inputRef.current.joystickActive = false;
-  }, []);
-
-  useEffect(() => {
-    const p = allPlayers?.[playerId];
-    if (p?.x !== undefined && p?.y !== undefined) {
-      lastServerPosRef.current = { x: p.x, y: p.y };
-      const moving = Date.now() - lastMoveTimeRef.current < 600;
-      const dist = Math.hypot(p.x - posRef.current.x, p.y - posRef.current.y);
-      if (!moving || dist > 180) {
-        posRef.current = { x: p.x, y: p.y };
-      }
+    const ow = player?.modeState?.ownedWeapons;
+    if (Array.isArray(ow) && ow.length > 0) {
+      setOwnedWeapons(prev => (JSON.stringify(prev) !== JSON.stringify(ow) ? [...ow] : prev));
+      ownedWeaponsRef.current = ow;
     }
-  }, [allPlayers, playerId]);
+  }, [player?.modeState?.ownedWeapons]);
 
-  const shoot = useCallback(() => {
-    if (ammo < 1 || isDead) return;
-    const now = Date.now();
-    if (now - lastShootRef.current < 180) return;
-    lastShootRef.current = now;
-    const angle = Math.atan2(aimRef.current.y, aimRef.current.x);
-    const vx = Math.cos(angle) * PROJECTILE_SPEED;
-    const vy = Math.sin(angle) * PROJECTILE_SPEED;
-    projectilesRef.current.push({
-      x: posRef.current.x, y: posRef.current.y,
-      vx, vy, spawnTime: now, isBoss: !!player?.modeState?.isBoss
-    });
-    playShootSound();
-    triggerShake(shakeRef.current, 4);
-    muzzleFlashesRef.current.push({ x: posRef.current.x, y: posRef.current.y, angle, spawnTime: now });
-    socket.emit('action', { code: roomCode, playerId, actionType: 'attack', aimAngle: angle });
-  }, [roomCode, playerId, ammo, isDead, player?.modeState?.isBoss]);
+  // keep latest simple scalars in refs so the Three.js effect
+  // can have an empty dependency array
+  useEffect(() => {
+    roomCodeRef.current = roomCode;
+    playerIdRef.current = playerId;
+    isDisabledRef.current = isDisabled;
+    isDeadRef.current = isDead;
+    ammoRef.current = ammo;
+    equippedWeaponRef.current = equippedWeapon;
+    ownedWeaponsRef.current = ownedWeapons;
+  }, [roomCode, playerId, isDisabled, isDead, ammo, equippedWeapon, ownedWeapons]);
 
-  shootRef.current = shoot;
+  // keep latest server state in ref (no React re-render on every tick)
+  useEffect(() => {
+    gameStateRef.current = {
+      worldSize: globalState?.worldSize || WORLD_FALLBACK_SIZE,
+      players: allPlayers,
+      aiBoss: globalState?.aiBoss,
+      projectiles: globalState?.projectiles || [],
+    };
+  }, [globalState, allPlayers]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    let raf: number;
+    if (!containerRef.current) return;
+
+    const container = containerRef.current;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    scene.fog = new THREE.Fog(0x87ceeb, 250, 600);
+
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      container.clientWidth / container.clientHeight,
+      0.1,
+      1000
+    );
+    camera.position.set(0, 100, 80);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    container.appendChild(renderer.domElement);
+
+    const hemiLight = new THREE.HemisphereLight(0xb0d0ff, 0x304050, 0.5);
+    scene.add(hemiLight);
+    const sunLight = new THREE.DirectionalLight(0xfff5e6, 1.0);
+    sunLight.position.set(120, 280, 80);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.camera.left = -200;
+    sunLight.shadow.camera.right = 200;
+    sunLight.shadow.camera.top = 200;
+    sunLight.shadow.camera.bottom = -200;
+    sunLight.shadow.camera.near = 10;
+    sunLight.shadow.camera.far = 500;
+    sunLight.shadow.bias = -0.0002;
+    scene.add(sunLight);
+
+    obstaclesRef.current = [];
+    createWorld(scene, obstaclesRef.current);
+
+    sceneRef.current = scene;
+    cameraRef.current = camera;
+    rendererRef.current = renderer;
+
     let lastTime = performance.now();
 
+    const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -GUN_PLANE_Y);
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    const intersection = new THREE.Vector3();
+    const gunBarrelWorld = new THREE.Vector3();
+    const direction = new THREE.Vector3();
+
+    const handleResize = () => {
+      if (!rendererRef.current || !cameraRef.current || !containerRef.current) return;
+      const w = containerRef.current.clientWidth;
+      const h = containerRef.current.clientHeight;
+      cameraRef.current.aspect = w / h;
+      cameraRef.current.updateProjectionMatrix();
+      rendererRef.current.setSize(w, h);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      keysRef.current[e.code] = true;
+      const ow = ownedWeaponsRef.current;
+      const idx = e.code === 'Digit1' || e.code === 'Numpad1' ? 0 : e.code === 'Digit2' || e.code === 'Numpad2' ? 1 : e.code === 'Digit3' || e.code === 'Numpad3' ? 2 : e.code === 'Digit4' || e.code === 'Numpad4' ? 3 : e.code === 'Digit5' || e.code === 'Numpad5' ? 4 : -1;
+      if (idx >= 0 && idx < ow.length) {
+        const w = ow[idx];
+        equippedWeaponRef.current = w;
+        setEquippedWeapon(w);
+        socket.emit('action', { code: roomCodeRef.current, playerId: playerIdRef.current, actionType: 'equipWeapon', weaponId: w });
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      keysRef.current[e.code] = false;
+    };
+
     const handleMouseMove = (e: MouseEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      const cam = cameraRef.current;
-      const rawX = e.clientX - rect.left;
-      const rawY = e.clientY - rect.top;
-      crosshairScreenRef.current = { x: rawX, y: rawY };
-      mouseScreenRef.current = { x: rawX, y: rawY };
-      const worldMouse = screenToWorld(cam, { x: rawX, y: rawY });
-      const px = posRef.current.x;
-      const py = posRef.current.y;
-      const ax = worldMouse.x - px;
-      const ay = worldMouse.y - py;
-      const len = Math.hypot(ax, ay);
-      if (len > 5) aimRef.current = { x: ax / len, y: ay / len };
-    };
-    const handleClick = (e: MouseEvent) => {
-      if ((e.target as Element)?.closest?.('button, a, [role="button"]')) return;
-      const rect = canvas.getBoundingClientRect();
-      const rawX = e.clientX - rect.left;
-      const rawY = e.clientY - rect.top;
-      const worldMouse = screenToWorld(cameraRef.current, { x: rawX, y: rawY });
-      const px = posRef.current.x;
-      const py = posRef.current.y;
-      const ax = worldMouse.x - px;
-      const ay = worldMouse.y - py;
-      const len = Math.hypot(ax, ay);
-      if (len > 5) aimRef.current = { x: ax / len, y: ay / len };
-      shootRef.current();
+      if (!rendererRef.current || !cameraRef.current) return;
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, cameraRef.current);
+      if (!raycaster.ray.intersectPlane(aimPlane, intersection)) return;
+      const myEntity = playerEntitiesRef.current[playerIdRef.current];
+      if (myEntity) {
+        const barrelZ = myEntity.isBoss ? 1.1 : 2.05;
+        gunBarrelWorld.set(
+          myEntity.gun.position.x,
+          myEntity.gun.position.y,
+          myEntity.gun.position.z + barrelZ * myEntity.radius
+        );
+        myEntity.mesh.localToWorld(gunBarrelWorld);
+        direction.copy(intersection).sub(gunBarrelWorld);
+        direction.y = 0;
+        if (direction.lengthSq() > 0.0001) {
+          direction.normalize();
+          aimDirRef.current.copy(direction);
+          myEntity.mesh.rotation.y = Math.atan2(direction.x, direction.z);
+        }
+      }
     };
 
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('click', handleClick);
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0 || !rendererRef.current || !cameraRef.current) return;
+      e.preventDefault();
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, cameraRef.current);
+      if (!raycaster.ray.intersectPlane(aimPlane, intersection)) return;
+      const myEntity = playerEntitiesRef.current[playerIdRef.current];
+      if (!myEntity) return;
 
-    const render = (now: number) => {
-      const rawDt = (now - lastTime) / 1000;
-      const dt = Math.min(rawDt, 0.05);
+      const barrelZ = myEntity.isBoss ? 1.1 : 2.05;
+      gunBarrelWorld.set(
+        myEntity.gun.position.x,
+        myEntity.gun.position.y,
+        myEntity.gun.position.z + barrelZ * myEntity.radius
+      );
+      myEntity.mesh.localToWorld(gunBarrelWorld);
+      direction.copy(intersection).sub(gunBarrelWorld);
+      direction.y = 0;
+      if (direction.lengthSq() < 0.0001) return;
+      direction.normalize();
+
+      aimDirRef.current.copy(direction);
+      myEntity.mesh.rotation.y = Math.atan2(direction.x, direction.z);
+
+      const now = Date.now();
+      if (now - lastAttackSentAtRef.current < ATTACK_THROTTLE_MS) return;
+      const weaponId = equippedWeaponRef.current || 'rifle';
+      const weapon = WEAPON_CONFIG[weaponId] || WEAPON_CONFIG.rifle;
+      const cooldownMs = weapon.fireRate;
+      if (!canShootRef.current || now - lastShootTimeRef.current < cooldownMs) return;
+      canShootRef.current = false;
+      lastShootTimeRef.current = now;
+      lastAttackSentAtRef.current = now;
+      const release = () => { canShootRef.current = true; };
+      setTimeout(release, cooldownMs);
+
+      const angle = Math.atan2(direction.z, direction.x);
+      const isAssaultRifle = weaponId === 'rifle';
+      if (isAssaultRifle) {
+        socket.emit('action', { code: roomCodeRef.current, playerId: playerIdRef.current, actionType: 'attack', aimAngle: angle, burst: true });
+      } else {
+        socket.emit('action', { code: roomCodeRef.current, playerId: playerIdRef.current, actionType: 'attack', aimAngle: angle });
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    renderer.domElement.addEventListener('mousemove', handleMouseMove);
+    renderer.domElement.addEventListener('mousedown', handleMouseDown);
+
+    const animate = () => {
+      if (!rendererRef.current || !sceneRef.current || !cameraRef.current) return;
+      const now = performance.now();
+      const dt = Math.min((now - lastTime) / 1000, 0.1);
       lastTime = now;
-      timeRef.current += dt;
-      const t = timeRef.current;
 
-      const parent = canvas.parentElement;
-      if (parent) {
-        const pw = parent.clientWidth;
-        const ph = parent.clientHeight;
-        if (canvas.width !== pw || canvas.height !== ph) {
-          canvas.width = pw;
-          canvas.height = ph;
+      const snapshot = gameStateRef.current;
+      const worldSize = snapshot.worldSize || WORLD_FALLBACK_SIZE;
+
+      // Local player movement + collision (solid environment)
+      const my = snapshot.players[playerIdRef.current];
+      if (my && !isDisabledRef.current && !isDeadRef.current) {
+        const move = new THREE.Vector3(0, 0, 0);
+        if (keysRef.current['KeyW']) move.z -= 1;
+        if (keysRef.current['KeyS']) move.z += 1;
+        if (keysRef.current['KeyA']) move.x -= 1;
+        if (keysRef.current['KeyD']) move.x += 1;
+        if (move.lengthSq() > 0) {
+          move.normalize();
+          const speedWorld = 480;
+          const dxWorld = move.x * speedWorld * dt;
+          const dzWorld = move.z * speedWorld * dt;
+          const targetXWorld = (my.x ?? worldSize / 2) + dxWorld;
+          const targetYWorld = (my.y ?? worldSize / 2) + dzWorld;
+          const targetScene = worldToScene(targetXWorld, targetYWorld, worldSize);
+          let allowX = true, allowZ = true;
+          if (!canMoveTo(targetScene.sx, targetScene.sz, obstaclesRef.current, PLAYER_COLLISION_RADIUS)) {
+            const curScene = worldToScene(my.x ?? worldSize / 2, my.y ?? worldSize / 2, worldSize);
+            allowX = canMoveTo(targetScene.sx, curScene.sz, obstaclesRef.current, PLAYER_COLLISION_RADIUS);
+            allowZ = canMoveTo(curScene.sx, targetScene.sz, obstaclesRef.current, PLAYER_COLLISION_RADIUS);
+          }
+          const finalX = allowX ? targetXWorld : (my.x ?? worldSize / 2);
+          const finalY = allowZ ? targetYWorld : (my.y ?? worldSize / 2);
+          if (allowX || allowZ) {
+            socket.emit('updatePosition', {
+              code: roomCodeRef.current,
+              playerId: playerIdRef.current,
+              x: Math.max(30, Math.min(worldSize - 30, finalX)),
+              y: Math.max(30, Math.min(worldSize - 30, finalY)),
+            });
+          }
         }
       }
 
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { raf = requestAnimationFrame(render); return; }
+      // Players – interpolation with lerp
+      Object.entries(snapshot.players).forEach(([id, p]) => {
+        const isBossPlayer = !!p.modeState?.isBoss;
+        const hp = p.modeState?.hp ?? 2;
+        if (hp <= 0) return;
 
-      const vpW = canvas.width;
-      const vpH = canvas.height;
-      if (vpW === 0 || vpH === 0) { raf = requestAnimationFrame(render); return; }
+        let ent = playerEntitiesRef.current[id];
+        if (!ent) {
+          const color = isBossPlayer ? 0x9b59b6 : 0x3498db;
+          const base = createPlayerEntity(sceneRef.current!, color, isBossPlayer ? 4 : 1.5, isBossPlayer);
+          base.mesh.userData.bobPhase = Math.random() * Math.PI * 2;
+          ent = Object.assign(base, {
+            targetX: p.x ?? worldSize / 2,
+            targetZ: p.y ?? worldSize / 2,
+            isLocal: id === playerIdRef.current,
+          });
+          playerEntitiesRef.current[id] = ent;
+        }
 
-      const zoom = Math.min(vpW, vpH) / 700;
-      const gs = gsRef.current;
-      const players = allPlayersRef.current || {};
-      const cam = cameraRef.current;
-      const p = players[playerId];
-      const canMove = !isDisabledRef.current && !isDeadRef.current && (isBossRef.current || (p?.modeState?.hp ?? 2) > 0);
+        ent.targetX = p.x ?? worldSize / 2;
+        ent.targetZ = p.y ?? worldSize / 2;
 
-      if (canMove) {
-        const dir = getMoveDirection(inputRef.current);
-        if (dir.x !== 0 || dir.y !== 0) {
-          lastMoveTimeRef.current = now;
-          const moveX = dir.x * PLAYER_SPEED * dt;
-          const moveY = dir.y * PLAYER_SPEED * dt;
-          posRef.current.x = Math.max(40, Math.min(WORLD_SIZE - 40, posRef.current.x + moveX));
-          posRef.current.y = Math.max(40, Math.min(WORLD_SIZE - 40, posRef.current.y + moveY));
-          if (now - lastSyncRef.current > MOVE_SYNC_MS) {
-            socket.emit('updatePosition', { code: roomCode, playerId, x: posRef.current.x, y: posRef.current.y });
-            lastSyncRef.current = now;
-          }
+        const current = ent.mesh.position;
+        const targetScene = worldToScene(ent.targetX, ent.targetZ, worldSize);
+        const lerpFactor = ent.isLocal ? LOCAL_LERP : REMOTE_LERP;
+
+        const dx = targetScene.sx - current.x;
+        const dz = targetScene.sz - current.z;
+        const distSq = dx * dx + dz * dz;
+        const moveSpeed = Math.hypot(dx, dz) / (dt || 0.001);
+        const bobScale = 0.4 + Math.min(1, moveSpeed / 80) * 0.35;
+        if (distSq > SNAP_DIST * SNAP_DIST) {
+          current.set(targetScene.sx, ent.radius, targetScene.sz);
         } else {
-          const srv = lastServerPosRef.current;
-          const movingRecently = now - lastMoveTimeRef.current < 400;
-          if (!movingRecently) {
-            const dx = srv.x - posRef.current.x;
-            const dy = srv.y - posRef.current.y;
-            const dist = Math.hypot(dx, dy);
-            if (dist > 2 && dist < 250) {
-              const speed = lerp(0, 1, 18 * dt);
-              posRef.current.x += dx * speed;
-              posRef.current.y += dy * speed;
-            } else if (dist >= 250) {
-              posRef.current = { x: srv.x, y: srv.y };
-            }
-          }
+          current.x = THREE.MathUtils.lerp(current.x, targetScene.sx, lerpFactor);
+          current.z = THREE.MathUtils.lerp(current.z, targetScene.sz, lerpFactor);
+          current.y = ent.radius;
         }
-      }
-
-      const lerpSpeed = 18 * dt;
-      Object.entries(players).forEach(([id, p]) => {
-        if (!p || (p.modeState?.hp ?? 2) <= 0) return;
-        const tx = p.x ?? CENTER;
-        const ty = p.y ?? CENTER;
-        let ent = lerpedPlayersRef.current[id];
-        if (!ent) ent = { x: tx, y: ty, vx: 0, vy: 0, lastTargetTime: now };
-        const dx = tx - ent.x;
-        const dy = ty - ent.y;
-        ent.vx = (ent.vx * 0.7 + dx * 0.3) * 0.9;
-        ent.vy = (ent.vy * 0.7 + dy * 0.3) * 0.9;
-        ent.x = lerp(ent.x, tx, lerpSpeed);
-        ent.y = lerp(ent.y, ty, lerpSpeed);
-        ent.lastTargetTime = now;
-        lerpedPlayersRef.current[id] = ent;
+        const bob = Math.sin(now * 0.005 + (ent.mesh.userData.bobPhase ?? 0)) * bobScale;
+        ent.mesh.position.y = current.y + bob;
       });
 
-      if (!camInitRef.current) {
-        cam.x = posRef.current.x - vpW / (2 * zoom);
-        cam.y = posRef.current.y - vpH / (2 * zoom);
-        cam.zoom = zoom;
-        camInitRef.current = true;
+      // Boss – interpolation with lerp
+      const aiState = snapshot.aiBoss;
+      if (aiState && aiState.hp > 0) {
+        if (!aiBossRef.current) {
+          const base = createPlayerEntity(sceneRef.current!, 0x9b59b6, 4, true);
+          base.mesh.userData.bobPhase = Math.random() * Math.PI * 2;
+          aiBossRef.current = Object.assign(base, {
+            targetX: aiState.x,
+            targetZ: aiState.y,
+          });
+        }
+        const ent = aiBossRef.current;
+        ent.targetX = aiState.x;
+        ent.targetZ = aiState.y;
+
+        const current = ent.mesh.position;
+        const targetScene = worldToScene(ent.targetX, ent.targetZ, worldSize);
+        const dx = targetScene.sx - current.x;
+        const dz = targetScene.sz - current.z;
+        const distSq = dx * dx + dz * dz;
+        const moveSpeed = Math.hypot(dx, dz) / (dt || 0.001);
+        const bobScale = 0.5 + Math.min(1, moveSpeed / 60) * 0.4;
+        if (distSq > SNAP_DIST * SNAP_DIST) {
+          current.set(targetScene.sx, ent.radius, targetScene.sz);
+        } else {
+          current.x = THREE.MathUtils.lerp(current.x, targetScene.sx, REMOTE_LERP);
+          current.z = THREE.MathUtils.lerp(current.z, targetScene.sz, REMOTE_LERP);
+          current.y = ent.radius;
+        }
+        const bob = Math.sin(now * 0.004 + (ent.mesh.userData.bobPhase ?? 0)) * bobScale;
+        ent.mesh.position.y = current.y + bob;
+
+        const pulse = 1 + Math.sin(now * 0.003) * 0.04;
+        ent.mesh.scale.set(pulse, pulse, pulse);
+      } else if (aiBossRef.current) {
+        sceneRef.current!.remove(aiBossRef.current.mesh);
+        aiBossRef.current = null;
       }
-      cam.zoom = zoom;
-      updateCamera(cam, posRef.current, vpW, vpH, WORLD_SIZE, WORLD_SIZE, 0.18);
 
-      const shake = tickShake(shakeRef.current);
-      ctx.save();
-      ctx.translate(shake.x, shake.y);
+      // Projectiles Manager – visible, moving, cleaned up
+      const runtime = projectilesRef.current;
+      const projs = snapshot.projectiles || [];
 
-      const bgGrad = ctx.createRadialGradient(vpW / 2, vpH / 2, 0, vpW / 2, vpH / 2, vpW * 0.8);
-      bgGrad.addColorStop(0, '#1a3d1a');
-      bgGrad.addColorStop(0.6, '#0f2d0f');
-      bgGrad.addColorStop(1, '#051505');
-      ctx.fillStyle = bgGrad;
-      ctx.fillRect(0, 0, vpW, vpH);
+      const scaleToScene = MAP_SIZE / (worldSize || WORLD_FALLBACK_SIZE);
+      const TRAIL_LEN = 5;
+      for (const proj of projs) {
+        if (!Number.isFinite(proj.x) || !Number.isFinite(proj.y)) continue;
+        const id = proj.id ?? `${proj.shooterId}_${proj.spawnTime}`;
+        if (runtime[id]) continue;
 
-      ctx.save();
-      ctx.scale(cam.zoom, cam.zoom);
-      ctx.translate(-cam.x, -cam.y);
+        const isBossProj = !!proj.isBoss;
+        const isOwn = proj.shooterId === playerIdRef.current;
+        const weaponId = isOwn ? (equippedWeaponRef.current || 'rifle') : 'rifle';
+        const wcfg = WEAPON_CONFIG[weaponId] || WEAPON_CONFIG.rifle;
+        const rad = isBossProj ? 0.9 : wcfg.projectileSize * 0.5;
+        const len = isBossProj ? 3 : 1.8;
+        const color = isBossProj ? 0xff00ff : wcfg.projectileColor;
+        const capsuleGeo = new THREE.CapsuleGeometry(rad, len - rad * 2, 6, 12);
+        const mat = new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: 3,
+          roughness: 0.2,
+          metalness: 0.8,
+        });
+        const capMesh = new THREE.Mesh(capsuleGeo, mat);
+        capMesh.rotation.x = -Math.PI / 2;
+        const group = new THREE.Group();
+        group.add(capMesh);
+        const trailMeshes: THREE.Mesh[] = [];
+        const trailPositions: THREE.Vector3[] = [];
+        for (let i = 0; i < TRAIL_LEN; i++) {
+          const trailGeo = new THREE.SphereGeometry(rad * 0.6, 4, 4);
+          const trailMat = new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.6 * (1 - i / TRAIL_LEN),
+          });
+          const trail = new THREE.Mesh(trailGeo, trailMat);
+          trail.visible = false;
+          group.add(trail);
+          trailMeshes.push(trail);
+          trailPositions.push(new THREE.Vector3());
+        }
+        const { sx, sz } = worldToScene(proj.x, proj.y, worldSize);
+        group.position.set(sx, GUN_PLANE_Y, sz);
+        sceneRef.current!.add(group);
 
-      const vpWorldW = vpW / cam.zoom + 100;
-      const vpWorldH = vpH / cam.zoom + 100;
-      drawWorld(ctx, cam, vpWorldW, vpWorldH, t);
-      const worldObjs = getObjectsInView(cam.x, cam.y, vpWorldW, vpWorldH)
-        .filter(o => !['rock', 'barrel', 'crate', 'fence', 'path'].includes(o.type));
-      const openedBoxes = gs?.openedBoxes || [];
-      const weaponBoxes = (gs?.weaponBoxes || []).filter((b: any) => !openedBoxes.includes(b.id));
-      const worldObjsFiltered = worldObjs.filter(o => o.type !== 'weaponBox');
-      drawWorldObjects(ctx, worldObjsFiltered, cam, t);
-      drawWeaponBoxes(ctx, weaponBoxes, cam, vpWorldW, vpWorldH, t);
-      tryOpenNearbyBox(posRef.current, openedBoxes, weaponBoxes, roomCode, playerId, isBossRef.current, isDeadRef.current, lastOpenBoxRef, now);
-      drawPlayers(ctx, players, playerId, cam, aimRef, lerpedPlayersRef, posRef, healthBarDisplayRef, inputRef, t, dt);
-      const aiBoss = gsRef.current?.aiBoss;
-      if (aiBoss && aiBoss.hp > 0) {
-        ctx.save();
-        ctx.translate(aiBoss.x, aiBoss.y);
-        drawBossCreature(ctx, 0, 0, t, aiBoss.hp / aiBoss.maxHp, 0, null);
-        ctx.restore();
+        const vxWorld = Number.isFinite((proj as any).vx) ? (proj as any).vx : Math.cos(proj.aimAngle ?? 0) * 520;
+        const vzWorld = Number.isFinite((proj as any).vy) ? (proj as any).vy : Math.sin(proj.aimAngle ?? 0) * 520;
+        const vxScene = vxWorld * scaleToScene;
+        const vzScene = vzWorld * scaleToScene;
+        capMesh.rotation.y = Math.atan2(vxScene, vzScene);
+        runtime[id] = {
+          mesh: group,
+          isBoss: isBossProj,
+          vx: vxScene,
+          vz: vzScene,
+          life: 0,
+          maxLife: PROJECTILE_MAX_LIFE,
+          trailMeshes,
+          trailPositions,
+        };
       }
-      const bossIdsArr = gsRef.current?.bossIds || [];
-      const bossesArr = bossIdsArr.map((id: string) => players[id]).filter(Boolean);
-      const heroesArr = Object.values(players).filter((p: any) => !p.modeState?.isBoss && (p.modeState?.hp ?? 2) > 0);
-      drawProjectiles(ctx, projectilesRef, now, dt, particlesRef, bossesArr, heroesArr, aiBoss || null, WORLD_SIZE, ARENA_MARGIN);
-      drawLasers(ctx, gs?.lasers || [], shakeRef, particlesRef, triggerShake, prevLasers, damageNumbersRef);
-      drawMuzzleFlashes(ctx, muzzleFlashesRef, now);
-      drawDamageNumbers(ctx, damageNumbersRef, now, particlesRef);
-      particlesRef.current = tickParticles(ctx, particlesRef.current);
 
-      ctx.restore();
-      drawCrosshair(ctx, crosshairScreenRef);
-      ctx.restore();
+      Object.entries(runtime).forEach(([id, rt]) => {
+        rt.life += dt;
+        if (rt.life > rt.maxLife) {
+          rt.trailMeshes.forEach(m => {
+            (m.geometry as THREE.BufferGeometry).dispose();
+            ((m.material as THREE.Material) as THREE.MeshBasicMaterial).dispose?.();
+          });
+          const cap = rt.mesh.children[0] as THREE.Mesh;
+          if (cap?.geometry) (cap.geometry as THREE.BufferGeometry).dispose();
+          if (cap?.material) (cap.material as THREE.Material).dispose();
+          sceneRef.current!.remove(rt.mesh);
+          delete runtime[id];
+          return;
+        }
+        rt.trailPositions.unshift(rt.mesh.position.clone());
+        if (rt.trailPositions.length > rt.trailMeshes.length) rt.trailPositions.pop();
+        rt.mesh.position.x += rt.vx * dt;
+        rt.mesh.position.z += rt.vz * dt;
+        if (projectileHitsObstacle(rt.mesh.position.x, rt.mesh.position.z, obstaclesRef.current)) {
+          rt.trailMeshes.forEach(m => {
+            (m.geometry as THREE.BufferGeometry).dispose();
+            ((m.material as THREE.Material) as THREE.MeshBasicMaterial).dispose?.();
+          });
+          const cap = rt.mesh.children[0] as THREE.Mesh;
+          if (cap?.geometry) (cap.geometry as THREE.BufferGeometry).dispose();
+          if (cap?.material) (cap.material as THREE.Material).dispose();
+          sceneRef.current!.remove(rt.mesh);
+          delete runtime[id];
+          return;
+        }
+        const cap = rt.mesh.children[0] as THREE.Mesh;
+        if (cap) cap.rotation.y = Math.atan2(rt.vx, rt.vz);
+        rt.trailMeshes.forEach((m, i) => {
+          if (rt.trailPositions[i]) {
+            m.position.copy(rt.trailPositions[i]).sub(rt.mesh.position);
+            m.visible = true;
+            (m.material as THREE.MeshBasicMaterial).opacity = 0.5 * (1 - i / rt.trailMeshes.length) * (1 - rt.life / rt.maxLife);
+          }
+        });
+      });
 
-      raf = requestAnimationFrame(render);
+      // מצלמה דינמית – ממקדת סביב כל השחקנים החיים
+      const camTargets: THREE.Vector3[] = [];
+      Object.entries(snapshot.players).forEach(([id, p]) => {
+        const hp = p.modeState?.hp ?? 2;
+        if (hp <= 0) return;
+        const ent = playerEntitiesRef.current[id];
+        if (!ent) return;
+        camTargets.push(ent.mesh.position.clone());
+      });
+      if (camTargets.length > 0) {
+        const center = new THREE.Vector3();
+        camTargets.forEach(t => center.add(t));
+        center.divideScalar(camTargets.length);
+        const [tA, tB] = camTargets;
+        let dist = 0;
+        if (tA && tB) dist = tA.distanceTo(tB);
+        const targetY = Math.max(70, dist * 1.2 + 50);
+        const targetZ = center.z + targetY * 0.7;
+
+        cameraRef.current.position.x += (center.x - cameraRef.current.position.x) * 0.1;
+        cameraRef.current.position.y += (targetY - cameraRef.current.position.y) * 0.1;
+        cameraRef.current.position.z += (targetZ - cameraRef.current.position.z) * 0.1;
+        cameraRef.current.lookAt(center.x, 0, center.z);
+      }
+
+      // רתיעה של האקדח חזרה למקומו + עדכון צבע נשק לפי currentWeapon (מקומי)
+      const myEnt = playerEntitiesRef.current[playerIdRef.current];
+      if (myEnt && myEnt.mesh.userData.gunMat) {
+        const w = WEAPON_CONFIG[equippedWeaponRef.current] || WEAPON_CONFIG.rifle;
+        (myEnt.mesh.userData.gunMat as THREE.MeshStandardMaterial).color.setHex(w.meshColor);
+      }
+      Object.values(playerEntitiesRef.current).forEach(ent => {
+        ent.gun.position.lerp(ent.baseGunPos, dt * 10);
+      });
+
+      rendererRef.current.render(sceneRef.current, cameraRef.current);
+      requestAnimationFrame(animate);
     };
 
-    raf = requestAnimationFrame(render);
+    requestAnimationFrame(animate);
+
     return () => {
-      canvas.removeEventListener('mousemove', handleMouseMove);
-      canvas.removeEventListener('click', handleClick);
-      cancelAnimationFrame(raf);
-    };
-  }, [roomCode, playerId]);
+      socket.off('shoot');
+      socket.off('projectile');
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      renderer.domElement.removeEventListener('mousemove', handleMouseMove);
+      renderer.domElement.removeEventListener('mousedown', handleMouseDown);
 
-  const onCorrect = () => socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: true });
-  const onWrong = () => socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: false });
+      // Proper Three.js cleanup to avoid WebGL context leaks
+      if (sceneRef.current) {
+        sceneRef.current.clear();
+      }
+      if (rendererRef.current) {
+        try {
+          rendererRef.current.forceContextLoss();
+        } catch {
+          // older Three versions may not support this, ignore
+        }
+        rendererRef.current.dispose();
+      } else {
+        try {
+          renderer.forceContextLoss();
+        } catch {
+          // ignore
+        }
+        renderer.dispose();
+      }
+
+      if (container.contains(renderer.domElement)) {
+        container.removeChild(renderer.domElement);
+      }
+
+      rendererRef.current = null;
+      sceneRef.current = null;
+      cameraRef.current = null;
+    };
+  }, []);
+
+  const onCorrect = () => {
+    setCoins(c => c + 5);
+    socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: true });
+  };
+  const onWrong = () => {
+    socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: false });
+  };
 
   const buyShield = () => {
     if (ammo >= 5) socket.emit('buyUpgrade', { code: roomCode, playerId, upgradeId: 'shield', cost: 5 });
@@ -351,16 +993,26 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
     if (ammo >= 10) socket.emit('buyUpgrade', { code: roomCode, playerId, upgradeId: 'disable', cost: 10, targetId });
   };
 
+  const handleBuyWeapon = (weaponId: string, cost: number) => {
+    if (coins < cost) return;
+    setCoins(c => c - cost);
+    setOwnedWeapons(prev => prev.includes(weaponId) ? prev : [...prev, weaponId]);
+    ownedWeaponsRef.current = ownedWeaponsRef.current.includes(weaponId) ? ownedWeaponsRef.current : [...ownedWeaponsRef.current, weaponId];
+    setEquippedWeapon(weaponId);
+    equippedWeaponRef.current = weaponId;
+    socket.emit('action', { code: roomCode, playerId, actionType: 'equipWeapon', weaponId });
+  };
+
   return (
     <div className={`fixed inset-0 text-white ${isBoss ? 'bg-[#0a0515]' : 'bg-[#050a15]'}`}>
-      <div className="absolute inset-0">
-        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ cursor: 'crosshair' }} />
-      </div>
+      <div ref={containerRef} className="absolute inset-0" />
 
       <AnimatePresence>
         {isDisabled && !isBoss && (
           <motion.div
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
             className="absolute inset-0 z-50 flex items-center justify-center"
             style={{ background: 'radial-gradient(circle, rgba(88,28,135,0.9), rgba(15,23,42,0.95))' }}
           >
@@ -377,8 +1029,10 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
       <AnimatePresence>
         {isDead && (
           <motion.div
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="absolute inset-0 z-50 flex items-center justify-center bg-red-950/80"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-50 flex items-center justifycenter bg-red-950/80"
           >
             <div className="text-center">
               <h2 className="text-4xl font-black text-red-200 mb-2">💀 נפלת!</h2>
@@ -401,7 +1055,13 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
             <span className={`font-mono font-black text-xl ${timeLeft < 60 ? 'text-red-400 animate-pulse' : 'text-white'}`}>
               {minutes}:{seconds.toString().padStart(2, '0')}
             </span>
-            <span className={`text-sm font-bold px-4 py-1.5 rounded-xl shadow-lg ${isBoss ? 'bg-red-500/30 text-red-300 border border-red-400/50' : 'bg-blue-500/30 text-blue-300 border border-blue-400/50'}`}>
+            <span
+              className={`text-sm font-bold px-4 py-1.5 rounded-xl shadow-lg ${
+                isBoss
+                  ? 'bg-red-500/30 text-red-300 border border-red-400/50'
+                  : 'bg-blue-500/30 text-blue-300 border border-blue-400/50'
+              }`}
+            >
               {isBoss ? '🐉 בוס' : '⚔️ גיבור'}
             </span>
             <span className="text-lg font-black text-amber-300 bg-amber-500/30 px-4 py-1.5 rounded-xl border-2 border-amber-400/50 shadow-lg">
@@ -423,39 +1083,44 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
                 </h2>
                 <div className="w-full h-6 bg-[#222] border-2 border-black rounded-[15px] overflow-hidden shadow-[inset_0_0_10px_rgba(0,0,0,1)]">
                   <motion.div
-                    className="h-full rounded-[12px] transition-[width] duration-200 ease-out"
+                    className="h-full rounded-[12px]"
                     style={{
-                      width: `${Math.max(0, aiBoss.hp / aiBoss.maxHp) * 100}%`,
-                      background: 'linear-gradient(90deg, #8e44ad, #9b59b6, #e056fd)'
+                      width: `${Math.max(0, aiBoss.hp / (aiBoss.maxHp || 1)) * 100}%`,
+                      background: 'linear-gradient(90deg, #8e44ad, #9b59b6, #e056fd)',
                     }}
-                    animate={{ width: `${Math.max(0, aiBoss.hp / aiBoss.maxHp) * 100}%` }}
-                    transition={{ duration: 0.2 }}
+                    animate={{ width: `${Math.max(0, aiBoss.hp / (aiBoss.maxHp || 1)) * 100}%` }}
+                    transition={{ duration: 0.05 }}
                   />
                 </div>
               </div>
-            ) : aliveBosses.map((b: any) => {
-              const hp = b.modeState?.hp ?? 0;
-              const maxHp = b.modeState?.maxHp ?? 10;
-              const pct = Math.max(0, hp / maxHp);
-              return (
-                <div key={b.id} className="bg-black/60 backdrop-blur-sm px-6 py-3 rounded-2xl border-2 border-[#9b59b6] shadow-xl text-center">
-                  <h2 className="text-lg font-black text-[#e056fd] mb-2 drop-shadow-[0_0_10px_rgba(224,86,253,0.8)]">
-                    המפלצת הענקית
-                  </h2>
-                  <div className="w-full h-6 bg-[#222] border-2 border-black rounded-[15px] overflow-hidden shadow-[inset_0_0_10px_rgba(0,0,0,1)]">
-                    <motion.div
-                      className="h-full rounded-[12px] transition-[width] duration-200 ease-out"
-                      style={{
-                        width: `${pct * 100}%`,
-                        background: 'linear-gradient(90deg, #8e44ad, #9b59b6, #e056fd)'
-                      }}
-                      animate={{ width: `${pct * 100}%` }}
-                      transition={{ duration: 0.2 }}
-                    />
+            ) : (
+              aliveBosses.map((b: any) => {
+                const hpVal = b.modeState?.hp ?? 0;
+                const maxHpVal = b.modeState?.maxHp ?? 10;
+                const pct = Math.max(0, hpVal / maxHpVal);
+                return (
+                  <div
+                    key={b.id}
+                    className="bg-black/60 backdrop-blur-sm px-6 py-3 rounded-2xl border-2 border-[#9b59b6] shadow-xl text-center"
+                  >
+                    <h2 className="text-lg font-black text-[#e056fd] mb-2 drop-shadow-[0_0_10px_rgba(224,86,253,0.8)]">
+                      המפלצת הענקית
+                    </h2>
+                    <div className="w-full h-6 bg-[#222] border-2 border-black rounded-[15px] overflow-hidden shadow-[inset_0_0_10px_rgba(0,0,0,1)]">
+                      <motion.div
+                        className="h-full rounded-[12px]"
+                        style={{
+                          width: `${pct * 100}%`,
+                          background: 'linear-gradient(90deg, #8e44ad, #9b59b6, #e056fd)',
+                        }}
+                        animate={{ width: `${pct * 100}%` }}
+                        transition={{ duration: 0.05 }}
+                      />
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         )}
       </div>
@@ -473,28 +1138,62 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
           <motion.button
             whileTap={{ scale: 0.9 }}
             whileHover={{ scale: 1.05 }}
-            onClick={shoot}
+            onClick={() =>
+              shoot(
+                roomCode,
+                playerId,
+                ammo,
+                isDead,
+                lastShootTimeRef,
+                canShootRef,
+                lastAttackSentAtRef,
+                aimDirRef,
+                equippedWeapon || 'rifle'
+              )
+            }
             className="px-8 py-4 rounded-2xl font-black bg-red-600 hover:bg-red-500 text-white shadow-xl flex items-center gap-3 border-2 border-red-400/50"
           >
             <Crosshair size={24} /> ירי!
           </motion.button>
         )}
         {isBoss && ammo >= 5 && (
-          <motion.button whileTap={{ scale: 0.95 }} onClick={buyShield}
-            className="px-4 py-2 rounded-xl font-bold bg-blue-600 hover:bg-blue-500 text-white flex items-center gap-2">
+          <motion.button
+            whileTap={{ scale: 0.95 }}
+            onClick={buyShield}
+            className="px-4 py-2 rounded-xl font-bold bg-blue-600 hover:bg-blue-500 text-white flex items-center gap-2"
+          >
             <Shield size={16} /> מגן (5)
           </motion.button>
         )}
       </div>
+      <div className="absolute bottom-4 right-4 z-30 pointer-events-auto">
+        <button
+          onClick={() => setShowShop(true)}
+          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold"
+        >
+          🛒 חנות נשק ({coins})
+        </button>
+      </div>
+
+      <WeaponShop
+        open={showShop}
+        onClose={() => setShowShop(false)}
+        coins={coins}
+        onBuy={handleBuyWeapon}
+      />
+
 
       {isBoss && heroes.length > 0 && ammo >= 10 && (
         <div className="absolute bottom-20 left-0 right-0 z-25 px-4 pointer-events-auto">
           <div className="flex justify-center gap-2 flex-wrap">
             {heroes.map((h: any) => (
-              <motion.button key={h.id} whileTap={{ scale: 0.9 }}
+              <motion.button
+                key={h.id}
+                whileTap={{ scale: 0.9 }}
                 onClick={() => disableHero(h.id)}
                 disabled={(h.modeState?.disabledUntil || 0) > Date.now()}
-                className="flex items-center gap-1.5 bg-slate-800/80 px-3 py-1.5 rounded-lg text-xs border border-purple-900/40 disabled:opacity-40">
+                className="flex items-center gap-1.5 bg-slate-800/80 px-3 py-1.5 rounded-lg text-xs border border-purple-900/40 disabled:opacity-40"
+              >
                 <ZapOff size={12} /> {h.name}
                 {(h.modeState?.disabledUntil || 0) > Date.now() && <span className="text-purple-400">⏳</span>}
               </motion.button>
@@ -503,27 +1202,37 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
         </div>
       )}
 
-      {!isDead && (
-        <div className="absolute bottom-4 left-4 z-20 pointer-events-auto">
-          <VirtualJoystick onMove={onJoystickMove} onRelease={onJoystickRelease} size={100}
-            teamColor={isBoss ? 'rgba(239,68,68,0.5)' : 'rgba(59,130,246,0.5)'} />
-        </div>
-      )}
-
       <AnimatePresence>
         {showQuestions && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
-            onClick={() => setShowQuestions(false)}>
-            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-slate-900 rounded-2xl border-2 border-indigo-600/50 shadow-2xl max-w-lg w-full max-h-[85vh] overflow-hidden">
+            onClick={() => setShowQuestions(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-slate-900 rounded-2xl border-2 border-indigo-600/50 shadow-2xl max-w-lg w-full max-h-[85vh] overflow-hidden"
+            >
               <div className="p-4 border-b border-slate-700 flex justify-between items-center">
                 <span className="font-bold text-indigo-300">ענה נכון = +2 תחמושת 🔫</span>
-                <button onClick={() => setShowQuestions(false)} className="text-slate-400 hover:text-white">✕</button>
+                <button onClick={() => setShowQuestions(false)} className="text-slate-400 hover:text-white">
+                  ✕
+                </button>
               </div>
               <div className="overflow-y-auto max-h-[70vh] p-4">
-                <QuestionPanel questions={questions} onCorrect={onCorrect} onWrong={onWrong} earnLabel="+2 🔫" disabled={isDisabled} compact />
+                <QuestionPanel
+                  questions={questions}
+                  onCorrect={onCorrect}
+                  onWrong={onWrong}
+                  earnLabel="+2 🔫"
+                  disabled={isDisabled}
+                  compact
+                />
               </div>
             </motion.div>
           </motion.div>
@@ -533,777 +1242,34 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
   );
 }
 
-function drawWeaponBoxes(
-  ctx: CanvasRenderingContext2D,
-  boxes: { id: string; x: number; y: number; type?: string }[],
-  cam: CameraState,
-  vpW: number,
-  vpH: number,
-  t: number
-) {
-  boxes.forEach(box => {
-    if (box.x + 50 < cam.x - 100 || box.x - 50 > cam.x + vpW + 100 ||
-        box.y + 50 < cam.y - 100 || box.y - 50 > cam.y + vpH + 100) return;
-    ctx.save();
-    ctx.translate(box.x, box.y);
-    const type = box.type || 'rifle';
-    const styles: Record<string, { color: string; accent: string; icon: string }> = {
-      rifle: { color: '#4a5568', accent: '#2d3748', icon: '▬' },
-      shotgun: { color: '#744210', accent: '#92400e', icon: '≡' },
-      rocket: { color: '#1e3a5f', accent: '#1e40af', icon: '◆' },
-      sniper: { color: '#14532d', accent: '#166534', icon: '▸' },
-      minigun: { color: '#7f1d1d', accent: '#991b1b', icon: '▬▬' }
-    };
-    const s = styles[type] || styles.rifle;
-    drawGlow(ctx, 0, 0, 55, s.accent, 0.25 + 0.1 * Math.sin(t * 2));
-    ctx.fillStyle = 'rgba(0,0,0,0.4)';
-    ctx.beginPath();
-    ctx.ellipse(0, 28, 28, 10, 0, 0, Math.PI * 2);
-    ctx.fill();
-    const grad = ctx.createLinearGradient(-25, -25, 25, 25);
-    grad.addColorStop(0, s.accent);
-    grad.addColorStop(0.5, s.color);
-    grad.addColorStop(1, '#1a1a1a');
-    ctx.fillStyle = grad;
-    roundRect(ctx, -28, -22, 56, 44, 8);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.fillStyle = '#fef08a';
-    ctx.font = 'bold 18px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(s.icon, 0, 8);
-    ctx.restore();
-  });
-}
+const BUTTON_ATTACK_THROTTLE_MS = 200;
 
-function tryOpenNearbyBox(
-  pos: { x: number; y: number },
-  openedBoxes: string[],
-  weaponBoxes: { id: string; x: number; y: number }[],
+function shoot(
   roomCode: string,
   playerId: string,
-  isBoss: boolean,
+  ammo: number,
   isDead: boolean,
-  lastOpenRef: MutableRefObject<number>,
-  now: number
+  lastShootTimeRef: React.MutableRefObject<number>,
+  canShootRef: React.MutableRefObject<boolean>,
+  lastAttackSentAtRef: React.MutableRefObject<number>,
+  aimDirRef: React.MutableRefObject<THREE.Vector3>,
+  weaponId: string = 'rifle'
 ) {
-  if (isBoss || isDead || now - lastOpenRef.current < 400) return;
-  for (const box of weaponBoxes) {
-    if (openedBoxes.includes(box.id)) continue;
-    const dist = Math.hypot(pos.x - box.x, pos.y - box.y);
-    if (dist < 95) {
-      lastOpenRef.current = now;
-      socket.emit('openBox', { code: roomCode, playerId, boxId: box.id });
-      return;
-    }
-  }
-}
-
-function drawCrosshair(
-  ctx: CanvasRenderingContext2D,
-  mouseRef: MutableRefObject<{ x: number; y: number }>
-) {
-  const mx = mouseRef.current.x;
-  const my = mouseRef.current.y;
-  ctx.save();
-  ctx.translate(mx, my);
-  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-  ctx.lineWidth = 3;
-  ctx.shadowColor = '#ef4444';
-  ctx.shadowBlur = 12;
-  ctx.beginPath();
-  ctx.arc(0, 0, 14, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = '#ef4444';
-  ctx.beginPath();
-  ctx.arc(0, 0, 4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-  ctx.restore();
-}
-
-function drawProjectiles(
-  ctx: CanvasRenderingContext2D,
-  projectilesRef: MutableRefObject<TravelingProjectile[]>,
-  now: number,
-  dt: number,
-  particlesRef: MutableRefObject<Particle[]>,
-  bosses: any[],
-  heroes: any[],
-  aiBoss: { x: number; y: number; hp: number } | null | undefined,
-  worldSize: number,
-  margin: number
-) {
-  projectilesRef.current = projectilesRef.current.filter(proj => {
-    proj.x += proj.vx * dt;
-    proj.y += proj.vy * dt;
-
-    const age = now - proj.spawnTime;
-    if (age > PROJECTILE_MAX_AGE_MS) return false;
-    if (proj.x < -margin || proj.x > worldSize + margin || proj.y < -margin || proj.y > worldSize + margin) return false;
-
-    let bossHit = false;
-    if (!proj.isBoss) {
-      if (aiBoss && aiBoss.hp > 0 && Math.hypot(proj.x - aiBoss.x, proj.y - aiBoss.y) < 90) bossHit = true;
-      if (!bossHit) bossHit = bosses.some((b: any) => {
-        if ((b.modeState?.hp ?? 0) <= 0) return false;
-        const bx = b.x ?? CENTER;
-        const by = b.y ?? CENTER;
-        return Math.hypot(proj.x - bx, proj.y - by) < 90;
-      });
-    }
-    const heroHit = proj.isBoss && heroes.some((h: any) => {
-      const hx = h.x ?? CENTER;
-      const hy = h.y ?? CENTER;
-      return Math.hypot(proj.x - hx, proj.y - hy) < 55;
-    });
-    if (bossHit || heroHit) {
-      particlesRef.current.push(...emitBurst(proj.x, proj.y, 8, 6, 0.4, proj.isBoss ? '#ff00ff' : '#fbbf24', 2, { type: 'spark', friction: 0.92 }));
-      return false;
-    }
-
-    if (Math.random() < 0.4) {
-      const angle = Math.atan2(-proj.vy, -proj.vx);
-      particlesRef.current.push(...emitDirectional(proj.x, proj.y, angle, 0.4, 1, 2, 0.2, proj.isBoss ? '#ff00ff' : '#ffdd44', 1.5, { type: 'spark', friction: 0.9 }));
-    }
-
-    const color = proj.isBoss ? '#ff00ff' : '#fbbf24';
-    ctx.save();
-    ctx.translate(proj.x, proj.y);
-    if (proj.isBoss) {
-      // Boss projectiles: sphere-like (circle) - like in example
-      const g = ctx.createRadialGradient(-3, -3, 0, 0, 0, 8);
-      g.addColorStop(0, colorAlpha(color, 0.9));
-      g.addColorStop(0.6, color);
-      g.addColorStop(1, colorAlpha(color, 0.6));
-      ctx.fillStyle = g;
-      ctx.shadowBlur = 18;
-      ctx.shadowColor = color;
-      ctx.beginPath();
-      ctx.arc(0, 0, 8, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      const angle = Math.atan2(proj.vy, proj.vx);
-      ctx.rotate(angle);
-      const g = ctx.createLinearGradient(-12, 0, 12, 0);
-      g.addColorStop(0, colorAlpha(color, 0.4));
-      g.addColorStop(0.3, colorAlpha(color, 0.9));
-      g.addColorStop(0.7, color);
-      g.addColorStop(1, colorAlpha(color, 0.95));
-      ctx.fillStyle = g;
-      ctx.shadowBlur = 14;
-      ctx.shadowColor = color;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, 10, 4, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.shadowBlur = 0;
-    ctx.restore();
-    return true;
-  });
-}
-
-function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number, vpH: number, t: number) {
-  const baseX = Math.max(0, cam.x - 100);
-  const baseY = Math.max(0, cam.y - 100);
-  const w = Math.min(WORLD_SIZE + 200, vpW + 200);
-  const h = Math.min(WORLD_SIZE + 200, vpH + 200);
-
-  const grassGrad = ctx.createLinearGradient(baseX, baseY, baseX + w, baseY + h);
-  grassGrad.addColorStop(0, '#8bc34a');
-  grassGrad.addColorStop(0.3, '#7cb342');
-  grassGrad.addColorStop(0.6, '#689f38');
-  grassGrad.addColorStop(1, '#558b2f');
-  ctx.fillStyle = grassGrad;
-  ctx.fillRect(baseX, baseY, w, h);
-
-  for (let i = 0; i < 40; i++) {
-    const px = (baseX + (i * 137) % w) + Math.sin(t + i) * 3;
-    const py = (baseY + (i * 89) % h) + Math.cos(t * 0.7 + i) * 2;
-    ctx.fillStyle = `rgba(76,175,80,${0.15 + 0.08 * Math.sin(t + i * 0.5)})`;
-    ctx.beginPath();
-    ctx.arc(px, py, 3, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  ctx.fillStyle = 'rgba(124,179,66,0.12)';
-  ctx.beginPath();
-  ctx.ellipse(baseX + w / 2, baseY + h / 2, w * 0.35, h * 0.35, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Central plaza - boss arena (like in example)
-  const plazaRadius = 120;
-  const plazaGrad = ctx.createRadialGradient(CENTER, CENTER, 0, CENTER, CENTER, plazaRadius);
-  plazaGrad.addColorStop(0, '#a8a8a8');
-  plazaGrad.addColorStop(0.7, '#9e9e9e');
-  plazaGrad.addColorStop(1, '#757575');
-  ctx.fillStyle = plazaGrad;
-  ctx.beginPath();
-  ctx.arc(CENTER, CENTER, plazaRadius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-
-  drawPathsToCenter(ctx, cam, vpW, vpH);
-}
-
-function drawPathsToCenter(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number, vpH: number) {
-  const cx = CENTER;
-  const cy = CENTER;
-  const pathWidth = 100;
-  const pathColor = '#d4a574';
-  const pathEdge = '#b8956a';
-
-  const paths: { from: [number, number]; to: [number, number]; width: number }[] = [
-    { from: [0, cy], to: [cx, cy], width: pathWidth },
-    { from: [WORLD_SIZE, cy], to: [cx, cy], width: pathWidth },
-    { from: [cx, 0], to: [cx, cy], width: pathWidth },
-    { from: [cx, WORLD_SIZE], to: [cx, cy], width: pathWidth },
-    { from: [WORLD_SIZE * 0.2, 0], to: [cx, cy], width: pathWidth * 0.8 },
-    { from: [WORLD_SIZE * 0.8, WORLD_SIZE], to: [cx, cy], width: pathWidth * 0.8 },
-  ];
-
-  paths.forEach(({ from, to, width }) => {
-    const [x1, y1] = from;
-    const [x2, y2] = to;
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const len = Math.hypot(dx, dy);
-    if (len < 1) return;
-    const perpX = -dy / len;
-    const perpY = dx / len;
-    const hw = width / 2;
-
-    ctx.save();
-    ctx.fillStyle = pathColor;
-    ctx.strokeStyle = pathEdge;
-    ctx.lineWidth = 4;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(x1 + perpX * hw, y1 + perpY * hw);
-    ctx.lineTo(x1 - perpX * hw, y1 - perpY * hw);
-    ctx.lineTo(x2 - perpX * hw, y2 - perpY * hw);
-    ctx.lineTo(x2 + perpX * hw, y2 + perpY * hw);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  });
-}
-
-function drawWorldObjects(ctx: CanvasRenderingContext2D, objs: WorldObject[], cam: CameraState, t: number) {
-  const sorted = [...objs].sort((a, b) => (a.y + a.h / 2) - (b.y + b.h / 2));
-  sorted.forEach(o => {
-    ctx.save();
-    ctx.translate(o.x, o.y);
-    const v = o.variant ?? 0;
-    switch (o.type) {
-      case 'tree':
-        drawGlow(ctx, 0, -o.h * 0.2, o.w * 1.2, '#22c55e', 0.15);
-        const foliageGrad = ctx.createRadialGradient(0, -o.h * 0.3, 0, 0, -o.h * 0.3, o.w * 0.6);
-        foliageGrad.addColorStop(0, '#4ade80');
-        foliageGrad.addColorStop(0.5, '#22c55e');
-        foliageGrad.addColorStop(1, '#15803d');
-        ctx.fillStyle = foliageGrad;
-        ctx.beginPath();
-        ctx.ellipse(0, -o.h * 0.3, o.w * 0.65, o.h * 0.55, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#166534';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.fillStyle = '#78350f';
-        ctx.fillRect(-o.w * 0.15, o.h * 0.2, o.w * 0.3, o.h * 0.5);
-        ctx.strokeStyle = '#92400e';
-        ctx.strokeRect(-o.w * 0.15, o.h * 0.2, o.w * 0.3, o.h * 0.5);
-        break;
-      case 'bush':
-        const bushGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, o.w * 0.6);
-        bushGrad.addColorStop(0, '#4ade80');
-        bushGrad.addColorStop(0.7, '#22c55e');
-        bushGrad.addColorStop(1, '#166534');
-        ctx.fillStyle = bushGrad;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, o.w / 2, o.h / 2, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#15803d';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        drawGlow(ctx, 0, 0, o.w, '#22c55e', 0.1);
-        break;
-      case 'house':
-        drawGlow(ctx, 0, 0, o.w * 0.8, v % 2 ? '#dc2626' : '#2563eb', 0.12);
-        const wallGrad = ctx.createLinearGradient(-o.w / 2, 0, o.w / 2, 0);
-        wallGrad.addColorStop(0, v % 2 ? '#b91c1c' : '#1d4ed8');
-        wallGrad.addColorStop(0.5, v % 2 ? '#dc2626' : '#2563eb');
-        wallGrad.addColorStop(1, v % 2 ? '#991b1b' : '#1e40af');
-        ctx.fillStyle = wallGrad;
-        ctx.fillRect(-o.w / 2, -o.h * 0.3, o.w, o.h * 0.8);
-        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(-o.w / 2, -o.h * 0.3, o.w, o.h * 0.8);
-        ctx.fillStyle = '#78350f';
-        ctx.beginPath();
-        ctx.moveTo(-o.w / 2 - 8, -o.h * 0.3);
-        ctx.lineTo(o.w / 2 + 8, -o.h * 0.3);
-        ctx.lineTo(o.w / 2, -o.h * 0.65);
-        ctx.lineTo(-o.w / 2, -o.h * 0.65);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = '#92400e';
-        ctx.stroke();
-        ctx.fillStyle = '#fef08a';
-        ctx.shadowBlur = 20;
-        ctx.shadowColor = '#fef08a';
-        ctx.fillRect(-o.w * 0.18, o.h * 0.08, o.w * 0.36, o.h * 0.4);
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = '#fde047';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(-o.w * 0.18, o.h * 0.08, o.w * 0.36, o.h * 0.4);
-        break;
-      case 'path':
-        const pathGrad = ctx.createLinearGradient(-o.w / 2, 0, o.w / 2, 0);
-        pathGrad.addColorStop(0, '#78716c');
-        pathGrad.addColorStop(0.5, '#a8a29e');
-        pathGrad.addColorStop(1, '#78716c');
-        ctx.fillStyle = pathGrad;
-        ctx.fillRect(-o.w / 2, -o.h / 2, o.w, o.h);
-        ctx.strokeStyle = '#57534e';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(-o.w / 2, -o.h / 2, o.w, o.h);
-        ctx.fillStyle = 'rgba(255,255,255,0.1)';
-        ctx.fillRect(-o.w / 2 + 4, -o.h / 2 + 4, o.w - 8, o.h - 8);
-        break;
-      case 'lamp':
-        ctx.fillStyle = '#334155';
-        ctx.fillRect(-o.w / 2, 0, o.w, o.h);
-        ctx.strokeStyle = '#475569';
-        ctx.strokeRect(-o.w / 2, 0, o.w, o.h);
-        ctx.fillStyle = '#fbbf24';
-        ctx.shadowBlur = 25;
-        ctx.shadowColor = '#fbbf24';
-        drawGlow(ctx, 0, -o.h * 0.3, 30, '#fbbf24', 0.4 + 0.15 * Math.sin(t * 2));
-        ctx.beginPath();
-        ctx.arc(0, -o.h * 0.3, 8, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        break;
-      default:
-        break;
-    }
-    ctx.restore();
-  });
-}
-
-function drawMuzzleFlashes(
-  ctx: CanvasRenderingContext2D,
-  ref: MutableRefObject<MuzzleFlash[]>,
-  now: number
-) {
-  const FLASH_DURATION = 80;
-  ref.current = ref.current.filter(m => {
-    const age = now - m.spawnTime;
-    if (age > FLASH_DURATION) return false;
-    const alpha = 1 - age / FLASH_DURATION;
-    ctx.save();
-    ctx.translate(m.x, m.y);
-    ctx.rotate(m.angle);
-    ctx.globalAlpha = alpha;
-    const g = ctx.createRadialGradient(0, 0, 0, 25, 0, 0);
-    g.addColorStop(0, 'rgba(255,220,100,0.95)');
-    g.addColorStop(0.4, 'rgba(255,180,50,0.6)');
-    g.addColorStop(1, 'transparent');
-    ctx.fillStyle = g;
-    ctx.fillRect(15, -12, 35, 24);
-    ctx.globalAlpha = 1;
-    ctx.restore();
-    return true;
-  });
-}
-
-function drawDamageNumbers(
-  ctx: CanvasRenderingContext2D,
-  ref: MutableRefObject<DamageNumber[]>,
-  now: number,
-  particlesRef: MutableRefObject<Particle[]>
-) {
-  const DURATION = 800;
-  ref.current = ref.current.filter(d => {
-    const age = now - d.spawnTime;
-    if (age > DURATION) return false;
-    d.x += d.vx; d.y += d.vy;
-    d.vy -= 0.15;
-    const alpha = 1 - age / DURATION;
-    const scale = 1 + age / DURATION * 0.5;
-    ctx.save();
-    ctx.translate(d.x, d.y);
-    ctx.scale(scale, scale);
-    ctx.globalAlpha = alpha;
-    ctx.font = 'bold 28px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#ff4444';
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = 4;
-    ctx.strokeText(`-${d.value}`, 0, 0);
-    ctx.fillText(`-${d.value}`, 0, 0);
-    ctx.restore();
-    return true;
-  });
-}
-
-function drawPlayers(
-  ctx: CanvasRenderingContext2D,
-  players: Record<string, any>,
-  myId: string,
-  cam: CameraState,
-  aimRef: MutableRefObject<{ x: number; y: number }>,
-  lerpedRef: MutableRefObject<Record<string, LerpedEntity>>,
-  posRef: MutableRefObject<{ x: number; y: number }>,
-  healthBarDisplayRef: MutableRefObject<Record<string, number>>,
-  inputRef: MutableRefObject<ReturnType<typeof createInputState>>,
-  t: number,
-  dt: number
-) {
-  const sorted = Object.entries(players)
-    .filter(([, p]) => (p.modeState?.hp ?? 2) > 0)
-    .sort(([, a], [, b]) => (a.y ?? 0) - (b.y ?? 0));
-
-  sorted.forEach(([id, p]) => {
-    const isMe = id === myId;
-    const x = isMe ? posRef.current.x : (lerpedRef.current[id]?.x ?? p.x ?? CENTER);
-    const y = isMe ? posRef.current.y : (lerpedRef.current[id]?.y ?? p.y ?? CENTER);
-    const ent = lerpedRef.current[id];
-    const velX = ent?.vx ?? 0;
-    const velY = ent?.vy ?? 0;
-    const dir = isMe ? getMoveDirection(inputRef.current) : { x: 0, y: 0 };
-    const isMoving = isMe ? (dir.x !== 0 || dir.y !== 0) : Math.hypot(velX, velY) > 2;
-    const isBoss = p.modeState?.isBoss;
-    const hp = p.modeState?.hp ?? 2;
-    const maxHp = p.modeState?.maxHp ?? (isBoss ? 10 : 2);
-    const aim = isMe ? aimRef.current : { x: 1, y: 0 };
-
-    ctx.save();
-    ctx.translate(x, y);
-
-    if (isBoss) {
-      drawBossCreature(ctx, 0, 0, t, hp / maxHp, p.modeState?.shields ?? 0, isMe ? aim : null);
-    } else {
-      const weaponType = p.modeState?.weaponType || 'rifle';
-      drawBrawler(ctx, 0, 0, t, isMe, aim, isMoving, weaponType);
-    }
-
-    ctx.font = 'bold 14px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = isMe ? '#93c5fd' : (isBoss ? '#fca5a5' : '#a5b4fc');
-    ctx.shadowColor = '#000';
-    ctx.shadowBlur = 5;
-    ctx.fillText(p.name || '?', 0, isBoss ? -100 : -58);
-    ctx.shadowBlur = 0;
-
-    if (!isBoss && maxHp > 0) {
-      const barW = 52;
-      const barH = 10;
-      const pct = Math.max(0.02, hp / maxHp);
-      const key = `${id}_hp`;
-      let displayPct = healthBarDisplayRef.current[key] ?? pct;
-      displayPct = lerp(displayPct, pct, 8 * dt);
-      healthBarDisplayRef.current[key] = displayPct;
-      ctx.shadowColor = '#000';
-      ctx.shadowBlur = 8;
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
-      roundRect(ctx, -barW / 2, -48, barW, barH, 5);
-      ctx.fill();
-      ctx.fillStyle = 'rgba(255,100,100,0.5)';
-      roundRect(ctx, -barW / 2, -48, barW * displayPct, barH, 5);
-      ctx.fill();
-      const barGrad = ctx.createLinearGradient(-barW / 2, 0, barW / 2, 0);
-      barGrad.addColorStop(0, pct > 0.5 ? '#4ade80' : pct > 0.25 ? '#facc15' : '#f87171');
-      barGrad.addColorStop(1, pct > 0.5 ? '#22c55e' : pct > 0.25 ? '#eab308' : '#ef4444');
-      ctx.fillStyle = barGrad;
-      roundRect(ctx, -barW / 2, -48, barW * pct, barH, 5);
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-      ctx.lineWidth = 2;
-      roundRect(ctx, -barW / 2, -48, barW, barH, 5);
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-    }
-
-    ctx.restore();
-  });
-}
-
-function drawBrawler(
-  ctx: CanvasRenderingContext2D, x: number, y: number, t: number, isMe: boolean,
-  aim: { x: number; y: number },
-  isMoving: boolean,
-  weaponType: string
-) {
-  ctx.save();
-  ctx.translate(x, y);
-
-  const bob = isMoving ? Math.sin(t * 8) * 3 : 0;
-  const breathe = Math.sin(t * 2.2) * 2;
-  const scale = 1 + 0.015 * Math.sin(t * 2);
-  ctx.scale(scale, scale);
-
-  const primary = isMe ? '#2563eb' : '#475569';
-  const secondary = isMe ? '#3b82f6' : '#64748b';
-  const highlight = isMe ? '#60a5fa' : '#94a3b8';
-  const dark = isMe ? '#1e40af' : '#334155';
-  const skin = '#fcd5b8';
-  const outline = '#0f172a';
-
-  ctx.shadowColor = '#000';
-  ctx.shadowBlur = 10;
-  drawGlow(ctx, 0, 0, 50, secondary, isMe ? 0.25 : 0.12);
-
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.beginPath();
-  ctx.ellipse(0, 32 + bob, 26, 10, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  ctx.fillStyle = primary;
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = 3;
-  roundRect(ctx, -10, 20 + breathe + bob, 9, 22, 4);
-  ctx.fill();
-  ctx.stroke();
-  roundRect(ctx, 1, 20 + breathe + bob, 9, 22, 4);
-  ctx.fill();
-  ctx.stroke();
-  ctx.fillStyle = highlight;
-  ctx.fillRect(-8, 24 + breathe + bob, 5, 4);
-  ctx.fillRect(3, 24 + breathe + bob, 5, 4);
-
-  const torsoGrad = ctx.createLinearGradient(-22, -15, 22, 35);
-  torsoGrad.addColorStop(0, highlight);
-  torsoGrad.addColorStop(0.35, secondary);
-  torsoGrad.addColorStop(0.7, primary);
-  torsoGrad.addColorStop(1, dark);
-  ctx.fillStyle = torsoGrad;
-  roundRect(ctx, -20, -10 + breathe + bob, 40, 36, 10);
-  ctx.fill();
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.fillStyle = colorAlpha(highlight, 0.4);
-  roundRect(ctx, -16, -6 + breathe + bob, 12, 8, 3);
-  ctx.fill();
-  roundRect(ctx, 4, -6 + breathe + bob, 12, 8, 3);
-  ctx.fill();
-
-  ctx.fillStyle = skin;
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(0, -26 + breathe + bob, 16, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.fillStyle = dark;
-  ctx.beginPath();
-  ctx.arc(-5, -28 + breathe + bob, 3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(5, -28 + breathe + bob, 3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = highlight;
-  ctx.shadowBlur = 8;
-  ctx.shadowColor = highlight;
-  ctx.beginPath();
-  ctx.arc(-5, -28 + breathe + bob, 1.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(5, -28 + breathe + bob, 1.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-
-  ctx.fillStyle = primary;
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = 2;
-  roundRect(ctx, -24, -14 + breathe + bob, 14, 18, 5);
-  ctx.fill();
-  ctx.stroke();
-  roundRect(ctx, 10, -14 + breathe + bob, 14, 18, 5);
-  ctx.fill();
-  ctx.stroke();
-
-  const aimAngle = Math.atan2(aim.y, aim.x);
-  ctx.save();
-  ctx.rotate(aimAngle);
-
-  const weaponStyles: Record<string, { len: number; color: string; thick: number }> = {
-    rifle: { len: 38, color: '#4a5568', thick: 3 },
-    shotgun: { len: 32, color: '#92400e', thick: 5 },
-    rocket: { len: 45, color: '#1e40af', thick: 4 },
-    sniper: { len: 50, color: '#166534', thick: 2 },
-    minigun: { len: 42, color: '#991b1b', thick: 4 }
-  };
-  const ws = weaponStyles[weaponType] || weaponStyles.rifle;
-
-  ctx.fillStyle = ws.color;
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = ws.thick;
-  ctx.fillRect(18, -4, ws.len, 8);
-  ctx.strokeRect(18, -4, ws.len, 8);
-  ctx.fillStyle = '#1e293b';
-  ctx.fillRect(18 + ws.len - 8, -3, 6, 6);
-  ctx.fillStyle = '#ef4444';
-  ctx.shadowBlur = 12;
-  ctx.shadowColor = '#ef4444';
-  ctx.beginPath();
-  ctx.arc(22 + ws.len, 0, 6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.shadowBlur = 0;
-  ctx.restore();
-}
-
-function drawLasers(
-  ctx: CanvasRenderingContext2D,
-  lasers: any[],
-  shakeRef: MutableRefObject<ShakeState>,
-  particlesRef: MutableRefObject<Particle[]>,
-  triggerShake: (s: ShakeState, i: number) => void,
-  prevLasers: MutableRefObject<number>,
-  damageNumbersRef: MutableRefObject<DamageNumber[]>
-) {
+  if (ammo < 1 || isDead || !canShootRef.current) return;
   const now = Date.now();
-  lasers.forEach((l: any) => {
-    const color = l.blocked ? '#3b82f6' : '#ef4444';
-    drawBeam(ctx, l.x1, l.y1, l.x2, l.y2, color, 5, 22);
-    particlesRef.current.push(...emitBurst(l.x2, l.y2, 6, 5, 0.5, color, 2.5, { type: 'spark', friction: 0.95 }));
-    if (!l.blocked) {
-      triggerShake(shakeRef.current, 4);
-      damageNumbersRef.current.push({
-        x: l.x2, y: l.y2, value: 1, spawnTime: now,
-        vx: (Math.random() - 0.5) * 2, vy: -3 - Math.random() * 2
-      });
-    } else triggerShake(shakeRef.current, 2);
-  });
-  if (lasers.length > prevLasers.current && lasers.length > 0) triggerShake(shakeRef.current, 6);
-  prevLasers.current = lasers.length;
-}
-
-// Draw boss creature - styled like "המפלצת הענקית" from the example (dodecahedron body, red glowing eyes)
-function drawBossCreature(ctx: CanvasRenderingContext2D, x: number, y: number, t: number, hpPct: number, shields: number, aim: { x: number; y: number } | null = null) {
-  const breathe = Math.sin(t * 1.8) * 3;
-  const scaleBreath = 1 + 0.04 * Math.sin(t * 0.003); // pulse/breathing like in example
-  const isEnraged = hpPct < 0.3;
-  const damageFlash = isEnraged && Math.sin(t * 12) > 0.7;
-
-  ctx.save();
-  ctx.translate(x, y + breathe);
-  ctx.scale(scaleBreath, scaleBreath);
-
-  drawGlow(ctx, 0, 0, 95, isEnraged ? '#ff0000' : '#8e44ad', isEnraged ? 0.25 : 0.15);
-
-  // Shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.beginPath();
-  ctx.ellipse(0, 65, 62, 20, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  if (shields > 0) {
-    ctx.strokeStyle = colorAlpha('#3b82f6', 0.4 + 0.2 * Math.sin(t * 3));
-    ctx.lineWidth = 2.5;
-    ctx.setLineDash([8, 5]);
-    ctx.beginPath();
-    ctx.arc(0, 0, 72 + Math.sin(t * 2) * 4, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    drawGlow(ctx, 0, 0, 80, '#3b82f6', 0.08 + 0.04 * Math.sin(t * 2));
+  if (now - lastAttackSentAtRef.current < BUTTON_ATTACK_THROTTLE_MS) return;
+  const wcfg = WEAPON_CONFIG[weaponId] || WEAPON_CONFIG.rifle;
+  const cooldownMs = wcfg.fireRate;
+  if (now - lastShootTimeRef.current < cooldownMs) return;
+  canShootRef.current = false;
+  lastShootTimeRef.current = now;
+  lastAttackSentAtRef.current = now;
+  setTimeout(() => { canShootRef.current = true; }, cooldownMs);
+  const angle = Math.atan2(aimDirRef.current.z, aimDirRef.current.x);
+  const isAssaultRifle = weaponId === 'rifle';
+  if (isAssaultRifle) {
+    socket.emit('action', { code: roomCode, playerId, actionType: 'attack', aimAngle: angle, burst: true });
+  } else {
+    socket.emit('action', { code: roomCode, playerId, actionType: 'attack', aimAngle: angle });
   }
-
-  if (isEnraged) drawGlow(ctx, 0, 0, 90, '#ff0000', 0.2 + 0.1 * Math.sin(t * 4));
-
-  // Body - dodecahedron-like shape (dark polygonal alien creature)
-  const bodyColor = damageFlash ? '#ff4444' : (isEnraged ? '#4a0000' : '#1a1a1a');
-  const bodyGrad = ctx.createRadialGradient(0, -10, 0, 0, 0, 55);
-  bodyGrad.addColorStop(0, damageFlash ? '#ff6666' : (isEnraged ? '#7a0000' : '#2a2a2a'));
-  bodyGrad.addColorStop(0.6, bodyColor);
-  bodyGrad.addColorStop(1, '#0a0a0a');
-  ctx.fillStyle = bodyGrad;
-
-  // Pentagon/dodecahedron-inspired polygon (12 vertices)
-  const r = 48;
-  ctx.beginPath();
-  for (let i = 0; i < 12; i++) {
-    const angle = (i / 12) * Math.PI * 2 - Math.PI / 2;
-    const px = Math.cos(angle) * r;
-    const py = Math.sin(angle) * r * 0.85;
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = colorAlpha(isEnraged ? '#ff0000' : '#8e44ad', 0.4);
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  // Red glowing eyes - prominent like in example
-  const eyeGlow = isEnraged ? '#ff0000' : '#ff0000';
-  const eyePulse = 0.9 + 0.2 * Math.sin(t * 3);
-  ctx.shadowBlur = 25;
-  ctx.shadowColor = eyeGlow;
-  ctx.fillStyle = eyeGlow;
-  ctx.beginPath();
-  ctx.arc(-18, -12, 12 * eyePulse, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(18, -12, 12 * eyePulse, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-
-  // Inner eye glow
-  ctx.fillStyle = '#ff4444';
-  ctx.shadowBlur = 15;
-  ctx.shadowColor = '#ff0000';
-  ctx.beginPath();
-  ctx.arc(-18, -12, 6 * eyePulse, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(18, -12, 6 * eyePulse, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-
-  // Gun/arm - like in example
-  if (aim) {
-    const angle = Math.atan2(aim.y, aim.x);
-    ctx.save();
-    ctx.rotate(angle);
-    const gunGrad = ctx.createLinearGradient(35, 0, 75, 0);
-    gunGrad.addColorStop(0, '#333333');
-    gunGrad.addColorStop(1, '#1a1a1a');
-    ctx.fillStyle = gunGrad;
-    ctx.fillRect(35, -6, 35, 12);
-    ctx.strokeStyle = '#555';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(35, -6, 35, 12);
-    ctx.fillStyle = '#ff00ff';
-    ctx.shadowBlur = 18;
-    ctx.shadowColor = '#ff00ff';
-    ctx.beginPath();
-    ctx.arc(78, 0, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.restore();
-  }
-
-  ctx.restore();
 }

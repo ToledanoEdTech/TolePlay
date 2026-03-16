@@ -94,8 +94,25 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const lastServerProjectilesRef = useRef<any>(null);
   const impactParticlesRef = useRef<{ x: number; y: number; vx: number; vy: number; createdAt: number; color: string }[]>([]);
   const lastProcessedHitsRef = useRef<any>(null);
+  const remoteProjectilesRef = useRef<{ x: number; y: number; vx: number; vy: number; weaponType: string; playerId: string; createdAt: number }[]>([]);
 
   useEffect(() => { gsRef.current = globalState; }, [globalState]);
+  useEffect(() => {
+    const onRemoteShoot = (data: { x: number; y: number; vx: number; vy: number; weaponType: string; playerId: string }) => {
+      if (data.playerId === playerId) return;
+      remoteProjectilesRef.current.push({
+        x: data.x,
+        y: data.y,
+        vx: data.vx,
+        vy: data.vy,
+        weaponType: data.weaponType || 'pistol',
+        playerId: data.playerId,
+        createdAt: Date.now(),
+      });
+    };
+    socket.on('remoteShoot', onRemoteShoot);
+    return () => { socket.off('remoteShoot', onRemoteShoot); };
+  }, [playerId]);
   useEffect(() => { playersRef.current = allPlayers; }, [allPlayers]);
   useEffect(() => { playerRef.current = player; }, [player]);
 
@@ -466,6 +483,38 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         ctx.beginPath();
         ctx.arc(px, py, 5, 0, Math.PI * 2);
         ctx.fill();
+        ctx.restore();
+      });
+
+      const REMOTE_PISTOL_TTL_MS = 2000;
+      const REMOTE_TRACER_TTL_MS = 350;
+      remoteProjectilesRef.current = remoteProjectilesRef.current.filter((p) => {
+        const age = nowMs - p.createdAt;
+        const ttl = p.weaponType === 'pistol' ? REMOTE_PISTOL_TTL_MS : REMOTE_TRACER_TTL_MS;
+        return age < ttl;
+      });
+      remoteProjectilesRef.current.forEach((p) => {
+        p.x += p.vx * TICKS_PER_SEC * dt;
+        p.y += p.vy * TICKS_PER_SEC * dt;
+      });
+      remoteProjectilesRef.current.forEach((proj) => {
+        const px = proj.x;
+        const py = proj.y;
+        const vx = proj.vx;
+        const vy = proj.vy;
+        const vlen = Math.hypot(vx, vy) || 1;
+        const trailLen = proj.weaponType === 'pistol' ? 70 : 40;
+        const tailX = px - (vx / vlen) * trailLen;
+        const tailY = py - (vy / vlen) * trailLen;
+        if (!isVis(px, py, trailLen) && !isVis(tailX, tailY, trailLen)) return;
+        ctx.save();
+        ctx.strokeStyle = proj.weaponType === 'sniper' ? 'rgba(56, 189, 248, 0.7)' : proj.weaponType === 'rifle' ? 'rgba(234, 179, 8, 0.7)' : 'rgba(6, 182, 212, 0.5)';
+        ctx.lineWidth = proj.weaponType === 'pistol' ? 4 : 3;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(tailX, tailY);
+        ctx.lineTo(px, py);
+        ctx.stroke();
         ctx.restore();
       });
 
@@ -940,6 +989,20 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         />
         <div className="absolute top-20 right-2 w-24 h-24 min-[480px]:top-24 min-[480px]:left-4 min-[480px]:w-32 min-[480px]:h-32 bg-slate-900/80 border-2 border-slate-700 rounded-lg pointer-events-none overflow-hidden backdrop-blur-md opacity-80" dir="ltr">
           <canvas ref={minimapRef} width={128} height={128} className="w-full h-full" />
+        </div>
+        <div className="absolute left-2 top-1/2 -translate-y-1/2 z-10 w-36 max-h-[50vh] overflow-y-auto rounded-lg bg-black/60 backdrop-blur border border-slate-600/50 pointer-events-none py-2 px-2" dir="rtl">
+          <div className="text-[10px] font-bold text-slate-300 mb-1.5 px-1">דירוג הריגות</div>
+          {Object.entries(allPlayers || {})
+            .map(([id, p]) => ({ id, name: p.name || 'שחקן', kills: (p as any).modeState?.kills ?? 0 }))
+            .sort((a, b) => b.kills - a.kills)
+            .slice(0, 12)
+            .map((p, i) => (
+              <div key={p.id} className="flex items-center justify-between gap-1 py-0.5 px-1.5 rounded text-[10px]">
+                <span className="font-mono text-amber-400/90">{p.kills}</span>
+                <span className={`truncate font-bold ${p.id === playerId ? 'text-cyan-300' : 'text-slate-200'}`}>{p.name}</span>
+                <span className="text-slate-500 shrink-0">{i + 1}.</span>
+              </div>
+            ))}
         </div>
         <AnimatePresence>
           {baseHp < maxHp * 0.25 && baseHp > 0 && (

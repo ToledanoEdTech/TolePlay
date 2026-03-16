@@ -48,6 +48,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   const [gameState, setGameState] = useState<'setup' | 'lobby' | 'playing' | 'ended'>('setup');
   const [globalState, setGlobalState] = useState<any>({});
   const [winner, setWinner] = useState<string | null>(null);
+  const [gameOverPayload, setGameOverPayload] = useState<{ winner: string; mode?: string; players?: { id: string; name: string; kills: number; score: number; correctAnswers: number }[] } | null>(null);
   const [customQuestions, setCustomQuestions] = useState<any[]>([]);
   const [quizSourceTab, setQuizSourceTab] = useState<QuizSourceTab>('upload');
   const [savedQuizzes, setSavedQuizzes] = useState<SavedQuiz[]>([]);
@@ -78,7 +79,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
     };
     const onGlobalState = (state: any) => setGlobalState(state);
     const onTick = (data: any) => { latestTick.current = data; };
-    const onGameOver = ({ winner }: any) => { setGameState('ended'); setWinner(winner); };
+    const onGameOver = (data: any) => { setGameState('ended'); setWinner(data?.winner ?? null); setGameOverPayload(data ?? null); };
 
     socket.on('roomUpdated', onRoomUpdated);
     socket.on('playerUpdated', onPlayerUpdated);
@@ -1032,11 +1033,66 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                 <Trophy className="w-48 h-48 text-yellow-400 relative z-10 drop-shadow-[0_0_50px_rgba(250,204,21,0.5)]" />
               </div>
               <h2 className="text-8xl font-black mb-6 text-transparent bg-clip-text bg-gradient-to-br from-yellow-300 via-amber-400 to-orange-500">המשחק נגמר!</h2>
-              <p className="text-5xl text-indigo-200 mb-16 font-bold drop-shadow-lg">המנצח: {winner}</p>
+              <p className="text-5xl text-indigo-200 mb-8 font-bold drop-shadow-lg">המנצח: {winner}</p>
+              {mode === 'zombie' && gameOverPayload?.players && gameOverPayload.players.length > 0 && (
+                <div className="max-w-4xl mx-auto mb-16 overflow-x-auto rounded-2xl border-2 border-slate-600 bg-slate-900/90">
+                  <table className="w-full text-right" dir="rtl">
+                    <thead>
+                      <tr className="border-b border-slate-600 bg-slate-800/80">
+                        <th className="py-4 px-4 text-amber-400 font-black text-lg">דירוג</th>
+                        <th className="py-4 px-4 text-cyan-300 font-black text-lg">שם שחקן</th>
+                        <th className="py-4 px-4 text-red-400 font-black text-lg">הריגות</th>
+                        <th className="py-4 px-4 text-emerald-400 font-black text-lg">נקודות</th>
+                        <th className="py-4 px-4 text-violet-400 font-black text-lg">תשובות נכונות</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...gameOverPayload.players]
+                        .sort((a, b) => (b.score !== a.score ? b.score - a.score : (b as any).kills - (a as any).kills))
+                        .map((p, i) => (
+                          <tr key={p.id} className="border-b border-slate-700/50 hover:bg-slate-800/50">
+                            <td className="py-3 px-4 font-bold text-slate-200">{i + 1}</td>
+                            <td className="py-3 px-4 font-bold text-white">{p.name}</td>
+                            <td className="py-3 px-4 font-mono text-red-300">{(p as any).kills ?? '-'}</td>
+                            <td className="py-3 px-4 font-mono text-emerald-300">{p.score}</td>
+                            <td className="py-3 px-4 font-mono text-violet-300">{p.correctAnswers}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {mode === 'boss' && gameOverPayload?.players && gameOverPayload.players.length > 0 && (
+                <div className="max-w-4xl mx-auto mb-16 overflow-x-auto rounded-2xl border-2 border-slate-600 bg-slate-900/90">
+                  <table className="w-full text-right" dir="rtl">
+                    <thead>
+                      <tr className="border-b border-slate-600 bg-slate-800/80">
+                        <th className="py-4 px-4 text-amber-400 font-black text-lg">דירוג</th>
+                        <th className="py-4 px-4 text-cyan-300 font-black text-lg">שם שחקן</th>
+                        <th className="py-4 px-4 text-emerald-400 font-black text-lg">נקודות</th>
+                        <th className="py-4 px-4 text-violet-400 font-black text-lg">תשובות נכונות</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...gameOverPayload.players]
+                        .sort((a, b) => b.score !== a.score ? b.score - a.score : b.correctAnswers - a.correctAnswers)
+                        .map((p, i) => (
+                          <tr key={p.id} className="border-b border-slate-700/50 hover:bg-slate-800/50">
+                            <td className="py-3 px-4 font-bold text-slate-200">{i + 1}</td>
+                            <td className="py-3 px-4 font-bold text-white">{p.name}</td>
+                            <td className="py-3 px-4 font-mono text-emerald-300">{p.score}</td>
+                            <td className="py-3 px-4 font-mono text-violet-300">{p.correctAnswers}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
               <button 
                 onClick={() => {
                   setGameState('setup');
                   setRoomCode(null);
+                  setGameOverPayload(null);
                 }}
                 className="py-5 px-16 bg-indigo-600 hover:bg-indigo-500 rounded-full text-2xl font-black shadow-[0_0_40px_rgba(79,70,229,0.5)] transition-all active:scale-95"
               >
