@@ -19,8 +19,8 @@ const ZOMBIE_BASE_X = 2000;
 const ZOMBIE_BASE_Y = 2000;
 const BASE_RADIUS = 85;
 const CAMERA_ZOOM = 0.65;
-/** On mobile (≤768px), zoom out so player sees ~25% more world */
-const CAMERA_ZOOM_MOBILE = 0.52;
+/** On mobile (≤768px), zoom out so player sees ~40–50% more world */
+const CAMERA_ZOOM_MOBILE = 0.45;
 const PLAYER_SPEED = 7 * 60;
 /** Scale for player and zombie visuals (1.5 = 50% larger than base); keeps them smaller than houses but more visible */
 const ENTITY_SCALE = 1.5;
