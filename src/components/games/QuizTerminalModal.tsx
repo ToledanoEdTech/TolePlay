@@ -134,13 +134,7 @@ export function QuizTerminalModal({
       setLocked(false);
       setFeedback(null);
       setCurrentIndex(pickIndex(frozenQuestions.length));
-    }, 900);
-  };
-
-  const next = () => {
-    setLocked(false);
-    setFeedback(null);
-    setCurrentIndex(pickIndex(frozenQuestions.length));
+    }, 1200);
   };
 
   return (
@@ -185,19 +179,7 @@ export function QuizTerminalModal({
             ))}
           </div>
 
-          <div className="mt-4 flex justify-center gap-3 items-center">
-            <button
-              type="button"
-              disabled={!locked}
-              onClick={next}
-              className={`px-5 py-2.5 rounded-xl font-bold border ${
-                !locked
-                  ? 'bg-slate-800/50 text-slate-500 border-slate-700 cursor-not-allowed'
-                  : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-400/40'
-              }`}
-            >
-              שאלה הבאה
-            </button>
+          <div className="mt-4 flex justify-center items-center">
             <div className="text-sm">
               {feedback === 'correct' ? <span className="text-emerald-400 font-bold">✓ נכון!</span> : feedback === 'wrong' ? <span className="text-red-400 font-bold">✗ לא נכון</span> : null}
             </div>

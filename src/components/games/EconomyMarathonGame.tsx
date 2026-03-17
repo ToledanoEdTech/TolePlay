@@ -8,9 +8,8 @@ import { createCamera, updateCamera } from '../../engine/camera';
 import { VirtualJoystick } from '../../engine/VirtualJoystick';
 import {
   type Particle, type DustMote, type ShakeState,
-  tickParticles, tickShake, triggerShake,
+  tickParticlesInPlace, tickShake, triggerShake,
   createDust, drawDust, drawGlow, colorAlpha, roundRect,
-  emitBurst,
 } from './renderUtils';
 import { ProceduralPlayer, type FacingDir } from './ProceduralPlayer';
 import type { CameraState } from '../../engine/types';
@@ -23,6 +22,11 @@ const COLLECTIBLE_ROTATION_SPEED = 0.6;
 const COLLECTIBLE_FLOAT_AMPLITUDE = 10;
 const COLLECTIBLE_FLOAT_SPEED = 2.5;
 const PICKUP_RADIUS = 85; // match server
+const ENV_GRID = 200;
+
+type EnvType = 'tree' | 'bush' | 'rock';
+type EnvObj = { x: number; y: number; type: EnvType; seed: number; variant: number };
+type CachedSprite = { canvas: HTMLCanvasElement | OffscreenCanvas; w: number; h: number };
 
 interface Props {
   roomCode: string;
@@ -57,6 +61,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   const lastMoveTimeRef = useRef(0);
   const prevPosRef = useRef({ x: MAP_CENTER, y: MAP_CENTER });
   const particlesRef = useRef<Particle[]>([]);
+  const particlePoolRef = useRef<Particle[]>([]);
   const dustRef = useRef<DustMote[]>([]);
   const shakeRef = useRef<ShakeState>({ intensity: 0, offsetX: 0, offsetY: 0 });
   const prevGoldRef = useRef(0);
@@ -70,6 +75,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   }>({ treasure_chest: null, coin_pile: null, money_bills: null });
   const prevCollectiblesRef = useRef<{ id: string; x: number; y: number; type: string; value: number }[]>([]);
   const floatingTextsRef = useRef<{ x: number; y: number; text: string; life: number; maxLife: number; vy: number; color: string }[]>([]);
+  const floatingTextPoolRef = useRef<{ x: number; y: number; text: string; life: number; maxLife: number; vy: number; color: string }[]>([]);
   const lastDirRef = useRef<FacingDir>('down');
   const dustTrailRef = useRef<{ x: number; y: number; r: number; life: number; maxLife: number }[]>([]);
   const goldPulseRef = useRef(0);
@@ -79,6 +85,8 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   const animatorsRef = useRef<Map<string, ProceduralPlayer>>(new Map());
   // Track previous positions for all players so we can derive velocity (server does not send it).
   const prevWorldPosRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const envRef = useRef<EnvObj[]>([]);
+  const spriteCacheRef = useRef<Map<string, CachedSprite>>(new Map());
 
   useEffect(() => {
     const base = import.meta.env.BASE_URL || '/';
@@ -92,6 +100,25 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
     load('treasure-chest.png', 'treasure_chest');
     load('coin-pile.png', 'coin_pile');
     load('money-bills.png', 'money_bills');
+  }, []);
+
+  // Build deterministic environment list once (cheap: 20x20 grid).
+  useEffect(() => {
+    if (envRef.current.length) return;
+    const out: EnvObj[] = [];
+    for (let gx = 0; gx <= WORLD_SIZE; gx += ENV_GRID) {
+      for (let gy = 0; gy <= WORLD_SIZE; gy += ENV_GRID) {
+        const seed = gx * 7 + gy * 13;
+        const r = seededRandom(seed);
+        const rx = gx + r * ENV_GRID * 0.8;
+        const ry = gy + seededRandom(seed + 1) * ENV_GRID * 0.8;
+        // Match old distribution (slightly fuller). Use small number of variants for caching.
+        if (r < 0.15) out.push({ x: rx, y: ry, type: 'tree', seed, variant: Math.floor(seededRandom(seed + 99) * 6) });
+        else if (r < 0.27) out.push({ x: rx, y: ry, type: 'bush', seed, variant: Math.floor(seededRandom(seed + 77) * 6) });
+        else if (r < 0.31) out.push({ x: rx, y: ry, type: 'rock', seed, variant: Math.floor(seededRandom(seed + 55) * 4) });
+      }
+    }
+    envRef.current = out;
   }, []);
 
   useEffect(() => { gsRef.current = globalState; }, [globalState]);
@@ -219,17 +246,21 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
         const value = prev.value ?? (prev.type === 'treasure_chest' ? 40 : prev.type === 'coin_pile' ? 20 : 10);
         const isGreen = prev.type === 'money_bills';
         const particleColor = isGreen ? '#4ade80' : '#fbbf24';
-        const burst = emitBurst(prev.x, prev.y, 14, 110, 0.6, particleColor, 5, { friction: 0.92, scaleDown: true });
-        particlesRef.current = [...particlesRef.current, ...burst];
-        floatingTextsRef.current.push({
-          x: prev.x,
-          y: prev.y,
-          text: `+$${value}`,
-          life: 1,
-          maxLife: 1,
-          vy: 48,
-          color: isGreen ? '#4ade80' : '#fde68a',
+        spawnBurstPooled(particlesRef.current, particlePoolRef.current, prev.x, prev.y, 14, 110, 0.6, particleColor, 5, {
+          friction: 0.92,
+          scaleDown: true,
+          gravity: 0.02,
         });
+        const ftPool = floatingTextPoolRef.current;
+        const ft = ftPool.length ? ftPool.pop()! : { x: 0, y: 0, text: '', life: 0, maxLife: 0, vy: 0, color: '' };
+        ft.x = prev.x;
+        ft.y = prev.y;
+        ft.text = `+$${value}`;
+        ft.life = 1;
+        ft.maxLife = 1;
+        ft.vy = 48;
+        ft.color = isGreen ? '#4ade80' : '#fde68a';
+        floatingTextsRef.current.push(ft);
       });
       prevCollectiblesRef.current = collectibles.map((c: any) => ({
         id: c.id || `${c.x}-${c.y}`,
@@ -277,13 +308,15 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
       ctx.scale(cam.zoom, cam.zoom);
       ctx.translate(-cam.x, -cam.y);
 
-      drawWorld(ctx, cam, vpW, vpH, t);
+      drawWorld(ctx, cam, vpW, vpH, t, envRef.current, spriteCacheRef.current);
       drawCollectiblesWorld(ctx, collectibles, collectibleImgsRef.current, cam, vpW, vpH);
-      drawPlayers(ctx, players, playerId, myPos, dt, vel, dir, animatorsRef.current, prevWorldPosRef.current);
+      drawPlayers(ctx, players, playerId, myPos, dt, vel, dir, animatorsRef.current, prevWorldPosRef.current, cam, vpW, vpH);
 
-      particlesRef.current = tickParticles(ctx, particlesRef.current);
+      tickParticlesInPlace(ctx, particlesRef.current, dt);
+      // Return dead particles to pool to keep memory flat.
+      // (tickParticlesInPlace compacts; we pool via explicit recycle in spawn only.)
       tickDustTrail(ctx, dustTrailRef.current, dt);
-      tickFloatingTexts(ctx, floatingTextsRef.current, dt);
+      tickFloatingTexts(ctx, floatingTextsRef.current, floatingTextPoolRef.current, dt);
       ctx.restore();
       drawDust(ctx, dustRef.current, vpW, vpH, '#fbbf24');
       ctx.restore();
@@ -515,6 +548,63 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   );
 }
 
+function makeOffscreenCanvas(w: number, h: number): HTMLCanvasElement | OffscreenCanvas {
+  // OffscreenCanvas is faster when available; fallback keeps compatibility.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyGlobal: any = globalThis as any;
+  if (typeof anyGlobal.OffscreenCanvas === 'function') return new anyGlobal.OffscreenCanvas(w, h);
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  return c;
+}
+
+function getSprite(cache: Map<string, CachedSprite>, key: string, w: number, h: number, draw: (ctx: CanvasRenderingContext2D) => void): CachedSprite {
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const canvas = makeOffscreenCanvas(w, h);
+  // OffscreenCanvas getContext signature differs slightly.
+  const ctx = (canvas as any).getContext('2d') as CanvasRenderingContext2D | null;
+  if (ctx) draw(ctx);
+  const spr = { canvas, w, h };
+  cache.set(key, spr);
+  return spr;
+}
+
+function spawnBurstPooled(
+  out: Particle[],
+  pool: Particle[],
+  x: number,
+  y: number,
+  count: number,
+  speed: number,
+  life: number,
+  color: string,
+  size: number,
+  opts?: Partial<Pick<Particle, 'gravity' | 'friction' | 'type' | 'scaleDown'>>
+) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = speed * (0.4 + Math.random() * 0.6);
+    const l = life * (0.6 + Math.random() * 0.4);
+    const sz = size * (0.5 + Math.random() * 0.5);
+    const p = pool.length ? pool.pop()! : ({
+      x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 0, color: '', size: 1, gravity: 0, friction: 1, type: 'circle',
+    } as Particle);
+    p.x = x; p.y = y;
+    p.vx = Math.cos(a) * s;
+    p.vy = Math.sin(a) * s;
+    p.life = l; p.maxLife = l;
+    p.color = color;
+    p.size = sz;
+    p.gravity = opts?.gravity ?? 0;
+    p.friction = opts?.friction ?? 1;
+    p.type = opts?.type ?? 'circle';
+    p.scaleDown = opts?.scaleDown;
+    out.push(p);
+  }
+}
+
 function ShopItem({ title, desc, cost, icon, canAfford, onBuy }: {
   title: string; desc: string; cost: number; icon: ReactNode; canAfford: boolean; onBuy: () => void;
 }) {
@@ -544,7 +634,15 @@ function seededRandom(seed: number): number {
   return x - Math.floor(x);
 }
 
-function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number, vpH: number, t: number) {
+function drawWorld(
+  ctx: CanvasRenderingContext2D,
+  cam: CameraState,
+  vpW: number,
+  vpH: number,
+  t: number,
+  env: EnvObj[],
+  spriteCache: Map<string, CachedSprite>
+) {
   const viewLeft = cam.x - 100;
   const viewTop = cam.y - 100;
   const viewW = vpW / cam.zoom + 200;
@@ -561,7 +659,7 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
   ctx.fillRect(viewLeft, viewTop, viewW, viewH);
   ctx.strokeStyle = colorAlpha('#22c55e', 0.06);
   ctx.lineWidth = 1;
-  const gridSize = 200;
+  const gridSize = ENV_GRID;
   const startX = Math.floor(viewLeft / gridSize) * gridSize;
   const startY = Math.floor(viewTop / gridSize) * gridSize;
   for (let i = startX; i < viewLeft + viewW; i += gridSize) {
@@ -577,88 +675,98 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
     ctx.stroke();
   }
 
-  const now = Date.now();
-  // Subtle "wind" sway: deterministic based on time + per-object seed.
-  const windSkew = Math.sin(now / 1200) * 0.045;
-  ctx.shadowColor = 'rgba(0,0,0,0.3)';
-  ctx.shadowBlur = 10;
-  ctx.shadowOffsetX = 2;
-  ctx.shadowOffsetY = 4;
-
-  for (let gx = startX; gx < viewLeft + viewW + gridSize; gx += gridSize) {
-    for (let gy = startY; gy < viewTop + viewH + gridSize; gy += gridSize) {
-      const seed = gx * 7 + gy * 13;
-      const r = seededRandom(seed);
-      const rx = gx + r * gridSize * 0.8;
-      const ry = gy + seededRandom(seed + 1) * gridSize * 0.8;
-      // Slightly fuller environment: a bit more trees/bushes, still deterministic.
-      if (r < 0.15) {
-        ctx.save();
-        ctx.translate(rx, ry);
-        const sway = windSkew + Math.sin(t * 0.45 + seed) * 0.024 + seededRandom(seed + 2) * 0.02;
-        const treeScale = 1.28;
-        drawTreeIllustration(ctx, seed, treeScale, sway);
-        ctx.restore();
-      } else if (r < 0.27) {
-        ctx.save();
-        ctx.translate(rx, ry);
-        const sway = windSkew * 0.65 + Math.sin(t * 0.42 + seed * 1.3) * 0.026 + seededRandom(seed + 3) * 0.03;
-        const bushScale = 1.38;
-        drawBushIllustration(ctx, seed, bushScale, sway);
-        ctx.restore();
-      } else if (r < 0.31) {
-        // A few rocks to reduce empty gaps (very cheap).
-        ctx.save();
-        ctx.translate(rx, ry);
-        const s = 0.9 + seededRandom(seed + 5) * 0.9;
-        ctx.rotate(seededRandom(seed + 6) * 0.6 - 0.3);
-        ctx.globalAlpha = 0.8;
-        ctx.fillStyle = '#14532d';
-        ctx.beginPath();
-        ctx.ellipse(0, 10, 30 * s, 14 * s, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = 1;
-        const rock = ctx.createRadialGradient(-10, 2, 2, 0, 0, 22 * s);
-        rock.addColorStop(0, '#cbd5e1');
-        rock.addColorStop(0.5, '#94a3b8');
-        rock.addColorStop(1, '#334155');
-        ctx.fillStyle = rock;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, 22 * s, 16 * s, 0.2, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(0,0,0,0.2)';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.restore();
-      }
-    }
-  }
-
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
+  // Cached environment (trees/bushes/rocks): cull + stamp sprites.
+  drawEnvironmentCached(ctx, cam, viewLeft, viewTop, viewW, viewH, t, env, spriteCache);
 }
 
-function drawTreeIllustration(ctx: CanvasRenderingContext2D, seed: number, scale: number, sway: number) {
-  // Ground shadow
+// NOTE: Trees/bushes/rocks are now intended to be rendered from cached sprites (OffscreenCanvas)
+// for performance. The sprite-drawing helpers live below.
+
+function drawEnvironmentCached(
+  ctx: CanvasRenderingContext2D,
+  cam: CameraState,
+  viewLeft: number,
+  viewTop: number,
+  viewW: number,
+  viewH: number,
+  t: number,
+  env: EnvObj[],
+  spriteCache: Map<string, CachedSprite>
+) {
+  const margin = 220;
+  const left = viewLeft - margin;
+  const top = viewTop - margin;
+  const right = viewLeft + viewW + margin;
+  const bottom = viewTop + viewH + margin;
+
+  const wind = Math.sin(t * 0.35) * 0.03;
+
+  for (let i = 0; i < env.length; i++) {
+    const o = env[i];
+    if (o.x < left || o.x > right || o.y < top || o.y > bottom) continue;
+
+    if (o.type === 'tree') {
+      const scale = 1.28;
+      const sway = wind + Math.sin(t * 0.55 + o.seed) * 0.02;
+      const spr = getSprite(spriteCache, `tree:${o.variant}`, 220, 260, (c) => drawTreeSprite(c, o.variant));
+      drawGroundEllipseShadow(ctx, o.x, o.y + 70 * scale, 40 * scale, 14 * scale, 0.18);
+      ctx.save();
+      ctx.translate(o.x, o.y);
+      ctx.rotate(sway);
+      ctx.scale(scale, scale);
+      ctx.drawImage(spr.canvas as any, -spr.w / 2, -spr.h, spr.w, spr.h);
+      ctx.restore();
+    } else if (o.type === 'bush') {
+      const scale = 1.38;
+      const sway = wind * 0.6 + Math.sin(t * 0.5 + o.seed * 1.3) * 0.018;
+      const spr = getSprite(spriteCache, `bush:${o.variant}`, 200, 170, (c) => drawBushSprite(c, o.variant));
+      drawGroundEllipseShadow(ctx, o.x, o.y + 34 * scale, 42 * scale, 14 * scale, 0.18);
+      ctx.save();
+      ctx.translate(o.x, o.y);
+      ctx.rotate(sway);
+      ctx.scale(scale, scale);
+      ctx.drawImage(spr.canvas as any, -spr.w / 2, -spr.h, spr.w, spr.h);
+      ctx.restore();
+    } else {
+      const scale = 1.1;
+      const rot = (seededRandom(o.seed + 6) * 0.6 - 0.3);
+      const spr = getSprite(spriteCache, `rock:${o.variant}`, 130, 95, (c) => drawRockSprite(c, o.variant));
+      drawGroundEllipseShadow(ctx, o.x, o.y + 18 * scale, 30 * scale, 14 * scale, 0.14);
+      ctx.save();
+      ctx.translate(o.x, o.y);
+      ctx.rotate(rot);
+      ctx.scale(scale, scale);
+      ctx.globalAlpha = 0.95;
+      ctx.drawImage(spr.canvas as any, -spr.w / 2, -spr.h / 2, spr.w, spr.h);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+  }
+}
+
+function drawGroundEllipseShadow(ctx: CanvasRenderingContext2D, x: number, y: number, rx: number, ry: number, alpha: number) {
   ctx.save();
-  ctx.globalAlpha = 0.2;
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = 'rgba(0,0,0,1)';
   ctx.beginPath();
-  ctx.ellipse(0, 58 * scale, 40 * scale, 14 * scale, 0, 0, Math.PI * 2);
+  ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+}
 
-  // Trunk with taper + subtle highlight
+function drawTreeSprite(ctx: CanvasRenderingContext2D, variant: number) {
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   ctx.save();
-  ctx.rotate(sway * 0.35);
-  const trunkH = 64 * scale;
-  const trunkWBottom = 22 * scale;
-  const trunkWTop = 14 * scale;
+  // Anchor: bottom-center of sprite
+  ctx.translate(ctx.canvas.width / 2, ctx.canvas.height - 10);
+  const seed = 1000 + variant * 777;
+  const trunkH = 64;
+  const trunkWBottom = 22;
+  const trunkWTop = 14;
   const trunkGrad = ctx.createLinearGradient(-trunkWBottom / 2, 0, trunkWBottom / 2, 0);
   trunkGrad.addColorStop(0, '#2d1a0a');
   trunkGrad.addColorStop(0.55, '#3a210d');
-  trunkGrad.addColorStop(1, '#5a3417'); // highlight side
+  trunkGrad.addColorStop(1, '#5a3417');
   ctx.fillStyle = trunkGrad;
   ctx.beginPath();
   ctx.moveTo(-trunkWBottom / 2, 0);
@@ -667,57 +775,17 @@ function drawTreeIllustration(ctx: CanvasRenderingContext2D, seed: number, scale
   ctx.lineTo(trunkWBottom / 2, 0);
   ctx.closePath();
   ctx.fill();
-  ctx.restore();
 
-  // Canopy: fluffy overlapping circles with shade gradient (dark bottom -> light top)
-  ctx.save();
-  ctx.rotate(sway);
   const baseY = -trunkH;
-  const blobs = 8;
+  const blobs = 9;
   for (let i = 0; i < blobs; i++) {
     const rr = seededRandom(seed + i * 17);
     const rr2 = seededRandom(seed + i * 17 + 9);
-    const ox = (rr - 0.5) * 64 * scale;
-    const oy = baseY + (rr2 - 0.5) * 42 * scale - 18 * scale;
-    const r = (18 + rr * 18) * scale;
-    const shade = rr2; // 0..1
+    const ox = (rr - 0.5) * 64;
+    const oy = baseY + (rr2 - 0.5) * 42 - 18;
+    const r = (18 + rr * 18);
+    const shade = rr2;
     const col = shade < 0.45 ? '#0d2818' : shade < 0.7 ? '#14532d' : '#22c55e';
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    ctx.arc(ox, oy, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  // Top highlight puff
-  ctx.globalAlpha = 0.18;
-  ctx.fillStyle = '#bbf7d0';
-  ctx.beginPath();
-  ctx.ellipse(-14 * scale, baseY - 44 * scale, 26 * scale, 18 * scale, -0.35, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalAlpha = 1;
-  ctx.restore();
-}
-
-function drawBushIllustration(ctx: CanvasRenderingContext2D, seed: number, scale: number, sway: number) {
-  // Ground shadow
-  ctx.save();
-  ctx.globalAlpha = 0.2;
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  ctx.beginPath();
-  ctx.ellipse(0, 34 * scale, 42 * scale, 14 * scale, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  ctx.save();
-  ctx.rotate(sway);
-  const blobs = 9;
-  for (let i = 0; i < blobs; i++) {
-    const rr = seededRandom(seed + i * 13);
-    const rr2 = seededRandom(seed + i * 13 + 5);
-    const ox = (rr - 0.5) * 70 * scale;
-    const oy = (rr2 - 0.5) * 36 * scale - 8 * scale;
-    const r = (14 + rr * 16) * scale;
-    // darker lower blobs, lighter upper blobs
-    const col = (oy > 0) ? '#0d2818' : (oy > -18 * scale) ? '#14532d' : '#22c55e';
     ctx.fillStyle = col;
     ctx.beginPath();
     ctx.arc(ox, oy, r, 0, Math.PI * 2);
@@ -726,9 +794,56 @@ function drawBushIllustration(ctx: CanvasRenderingContext2D, seed: number, scale
   ctx.globalAlpha = 0.16;
   ctx.fillStyle = '#bbf7d0';
   ctx.beginPath();
-  ctx.ellipse(-18 * scale, -26 * scale, 24 * scale, 16 * scale, -0.35, 0, Math.PI * 2);
+  ctx.ellipse(-14, baseY - 44, 26, 18, -0.35, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawBushSprite(ctx: CanvasRenderingContext2D, variant: number) {
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.save();
+  ctx.translate(ctx.canvas.width / 2, ctx.canvas.height - 10);
+  const seed = 2000 + variant * 631;
+  const blobs = 11;
+  for (let i = 0; i < blobs; i++) {
+    const rr = seededRandom(seed + i * 13);
+    const rr2 = seededRandom(seed + i * 13 + 5);
+    const ox = (rr - 0.5) * 70;
+    const oy = (rr2 - 0.5) * 36 - 8;
+    const r = (14 + rr * 16);
+    const col = (oy > 0) ? '#0d2818' : (oy > -18) ? '#14532d' : '#22c55e';
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(ox, oy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 0.14;
+  ctx.fillStyle = '#bbf7d0';
+  ctx.beginPath();
+  ctx.ellipse(-18, -26, 24, 16, -0.35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawRockSprite(ctx: CanvasRenderingContext2D, variant: number) {
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.save();
+  ctx.translate(ctx.canvas.width / 2, ctx.canvas.height / 2);
+  const seed = 3000 + variant * 911;
+  const s = 0.9 + seededRandom(seed + 5) * 0.9;
+  const rock = ctx.createRadialGradient(-10, 2, 2, 0, 0, 22 * s);
+  rock.addColorStop(0, '#cbd5e1');
+  rock.addColorStop(0.5, '#94a3b8');
+  rock.addColorStop(1, '#334155');
+  ctx.fillStyle = rock;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 22 * s, 16 * s, 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -823,21 +938,16 @@ function drawCollectiblesWorld(
     ctx.fill();
     ctx.restore();
 
-    ctx.shadowColor = type === 'money_bills' ? '#22c55e' : '#fbbf24';
-    ctx.shadowBlur = 18;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
+    // No shadowBlur (performance). Use cheap radial-glow instead.
+    const glow = type === 'money_bills' ? '#22c55e' : '#fbbf24';
+    drawGlow(ctx, 0, 0, type === 'treasure_chest' ? 44 : 34, glow, type === 'treasure_chest' ? 0.22 : 0.14);
 
     // Constraint: Canvas-only (no external images). Always render procedurally.
     if (type === 'treasure_chest') {
       const w = 56; const h = 40;
 
-      // Strong gold aura to signal "big prize"
-      ctx.save();
-      ctx.shadowColor = '#fbbf24';
-      ctx.shadowBlur = 26;
-      ctx.globalAlpha = 0.9;
-      ctx.restore();
+      // Extra aura layer for the most valuable item (still cheap: gradients).
+      drawGlow(ctx, 0, -6, 58, '#fbbf24', 0.18);
 
       const bg = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
       bg.addColorStop(0, '#fde68a');
@@ -974,15 +1084,25 @@ function drawPlayers(
   vel: { x: number; y: number },
   myDir: FacingDir,
   animators: Map<string, ProceduralPlayer>,
-  prevWorldPos: Map<string, { x: number; y: number }>
+  prevWorldPos: Map<string, { x: number; y: number }>,
+  cam: CameraState,
+  vpW: number,
+  vpH: number
 ) {
   const list = Object.values(players || {}).sort((a: any, b: any) => (a.id || '').localeCompare(b.id || ''));
   const now = performance.now();
   const maxDt = Math.max(1 / 120, Math.min(1 / 15, dt));
+  // Viewport culling: skip players outside view + buffer.
+  const margin = 220;
+  const left = cam.x - margin;
+  const top = cam.y - margin;
+  const right = cam.x + vpW / cam.zoom + margin;
+  const bottom = cam.y + vpH / cam.zoom + margin;
   list.forEach((p: any, idx: number) => {
     if (!p?.id) return;
     const px = p.id === playerId ? myPos.x : p.x;
     const py = p.id === playerId ? myPos.y : p.y;
+    if (px < left || px > right || py < top || py > bottom) return;
     const colors = PLAYER_COLORS[idx % PLAYER_COLORS.length];
 
     // Derive velocity from last known positions for remote players (cheap + good enough).
@@ -1044,14 +1164,19 @@ function tickDustTrail(
 function tickFloatingTexts(
   ctx: CanvasRenderingContext2D,
   list: { x: number; y: number; text: string; life: number; maxLife: number; vy: number; color: string }[],
+  pool: { x: number; y: number; text: string; life: number; maxLife: number; vy: number; color: string }[],
   dt: number
 ) {
+  // In-place update + swap-remove + pooling (no splice -> less GC).
   for (let i = list.length - 1; i >= 0; i--) {
     const ft = list[i];
     ft.life -= dt;
     ft.y -= ft.vy * dt;
     if (ft.life <= 0) {
-      list.splice(i, 1);
+      const dead = list[i];
+      list[i] = list[list.length - 1];
+      list.pop();
+      pool.push(dead);
       continue;
     }
     const alpha = Math.max(0, ft.life / ft.maxLife);

@@ -57,6 +57,7 @@ export function QuestionPanel({
   const didInitForOpenRef = useRef(false);
   const setCountRef = useRef(0);
   const [debugSetInfo, setDebugSetInfo] = useState<{ count: number; reason: string } | null>(null);
+  const autoNextTimeoutRef = useRef<number | null>(null);
 
   const cloneQuestion = useCallback((q: Question | null): Question | null => {
     if (!q) return null;
@@ -92,6 +93,10 @@ export function QuestionPanel({
   useEffect(() => {
     if (!isOpen) {
       didInitForOpenRef.current = false;
+      if (autoNextTimeoutRef.current !== null) {
+        window.clearTimeout(autoNextTimeoutRef.current);
+        autoNextTimeoutRef.current = null;
+      }
       return;
     }
     if (didInitForOpenRef.current) return;
@@ -107,6 +112,15 @@ export function QuestionPanel({
     setShowFloat(false);
     setQuestion('init');
   }, [isOpen, sessionId]); // strict: only re-init on explicit open/session change
+
+  useEffect(() => {
+    return () => {
+      if (autoNextTimeoutRef.current !== null) {
+        window.clearTimeout(autoNextTimeoutRef.current);
+        autoNextTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     // Never set state on every render. Only unlock when we were locked.
@@ -174,11 +188,6 @@ export function QuestionPanel({
     }
   }, []);
 
-  const next = useCallback(() => {
-    setFeedback(null);
-    setQuestion('next-button');
-  }, [setQuestion]);
-
   const answer = (i: number) => {
     if (feedback || locked || disabled || !questions.length) return;
     // Prevent double-firing from pointer+click (or touch) events.
@@ -192,14 +201,26 @@ export function QuestionPanel({
       setShowFloat(true);
       spawnConfetti();
       onCorrect();
-      // Do NOT auto-advance. User explicitly clicks "next question".
     } else {
       setFeedback('wrong');
       onWrong?.();
       setLocked(true);
       setLockTime(penaltySeconds);
-      // Do NOT auto-advance. User explicitly clicks "next question".
     }
+
+    // Auto-advance (event-driven): answer -> feedback -> next question after 1200ms.
+    if (autoNextTimeoutRef.current !== null) {
+      window.clearTimeout(autoNextTimeoutRef.current);
+      autoNextTimeoutRef.current = null;
+    }
+    autoNextTimeoutRef.current = window.setTimeout(() => {
+      autoNextTimeoutRef.current = null;
+      setShowFloat(false);
+      setLocked(false);
+      setLockTime(0);
+      setFeedback(null);
+      setQuestion('auto-advance');
+    }, 1200);
   };
 
   if (!questions.length) return <div className="p-6 text-center text-slate-300">אין שאלות זמינות</div>;
@@ -265,11 +286,6 @@ export function QuestionPanel({
           feedback === 'correct' ? 'bg-emerald-500/5 -m-2 p-2' : ''
         }`}
       >
-        {process.env.NODE_ENV !== 'production' && debugSetInfo && (
-          <div className="mb-2 text-[10px] text-slate-500 text-center">
-            Q-set #{debugSetInfo.count} ({debugSetInfo.reason})
-          </div>
-        )}
         <h3
           className={`font-bold text-center mb-4 text-white drop-shadow-sm ${compact ? 'text-lg' : 'text-xl'}`}
           style={{
@@ -315,31 +331,6 @@ export function QuestionPanel({
               </motion.button>
             );
           })}
-        </div>
-
-        <div className="mt-4 flex justify-center">
-          <motion.button
-            whileTap={feedback || locked ? { scale: 0.96 } : {}}
-            disabled={!feedback || locked}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onPointerUp={(e) => {
-              if (e.pointerType !== 'mouse' && e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
-              setShowFloat(false);
-              setLocked(false);
-              setLockTime(0);
-              next();
-            }}
-            className={`px-5 py-2.5 rounded-xl font-bold transition-all border ${
-              !feedback || locked
-                ? 'bg-slate-800/50 text-slate-500 border-slate-700 cursor-not-allowed'
-                : 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-400/40 shadow-lg'
-            }`}
-          >
-            שאלה הבאה
-          </motion.button>
         </div>
       </motion.div>
     </div>

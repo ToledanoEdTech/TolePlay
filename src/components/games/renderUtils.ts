@@ -91,6 +91,51 @@ export function tickParticles(ctx: CanvasRenderingContext2D, particles: Particle
   });
 }
 
+/**
+ * High-performance particle tick:
+ * - Updates + draws in-place
+ * - Compacts array without allocating a new one (reduces GC spikes)
+ * - Uses delta-time (dt) rather than a fixed 1/60
+ */
+export function tickParticlesInPlace(ctx: CanvasRenderingContext2D, particles: Particle[], dt: number): void {
+  const step = typeof dt === 'number' && dt > 0 ? Math.min(0.05, dt) : 1 / 60;
+  let write = 0;
+  for (let read = 0; read < particles.length; read++) {
+    const p = particles[read];
+    p.x += p.vx * step * 60;
+    p.y += p.vy * step * 60;
+    p.vy += p.gravity * step * 60;
+    const f = Math.pow(p.friction, step * 60);
+    p.vx *= f; p.vy *= f;
+    p.life -= step;
+    if (p.life <= 0) continue;
+
+    const alpha = Math.max(0, p.life / p.maxLife);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+
+    if (p.type === 'spark') {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(Math.atan2(p.vy, p.vx));
+      ctx.fillRect(-p.size * 2, -p.size * 0.4, p.size * 4, p.size * 0.8);
+      ctx.restore();
+    } else if (p.type === 'square') {
+      const s = p.size * alpha;
+      ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+    } else {
+      const r = p.scaleDown ? p.size * alpha : Math.max(0.2, p.size * alpha);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    particles[write++] = p;
+  }
+  particles.length = write;
+}
+
 // ── Screen shake ──
 
 export interface ShakeState {
