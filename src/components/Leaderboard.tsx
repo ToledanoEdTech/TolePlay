@@ -104,8 +104,8 @@ export function Leaderboard({ mode, players, localPlayerId, className }: Props) 
       className={className}
       style={{
         position: 'absolute',
-        // Global safe offset so we never overlap minimaps/HP bars in top corners
-        top: 'max(150px, 15vh)',
+        // Below minimap on all screens (Zombie minimap ~180–200px from top)
+        top: 'max(220px, 18vh)',
         right: 'calc(env(safe-area-inset-right, 0px) + 0.65rem)',
         width: 'clamp(10.5rem, 22vw, 15rem)',
         maxHeight: '36vh',
@@ -118,7 +118,7 @@ export function Leaderboard({ mode, players, localPlayerId, className }: Props) 
         {`
           @media (max-width: 768px) {
             .tp-leaderboard {
-              top: max(150px, 15vh) !important;
+              top: max(220px, 18vh) !important;
               right: calc(env(safe-area-inset-right, 0px) + 0.5rem) !important;
               width: min(12.5rem, 46vw) !important;
               max-height: 28vh !important;

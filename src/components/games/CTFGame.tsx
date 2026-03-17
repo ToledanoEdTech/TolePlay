@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Trophy, Heart, ShieldAlert, BookOpen, CheckCircle, XCircle, ShoppingCart, Coins } from 'lucide-react';
 import { QuestionPanel } from '../QuestionPanel';
 import { socket } from '../../socket';
+import { VirtualJoystick } from '../../engine/VirtualJoystick';
 import {
   WORLD_W,
   WORLD_H,
@@ -551,10 +552,13 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
             });
             lastSendRef.current = now;
           }
-          if (i.shoot && (myP?.modeState?.ammo ?? 0) > 0 && now - lastShootRef.current > 100) {
+          const weaponId = myP.modeState?.currentWeapon || 'pistol';
+          const fireRateSec = CTF_WEAPONS[weaponId]?.fireRate ?? 0.35;
+          const fireRateMs = Math.max(50, fireRateSec * 1000);
+          if (i.shoot && (myP?.modeState?.ammo ?? 0) > 0 && now - lastShootRef.current > fireRateMs) {
             socket.emit('action', { code: roomCode, playerId, actionType: 'shoot', aimAngle: i.angle });
             lastShootRef.current = now;
-            const wId = myP.modeState?.currentWeapon || 'pistol';
+            const wId = weaponId;
             ctfSounds.playShoot(wId);
             if (myP.modeState.ammo === 1) ctfSounds.playEmpty();
           } else if (i.shoot && (myP?.modeState?.ammo ?? 0) <= 0 && now - lastShootRef.current > 500) {
@@ -603,15 +607,22 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
         cam.shake -= dt * 40;
       }
 
+      const isMobileView = typeof window !== 'undefined' && window.innerWidth < 768;
+      const viewScale = isMobileView ? 0.72 : 1;
+      const viewW = canvas.width / viewScale;
+      const viewH = canvas.height / viewScale;
+
       ctx.fillStyle = '#1e3f20';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.save();
-      ctx.translate(canvas.width / 2 - cam.x + shakeX, canvas.height / 2 - cam.y + shakeY);
+      ctx.translate(canvas.width / 2 + shakeX, canvas.height / 2 + shakeY);
+      ctx.scale(viewScale, viewScale);
+      ctx.translate(-cam.x, -cam.y);
 
-      const vLeft = cam.x - canvas.width / 2 - VIEWPORT_BUFFER;
-      const vRight = cam.x + canvas.width / 2 + VIEWPORT_BUFFER;
-      const vTop = cam.y - canvas.height / 2 - VIEWPORT_BUFFER;
-      const vBottom = cam.y + canvas.height / 2 + VIEWPORT_BUFFER;
+      const vLeft = cam.x - viewW / 2 - VIEWPORT_BUFFER;
+      const vRight = cam.x + viewW / 2 + VIEWPORT_BUFFER;
+      const vTop = cam.y - viewH / 2 - VIEWPORT_BUFFER;
+      const vBottom = cam.y + viewH / 2 + VIEWPORT_BUFFER;
 
       if (staticMapDirtyRef.current && gs) {
         const off = document.createElement('canvas');
@@ -811,7 +822,7 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
           const py = p.id === playerId ? visualPosRef.current.y : (st?.renderY ?? p.y);
           if (px < vLeft - 80 || px > vRight + 80 || py < vTop - 80 || py > vBottom + 80) return;
 
-          const angle = p.id === playerId ? (p.modeState?.angle ?? 0) : (st?.renderAngle ?? (p.modeState?.angle ?? 0));
+          const angle = p.id === playerId ? inputRef.current.angle : (st?.renderAngle ?? (p.modeState?.angle ?? 0));
           const trail = trailRef.current[p.id] || [];
           const vel = trail.length >= 2 ? Math.hypot(trail[trail.length - 1].x - trail[0].x, trail[trail.length - 1].y - trail[0].y) / Math.max(1, trail.length) : 0;
 
@@ -1021,19 +1032,11 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
   const handleJoystickEnd = () => {
     joystickRef.current = { dx: 0, dy: 0 };
   };
-  const handleShootTouchStart = (e: React.TouchEvent) => {
-    e.preventDefault();
-    inputRef.current.shoot = true;
-  };
-  const handleShootTouchEnd = (e: React.TouchEvent) => {
-    e.preventDefault();
-    inputRef.current.shoot = false;
-  };
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-slate-950 select-none font-sans ctf-game-container" dir="rtl" onContextMenu={(e) => e.preventDefault()}>
       <canvas ref={canvasRef} className="absolute inset-0 z-0 w-full h-full" style={{ width: '100%', height: '100%' }} />
-      {/* Mobile: virtual joystick (bottom-left) and shoot button (bottom-right) — visible only @ max-width: 768px */}
+      {/* Mobile: left = move, right = twin-stick aim + shoot (visible only @ max-width: 768px) */}
       <div
         ref={joystickBaseRef}
         className="md:hidden fixed bottom-6 left-6 w-28 h-28 rounded-full bg-white/20 border-2 border-white/50 touch-none flex items-center justify-center z-30 cursor-pointer select-none"
@@ -1045,45 +1048,75 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
       >
         <div className="w-10 h-10 rounded-full bg-white/50" />
       </div>
-      <div
-        className="md:hidden fixed bottom-6 right-6 w-20 h-20 rounded-full bg-red-500/80 border-2 border-white flex items-center justify-center text-3xl touch-none z-30 cursor-pointer select-none"
-        style={{ touchAction: 'none' }}
-        onTouchStart={handleShootTouchStart}
-        onTouchEnd={handleShootTouchEnd}
-        onTouchCancel={handleShootTouchEnd}
-      >
-        🔫
+      <div className="md:hidden fixed bottom-6 right-6 z-30 pointer-events-auto" style={{ touchAction: 'none' }}>
+        <VirtualJoystick
+          size={100}
+          teamColor={myPlayer?.modeState?.team === 'red' ? 'rgba(239,68,68,0.5)' : 'rgba(59,130,246,0.5)'}
+          onMove={(dx, dy) => {
+            if (dx !== 0 || dy !== 0) inputRef.current.angle = Math.atan2(dy, dx);
+            inputRef.current.shoot = true;
+          }}
+          onRelease={() => {
+            inputRef.current.shoot = false;
+          }}
+        />
       </div>
 
-      {/* HUD */}
-      <div className="absolute top-0 left-0 right-0 p-4 z-10 flex justify-between items-start pointer-events-none">
-        <div className="flex items-center gap-8 bg-slate-900/90 backdrop-blur-md border-b-2 border-slate-700/50 px-8 py-4 rounded-b-3xl shadow-2xl pointer-events-auto transform -translate-y-4 hover:translate-y-0 transition-transform">
+      {/* HUD – compact on mobile via ctf-hud-* classes */}
+      <style>{`
+        @media (max-width: 768px) {
+          .ctf-hud-bar {
+            flex-wrap: wrap;
+            gap: 0.35rem !important;
+            padding: 0.35rem 0.5rem !important;
+            padding-left: env(safe-area-inset-left);
+            padding-right: env(safe-area-inset-right);
+            border-radius: 0 0 0.75rem 0.75rem;
+          }
+          .ctf-hud-bar .ctf-score-label { font-size: 0.6rem !important; }
+          .ctf-hud-bar .ctf-score-value { font-size: 1.25rem !important; }
+          .ctf-hud-vs { font-size: 0.8rem !important; }
+          .ctf-hud-player-panel {
+            width: 100% !important;
+            max-width: 11rem;
+            padding: 0.4rem 0.5rem !important;
+            gap: 0.25rem !important;
+          }
+          .ctf-hud-player-panel .ctf-player-name { font-size: 0.75rem !important; }
+          .ctf-hud-player-panel .ctf-ammo-label, .ctf-hud-player-panel .ctf-weapon-label { font-size: 0.6rem !important; }
+          .ctf-hud-player-panel .ctf-ammo-value { font-size: 0.9rem !important; }
+          .ctf-hud-player-panel .ctf-weapon-value { font-size: 0.7rem !important; }
+          .ctf-hud-buttons .ctf-hud-btn { padding: 0.4rem 0.5rem !important; font-size: 0.7rem !important; }
+        }
+      `}</style>
+      <div className="absolute top-0 left-0 right-0 p-2 md:p-4 z-10 flex flex-wrap justify-between items-start gap-2 pointer-events-none ctf-hud-root">
+        <div className="ctf-hud-bar flex items-center gap-4 md:gap-8 bg-slate-900/90 backdrop-blur-md border-b-2 border-slate-700/50 px-4 md:px-8 py-2 md:py-4 rounded-b-3xl shadow-2xl pointer-events-auto transform -translate-y-4 hover:translate-y-0 transition-transform">
           <div className="flex flex-col items-center">
-            <span className="text-blue-400 font-bold text-sm tracking-widest uppercase">צוות כחול</span>
-            <span className="text-5xl font-black text-white drop-shadow-md">{blueScore}</span>
+            <span className="ctf-score-label text-blue-400 font-bold text-sm tracking-widest uppercase">צוות כחול</span>
+            <span className="ctf-score-value text-3xl md:text-5xl font-black text-white drop-shadow-md">{blueScore}</span>
           </div>
-          <div className="text-slate-600 font-black text-3xl italic">VS</div>
+          <div className="ctf-hud-vs text-slate-600 font-black text-xl md:text-3xl italic">VS</div>
           <div className="flex flex-col items-center">
-            <span className="text-red-400 font-bold text-sm tracking-widest uppercase">צוות אדום</span>
-            <span className="text-5xl font-black text-white drop-shadow-md">{redScore}</span>
+            <span className="ctf-score-label text-red-400 font-bold text-sm tracking-widest uppercase">צוות אדום</span>
+            <span className="ctf-score-value text-3xl md:text-5xl font-black text-white drop-shadow-md">{redScore}</span>
           </div>
         </div>
 
         {myPlayer && (
-          <div className="flex flex-col gap-3 items-end pointer-events-auto w-72">
-            <div className="bg-slate-900/90 backdrop-blur-md border border-slate-700/50 px-5 py-2 rounded-2xl flex flex-col w-full shadow-lg">
+          <div className="ctf-hud-player-panel flex flex-col gap-2 md:gap-3 items-end pointer-events-auto w-56 md:w-72">
+            <div className="bg-slate-900/90 backdrop-blur-md border border-slate-700/50 px-4 md:px-5 py-2 rounded-2xl flex flex-col w-full shadow-lg">
               <div className="flex items-center justify-between border-b border-slate-700 pb-2 mb-2">
                 <div className="flex items-center gap-2">
                   <div className={`w-3 h-3 rounded-full ${team === 'red' ? 'bg-red-500' : 'bg-blue-500'}`} />
-                  <span className="text-white font-bold text-lg">{myPlayer.name}</span>
+                  <span className="ctf-player-name text-white font-bold text-base md:text-lg">{myPlayer.name}</span>
                 </div>
-                <div className="flex items-center gap-1 text-yellow-400 font-black text-xl">
-                  {myPlayer.modeState?.coins ?? 0} <Coins className="w-5 h-5" />
+                <div className="flex items-center gap-1 text-yellow-400 font-black text-base md:text-xl">
+                  {myPlayer.modeState?.coins ?? 0} <Coins className="w-4 h-4 md:w-5 md:h-5" />
                 </div>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-400 text-sm font-bold">תחמושת:</span>
-                <div className="font-mono font-black text-xl">
+                <span className="ctf-ammo-label text-slate-400 text-sm font-bold">תחמושת:</span>
+                <div className="ctf-ammo-value font-mono font-black text-lg md:text-xl">
                   <span className={(myPlayer.modeState?.ammo ?? 0) === 0 ? 'text-red-500 animate-pulse' : 'text-white'}>
                     {myPlayer.modeState?.ammo ?? 0}
                   </span>
@@ -1091,8 +1124,8 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
                 </div>
               </div>
               <div className="flex items-center justify-between mt-1">
-                <span className="text-slate-400 text-sm font-bold">נשק:</span>
-                <span className="text-emerald-400 font-bold" style={{ color: CTF_WEAPONS[myPlayer.modeState?.currentWeapon || 'pistol']?.color }}>
+                <span className="ctf-weapon-label text-slate-400 text-sm font-bold">נשק:</span>
+                <span className="ctf-weapon-value text-emerald-400 font-bold text-sm md:text-base" style={{ color: CTF_WEAPONS[myPlayer.modeState?.currentWeapon || 'pistol']?.color }}>
                   {CTF_WEAPONS[myPlayer.modeState?.currentWeapon || 'pistol']?.name}
                 </span>
               </div>
@@ -1106,19 +1139,19 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
                 />
               </div>
             </div>
-            <div className="flex gap-2 w-full mt-2">
+            <div className="ctf-hud-buttons flex gap-2 w-full mt-2">
               <button
                 onClick={openTrivia}
-                className="flex-1 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-slate-900 font-black py-3 rounded-2xl flex items-center justify-center gap-2 shadow-lg hover:scale-105 transition-transform"
+                className="ctf-hud-btn flex-1 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-slate-900 font-black py-2 md:py-3 rounded-xl md:rounded-2xl flex items-center justify-center gap-1.5 md:gap-2 shadow-lg hover:scale-105 transition-transform text-sm md:text-base"
               >
-                <BookOpen className="w-5 h-5" />
+                <BookOpen className="w-4 h-4 md:w-5 md:h-5" />
                 +תחמושת
               </button>
               <button
                 onClick={toggleShop}
-                className="flex-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white font-black py-3 rounded-2xl flex items-center justify-center gap-2 shadow-lg hover:scale-105 transition-transform"
+                className="ctf-hud-btn flex-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white font-black py-2 md:py-3 rounded-xl md:rounded-2xl flex items-center justify-center gap-1.5 md:gap-2 shadow-lg hover:scale-105 transition-transform text-sm md:text-base"
               >
-                <ShoppingCart className="w-5 h-5" />
+                <ShoppingCart className="w-4 h-4 md:w-5 md:h-5" />
                 חנות
               </button>
             </div>

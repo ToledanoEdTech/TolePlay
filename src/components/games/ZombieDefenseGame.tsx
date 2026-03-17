@@ -1134,17 +1134,32 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         </div>
       </div>
 
-      {/* Out of ammo banner – below HUD, not overlapping */}
+      {/* Out of ammo banner – below HUD; on mobile kept small so it doesn't cover Base Health */}
+      <style>{`
+        @media (max-width: 768px) {
+          .zombie-out-of-ammo-banner {
+            top: 4.5rem !important;
+            left: 0.4rem !important;
+            right: 0.4rem !important;
+            padding: 0.35rem 0.5rem !important;
+            font-size: 0.7rem !important;
+            z-index: 15 !important;
+            max-width: 85vw;
+          }
+          .zombie-out-of-ammo-banner .zombie-ammo-title { font-size: 0.7rem !important; font-weight: 700; }
+          .zombie-out-of-ammo-banner .zombie-ammo-hint { font-size: 0.6rem !important; margin-top: 0.15rem; }
+        }
+      `}</style>
       <AnimatePresence>
         {showOutOfAmmo && (
           <motion.div
             initial={{ y: -50, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: -50, opacity: 0 }}
-            className="absolute top-16 min-[480px]:top-14 left-2 right-2 min-[480px]:left-1/2 min-[480px]:right-auto min-[480px]:-translate-x-1/2 min-[480px]:max-w-sm z-30 bg-amber-900/95 backdrop-blur px-3 py-2 min-[480px]:px-4 min-[480px]:py-3 rounded-xl border-2 border-amber-500/60 shadow-xl pointer-events-none"
+            className="zombie-out-of-ammo-banner absolute top-16 min-[480px]:top-14 left-2 right-2 min-[480px]:left-1/2 min-[480px]:right-auto min-[480px]:-translate-x-1/2 min-[480px]:max-w-sm z-30 bg-amber-900/95 backdrop-blur px-3 py-2 min-[480px]:px-4 min-[480px]:py-3 rounded-xl border-2 border-amber-500/60 shadow-xl pointer-events-none"
           >
-            <p className="text-amber-100 font-bold text-center text-sm min-[480px]:text-base">💥 נגמרה התחמושת!</p>
-            <p className="text-amber-200/90 text-xs min-[480px]:text-sm text-center mt-0.5 min-[480px]:mt-1">לחץ על &quot;שאלות&quot; וענה נכון כדי למלא תחמושת (+10)</p>
+            <p className="zombie-ammo-title text-amber-100 font-bold text-center text-sm min-[480px]:text-base">💥 נגמרה התחמושת!</p>
+            <p className="zombie-ammo-hint text-amber-200/90 text-xs min-[480px]:text-sm text-center mt-0.5 min-[480px]:mt-1">לחץ על &quot;שאלות&quot; וענה נכון כדי למלא תחמושת (+10)</p>
           </motion.div>
         )}
       </AnimatePresence>
