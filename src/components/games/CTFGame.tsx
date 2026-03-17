@@ -955,25 +955,27 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
 
       ctx.restore();
 
-      // Minimap
-      const mapW = 240;
-      const mapH = 144;
-      const mapX = canvas.width - mapW - 20;
-      const mapY = canvas.height - mapH - 20;
+      // Minimap — on mobile: smaller and centered between the two joysticks
+      const mobileMap = isMobileView;
+      const mapW = mobileMap ? 140 : 240;
+      const mapH = mobileMap ? 84 : 144;
+      const mapX = mobileMap ? (canvas.width - mapW) / 2 : canvas.width - mapW - 20;
+      const mapY = mobileMap ? canvas.height - mapH - 118 : canvas.height - mapH - 20;
+      const mapR = mobileMap ? mapW / 240 : 1;
       ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
       ctx.beginPath();
-      (ctx as any).roundRect?.(mapX, mapY, mapW, mapH, 12);
+      (ctx as any).roundRect?.(mapX, mapY, mapW, mapH, 12 * mapR);
       ctx.fill();
       ctx.strokeStyle = '#475569';
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 3 * mapR;
       ctx.stroke();
       ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
       ctx.beginPath();
-      ctx.arc(mapX + (RED_BASE_X / WORLD_W) * mapW, mapY + (RED_BASE_Y / WORLD_H) * mapH, 8, 0, Math.PI * 2);
+      ctx.arc(mapX + (RED_BASE_X / WORLD_W) * mapW, mapY + (RED_BASE_Y / WORLD_H) * mapH, 8 * mapR, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = 'rgba(59, 130, 246, 0.3)';
       ctx.beginPath();
-      ctx.arc(mapX + (BLUE_BASE_X / WORLD_W) * mapW, mapY + (BLUE_BASE_Y / WORLD_H) * mapH, 8, 0, Math.PI * 2);
+      ctx.arc(mapX + (BLUE_BASE_X / WORLD_W) * mapW, mapY + (BLUE_BASE_Y / WORLD_H) * mapH, 8 * mapR, 0, Math.PI * 2);
       ctx.fill();
       playersList.forEach((p: any) => {
         if (p.modeState?.dead) return;
@@ -982,17 +984,18 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
         const py = mapY + (p.id === playerId ? visualPosRef.current.y : (st?.renderY ?? p.y)) / WORLD_H * mapH;
         ctx.fillStyle = p.id === playerId ? '#ffffff' : (p.modeState?.team === 'red' ? '#ef4444' : '#3b82f6');
         ctx.beginPath();
-        ctx.arc(px, py, p.id === playerId ? 4 : 2.5, 0, Math.PI * 2);
+        ctx.arc(px, py, (p.id === playerId ? 4 : 2.5) * mapR, 0, Math.PI * 2);
         ctx.fill();
       });
       const drawMapFlag = (f: CTFFlagState, c: string) => {
         const px = mapX + (f.x / WORLD_W) * mapW;
         const py = mapY + (f.y / WORLD_H) * mapH;
+        const s = 3 * mapR;
         ctx.fillStyle = c;
-        ctx.fillRect(px - 3, py - 3, 6, 6);
+        ctx.fillRect(px - s, py - s, 2 * s, 2 * s);
         ctx.strokeStyle = 'white';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(px - 3, py - 3, 6, 6);
+        ctx.lineWidth = 1.5 * mapR;
+        ctx.strokeRect(px - s, py - s, 2 * s, 2 * s);
       };
       drawMapFlag(gs.redFlag || { x: RED_BASE_X, y: RED_BASE_Y, team: 'red', carrier: null }, '#ef4444');
       drawMapFlag(gs.blueFlag || { x: BLUE_BASE_X, y: BLUE_BASE_Y, team: 'blue', carrier: null }, '#3b82f6');
