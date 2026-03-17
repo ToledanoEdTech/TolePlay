@@ -17,6 +17,12 @@ export interface ProceduralPlayerState {
   /** Smoothed velocity for stable animation timing. */
   vx: number;
   vy: number;
+  /** Smoothed body lean (radians). */
+  lean: number;
+  /** Smoothed vertical offset for body bobbing. */
+  bob: number;
+  /** Smoothed limb swing value (-1..1-ish). */
+  swing: number;
 }
 
 /**
@@ -35,6 +41,9 @@ export class ProceduralPlayer {
     phase: 0,
     vx: 0,
     vy: 0,
+    lean: 0,
+    bob: 0,
+    swing: 0,
   };
 
   update(dt: number, vx: number, vy: number) {
@@ -54,15 +63,34 @@ export class ProceduralPlayer {
 
     // Smooth run/idle blend (no snapping).
     // RUN_BLEND_* are "time to settle" style constants.
-    const RUN_BLEND_IN = 1 - Math.pow(0.02, dt);  // faster to enter run
-    const RUN_BLEND_OUT = 1 - Math.pow(0.2, dt);  // slower to exit run
+    const RUN_BLEND_IN = 1 - Math.pow(0.05, dt);  // slightly slower to reduce "snap"
+    const RUN_BLEND_OUT = 1 - Math.pow(0.35, dt); // softer return to idle
     const targetRun = moving ? 1 : 0;
     this.state.run = lerp(this.state.run, targetRun, moving ? RUN_BLEND_IN : RUN_BLEND_OUT);
 
     // Phase advances faster when moving faster.
-    const RUN_FPS = 7.5; // base cycles/sec
-    const phaseSpeed = (RUN_FPS * (0.35 + Math.min(1.8, speed / 180))) * (Math.PI * 2);
+    // Lower base frequency + smaller speed scaling = less "tremor".
+    const RUN_FPS = 5.2; // base cycles/sec (lower = smoother)
+    const phaseSpeed = (RUN_FPS * (0.3 + Math.min(1.15, speed / 240))) * (Math.PI * 2);
     this.state.phase += phaseSpeed * dt * Math.max(0.05, this.state.run);
+
+    // --- Extra smoothing layers (removes jitter/vibration) ---
+    // Lean: smoothly lean into direction; damp back to center when stopping.
+    const LEAN_MAX = 0.14; // radians (~8°), subtle
+    const leanX = Math.max(-1, Math.min(1, this.state.vx / 260));
+    const targetLean = leanX * LEAN_MAX * this.state.run;
+    const LEAN_FOLLOW = 1 - Math.pow(0.08, dt); // smoothing factor
+    this.state.lean = lerp(this.state.lean, targetLean, LEAN_FOLLOW);
+
+    // Bob: compute target bob then low-pass filter it.
+    const bobBase = Math.abs(Math.sin(this.state.phase)) * (5.2 * (0.55 + Math.min(0.45, speed / 320))) * this.state.run;
+    const BOB_FOLLOW = 1 - Math.pow(0.12, dt);
+    this.state.bob = lerp(this.state.bob, bobBase, BOB_FOLLOW);
+
+    // Swing: smooth the raw sinusoid so limbs don't "buzz".
+    const rawSwing = Math.sin(this.state.phase) * (0.78 + Math.min(0.22, speed / 420)) * this.state.run;
+    const SWING_FOLLOW = 1 - Math.pow(0.1, dt);
+    this.state.swing = lerp(this.state.swing, rawSwing, SWING_FOLLOW);
   }
 
   draw(
@@ -78,28 +106,19 @@ export class ProceduralPlayer {
   ) {
     const now = performance.now() * 0.001;
     const { colors } = opts;
-    const { dir, run, phase, vx, vy } = this.state;
+    const { dir, run, phase, vx, vy, lean, bob, swing } = this.state;
     const speed = Math.hypot(vx, vy);
 
     // --- Animation values (idle <-> run blended) ---
     // Idle: gentle breathing + float
-    const breathe = 1 + Math.sin(now * 2.2) * 0.025 * (1 - run);
-    const idleBob = Math.sin(now * 1.4) * 2.2 * (1 - run);
+    const breathe = 1 + Math.sin(now * 1.8) * 0.02 * (1 - run);
+    const idleBob = Math.sin(now * 1.05) * 1.6 * (1 - run);
 
-    // Run: faster bob tied to gait phase + speed
-    const RUN_BOB_AMP = 7.5;
-    const runBob = Math.abs(Math.sin(phase)) * RUN_BOB_AMP * (0.55 + Math.min(0.65, speed / 240)) * run;
+    // Run bob comes from smoothed state.bob for stability.
+    const runBob = bob;
 
-    // Lean into movement direction (but cap it, and blend with run).
-    const LEAN_MAX = 0.18; // radians (~10°)
-    const leanX = Math.max(-1, Math.min(1, vx / 220));
-    const leanY = Math.max(-1, Math.min(1, vy / 220));
-    // We lean sideways a bit when moving left/right; tiny pitch when moving up/down.
-    const lean = (leanX * LEAN_MAX) * run + (Math.sin(phase) * 0.04) * run;
-
-    // Limb swing: opposite pairs (left arm with right leg etc).
-    const swing = Math.sin(phase) * (0.95 + Math.min(0.35, speed / 320)) * run;
-    const swingAlt = Math.sin(phase + Math.PI) * (0.95 + Math.min(0.35, speed / 320)) * run;
+    // Limb swing values are smoothed in update().
+    const swingAlt = -swing;
 
     // Facing offsets (eyes/limbs shift slightly to direction).
     const faceX = dir === 'right' ? 6 : dir === 'left' ? -6 : 0;
@@ -138,19 +157,25 @@ export class ProceduralPlayer {
     // Body transform (squash/stretch + lean)
     ctx.save();
     ctx.rotate(lean);
-    const squash = 1 - run * 0.08 + Math.abs(Math.sin(phase)) * 0.03 * run;
-    const stretch = 1 + run * 0.1 + (breathe - 1);
+    // Slight squash/stretch. Keep small to avoid "shaky jelly" look.
+    const squash = 1 - run * 0.06 + Math.abs(Math.sin(phase)) * 0.018 * run;
+    const stretch = 1 + run * 0.07 + (breathe - 1);
     ctx.scale(stretch, squash);
 
     // --- Limbs (behind body) ---
-    // Legs: thick strokes with round caps, swing opposite.
+    // Legs: 2-segment walk cycle (hip->knee->foot).
+    // Math:
+    // - walk = sin(phase) drives forward/back swing
+    // - lift = max(0, sin(phase)) raises the foot on the forward step
+    // - opposite phase (phase + PI) for the other leg
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    const legLen = 30;
-    const legY = 12;
+    const legY = 10;
     const legSpread = 16;
-    const legSwing = swing * 0.85;
-    const legSwingAlt = swingAlt * 0.85;
+    const upperLeg = 18;
+    const lowerLeg = 18;
+    const legSwing = swing * 0.95;     // use smoothed swing, slightly stronger for legs
+    const legSwingAlt = swingAlt * 0.95;
 
     const legGrad = ctx.createLinearGradient(0, -10, 0, 40);
     legGrad.addColorStop(0, colorAlpha(colors.dark, 0.95));
@@ -158,15 +183,15 @@ export class ProceduralPlayer {
     ctx.strokeStyle = legGrad;
     ctx.lineWidth = 11;
 
-    drawLimb(ctx, -legSpread, legY, legLen, legSwing);
-    drawLimb(ctx, legSpread, legY, legLen, legSwingAlt);
+    drawLeg2Segment(ctx, -legSpread, legY, upperLeg, lowerLeg, phase, legSwing, run);
+    drawLeg2Segment(ctx, legSpread, legY, upperLeg, lowerLeg, phase + Math.PI, legSwingAlt, run);
 
     // Arms: slightly higher, swing opposite to legs (kinematic feel).
     const armLen = 26;
     const armY = -18;
     const armSpread = 28;
-    const armSwing = -legSwing * 1.1;
-    const armSwingAlt = -legSwingAlt * 1.1;
+    const armSwing = -legSwing * 1.05;
+    const armSwingAlt = -legSwingAlt * 1.05;
     const armGrad = ctx.createLinearGradient(0, -40, 0, 20);
     armGrad.addColorStop(0, colorAlpha(colors.light, 0.95));
     armGrad.addColorStop(1, colorAlpha(colors.main, 0.95));
@@ -287,5 +312,64 @@ function drawLimb(ctx: CanvasRenderingContext2D, x: number, y: number, len: numb
   ctx.beginPath();
   ctx.arc(ex, ey, 5.5, 0, Math.PI * 2);
   ctx.fill();
+}
+
+function drawLeg2Segment(
+  ctx: CanvasRenderingContext2D,
+  hipX: number,
+  hipY: number,
+  upperLen: number,
+  lowerLen: number,
+  phase: number,
+  swing: number,
+  run: number
+) {
+  // When stopping, run->0 and swing is already smoothed toward 0,
+  // so the leg returns naturally to neutral.
+  const walk = Math.sin(phase);
+  const lift = Math.max(0, walk) * run; // only lift on forward step
+
+  // Forward/back sweep (in pixels), small to avoid jitter.
+  const stepX = walk * 8 * run + swing * 4;
+  const stepY = -lift * 8; // raise foot slightly
+
+  // Knee bends more when foot is lifted.
+  const kneeBend = (0.35 + lift * 0.35) * run;
+
+  const kneeX = hipX + stepX * 0.55;
+  const kneeY = hipY + upperLen * (1 - kneeBend) + stepY * 0.35;
+  const footX = hipX + stepX;
+  const footY = hipY + upperLen + lowerLen + stepY;
+
+  // Upper leg
+  ctx.beginPath();
+  ctx.moveTo(hipX, hipY);
+  ctx.quadraticCurveTo(
+    hipX + stepX * 0.25,
+    hipY + upperLen * 0.45 + stepY * 0.1,
+    kneeX,
+    kneeY
+  );
+  ctx.stroke();
+
+  // Lower leg
+  ctx.beginPath();
+  ctx.moveTo(kneeX, kneeY);
+  ctx.quadraticCurveTo(
+    kneeX + stepX * 0.2,
+    kneeY + lowerLen * 0.55 + stepY * 0.2,
+    footX,
+    footY
+  );
+  ctx.stroke();
+
+  // Foot pad
+  ctx.save();
+  ctx.globalAlpha = 0.22;
+  ctx.fillStyle = '#0b1220';
+  ctx.beginPath();
+  ctx.ellipse(footX, footY + 1.5, 7, 3.8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 

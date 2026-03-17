@@ -337,8 +337,20 @@ async function startServer() {
         newPlayer.x = 2000;
         newPlayer.y = 2000;
       } else if (room.mode === 'farm') {
-        newPlayer.modeState = { laserDamage: 25, magnetRange: 50, hasShield: false, weaponTier: 1, credits: 30, vx: 0, vy: 0 };
-        newPlayer.resources = 50;
+        // Farm (Asteroid Hunt) inventory is ID-based (not linear tier).
+        newPlayer.modeState = {
+          laserDamage: 25,
+          magnetRange: 50,
+          hasShield: false,
+          credits: 30,
+          vx: 0,
+          vy: 0,
+          ownedWeapons: ['weapon_tier_1'],
+          equippedWeapon: 'weapon_tier_1',
+          // kept for backward compatibility in older clients/HUD
+          weaponTier: 1,
+        };
+        newPlayer.resources = 50; // ammo
         newPlayer.x = 2000;
         newPlayer.y = 2000;
         newPlayer.angle = 0;
@@ -652,7 +664,8 @@ async function startServer() {
           player.modeState.correctAnswers = (player.modeState.correctAnswers ?? 0) + 1;
         }
         if (room.mode === 'farm') {
-          player.resources += 20; // Plasma Ammo
+          const FARM_MAX_AMMO = 100;
+          player.resources = Math.min(FARM_MAX_AMMO, (player.resources || 0) + 20); // ammo
           player.modeState.credits = (player.modeState.credits || 0) + 10; // Credits
         } else if (room.mode === 'zombie') {
           player.modeState.ammo = (player.modeState.ammo ?? 10) + 10;
@@ -732,11 +745,21 @@ async function startServer() {
           room.globalState.events.push({ type: 'freeze', by: player.name, time: Date.now() });
         }
       } else if (room.mode === 'farm') {
-        if (upgradeId === 'weapon_tier_2') player.modeState.weaponTier = 2;
-        if (upgradeId === 'weapon_tier_3') player.modeState.weaponTier = 3;
-        if (upgradeId === 'weapon_tier_4') player.modeState.weaponTier = 4;
-        if (upgradeId === 'laser') player.modeState.laserDamage += 25;
-        if (upgradeId === 'magnet') player.modeState.magnetRange += 50;
+        player.modeState = player.modeState || {};
+        if (!Array.isArray(player.modeState.ownedWeapons)) player.modeState.ownedWeapons = ['weapon_tier_1'];
+        if (!player.modeState.ownedWeapons.includes('weapon_tier_1')) player.modeState.ownedWeapons.unshift('weapon_tier_1');
+        if (!player.modeState.equippedWeapon) player.modeState.equippedWeapon = 'weapon_tier_1';
+
+        // Weapons are owned by explicit ID (no implicit tier ownership).
+        if (upgradeId === 'weapon_tier_2' || upgradeId === 'weapon_tier_3' || upgradeId === 'weapon_tier_4') {
+          if (!player.modeState.ownedWeapons.includes(upgradeId)) player.modeState.ownedWeapons.push(upgradeId);
+          player.modeState.equippedWeapon = upgradeId;
+          // keep weaponTier as "max owned tier" for compatibility only
+          const tierNum = upgradeId === 'weapon_tier_4' ? 4 : upgradeId === 'weapon_tier_3' ? 3 : 2;
+          player.modeState.weaponTier = Math.max(Number(player.modeState.weaponTier) || 1, tierNum);
+        }
+        if (upgradeId === 'laser') player.modeState.laserDamage = (Number(player.modeState.laserDamage) || 25) + 25;
+        if (upgradeId === 'magnet') player.modeState.magnetRange = (Number(player.modeState.magnetRange) || 50) + 50;
         if (upgradeId === 'shield') player.modeState.hasShield = true;
       } else if (room.mode === 'boss') {
         if (player.modeState.isBoss) {
@@ -895,8 +918,26 @@ async function startServer() {
         });
         room.globalState.projectiles = projs;
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
+      } else if (room.mode === 'farm' && actionType === 'equipWeapon' && weaponId) {
+        player.modeState = player.modeState || {};
+        if (!Array.isArray(player.modeState.ownedWeapons)) player.modeState.ownedWeapons = ['weapon_tier_1'];
+        if (!player.modeState.ownedWeapons.includes('weapon_tier_1')) player.modeState.ownedWeapons.unshift('weapon_tier_1');
+        if (!player.modeState.ownedWeapons.includes(weaponId)) return;
+        player.modeState.equippedWeapon = weaponId;
+        // keep compatibility tier
+        const t = weaponId === 'weapon_tier_4' ? 4 : weaponId === 'weapon_tier_3' ? 3 : weaponId === 'weapon_tier_2' ? 2 : 1;
+        player.modeState.weaponTier = Math.max(Number(player.modeState.weaponTier) || 1, t);
+        io.to(code).emit("playerUpdated", { playerId: player.id, player });
+        return;
       } else if (room.mode === 'farm' && actionType === 'shoot') {
-        const ammoCost = player.modeState?.weaponTier === 4 ? 25 : 10;
+        player.modeState = player.modeState || {};
+        if (!Array.isArray(player.modeState.ownedWeapons)) player.modeState.ownedWeapons = ['weapon_tier_1'];
+        if (!player.modeState.ownedWeapons.includes('weapon_tier_1')) player.modeState.ownedWeapons.unshift('weapon_tier_1');
+        if (!player.modeState.equippedWeapon) player.modeState.equippedWeapon = 'weapon_tier_1';
+
+        const weapon = player.modeState.equippedWeapon || 'weapon_tier_1';
+        const tierForCost = weapon === 'weapon_tier_4' ? 4 : weapon === 'weapon_tier_3' ? 3 : weapon === 'weapon_tier_2' ? 2 : 1;
+        const ammoCost = tierForCost === 4 ? 25 : 10;
         if (player.resources < ammoCost) return;
         let angle = typeof clientAimAngle === 'number' && !Number.isNaN(clientAimAngle) ? clientAimAngle : null;
         const shipX = Number(player.x) || 2000;
@@ -907,24 +948,43 @@ async function startServer() {
         }
         if (angle === null || Number.isNaN(angle)) angle = 0;
         player.angle = angle;
+
+        // Fire-rate enforcement (prevents spam + enables upgrades to matter).
+        // Store on server so all clients see consistent cadence.
+        const now = Date.now();
+        const isPlasma = tierForCost === 4;
+        const baseFireRateMs = isPlasma ? 320 : 170;
+        const tierBonus = tierForCost >= 3 ? -20 : tierForCost >= 2 ? -10 : 0;
+        const fireRateMs = Math.max(80, Number(player.modeState.fireRateMs) || (baseFireRateMs + tierBonus));
+        const lastShot = Number(player.modeState.lastShotTime) || 0;
+        if (now - lastShot < fireRateMs) return;
+        player.modeState.lastShotTime = now;
+        player.modeState.fireRateMs = fireRateMs;
+
         player.resources -= ammoCost;
-        const tier = player.modeState?.weaponTier || 1;
+        const tier = tierForCost;
         const projs = room.globalState.projectiles || [];
         const dmg = Number(player.modeState.laserDamage) || 25;
-        const LASER_SPEED = 520;
-        const PLASMA_SPEED = 280;
+        // Faster projectiles to reduce "laggy" feel on 20Hz server tick.
+        const LASER_SPEED = 900;
+        const PLASMA_SPEED = 520;
         const num = (v: number) => (typeof v === 'number' && !Number.isNaN(v) ? v : 0);
+        // Stable projectile IDs (prevents phantom/interpolation collisions client-side)
+        const seqBase = Number(room.globalState.projectileSeq) || 0;
+        const mkId = (i: number) => `farm_${now}_${seqBase + i}`;
+        let created = 0;
         if (tier === 1) {
-          projs.push({ x: shipX, y: shipY, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 });
+          projs.push({ id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 });
         } else if (tier === 2) {
           const nx = Math.cos(angle + Math.PI / 2) * 12, ny = Math.sin(angle + Math.PI / 2) * 12;
-          projs.push({ x: shipX + nx, y: shipY + ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 });
-          projs.push({ x: shipX - nx, y: shipY - ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 });
+          projs.push({ id: mkId(created++), x: shipX + nx, y: shipY + ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 });
+          projs.push({ id: mkId(created++), x: shipX - nx, y: shipY - ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 });
         } else if (tier === 3) {
-          [-0.25, 0, 0.25].forEach(off => projs.push({ x: shipX, y: shipY, vx: num(Math.cos(angle + off) * LASER_SPEED), vy: num(Math.sin(angle + off) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 }));
+          [-0.25, 0, 0.25].forEach(off => projs.push({ id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle + off) * LASER_SPEED), vy: num(Math.sin(angle + off) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 }));
         } else {
-          projs.push({ x: shipX, y: shipY, vx: num(Math.cos(angle) * PLASMA_SPEED), vy: num(Math.sin(angle) * PLASMA_SPEED), damage: dmg * 3, shooterId: playerId, type: 'plasma', radius: 12 });
+          projs.push({ id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle) * PLASMA_SPEED), vy: num(Math.sin(angle) * PLASMA_SPEED), damage: dmg * 3, shooterId: playerId, type: 'plasma', radius: 12 });
         }
+        room.globalState.projectileSeq = seqBase + created;
         room.globalState.projectiles = projs;
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
         io.to(code).emit("globalStateUpdated", room.globalState);

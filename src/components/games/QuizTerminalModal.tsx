@@ -65,6 +65,7 @@ export function QuizTerminalModal({
   const [locked, setLocked] = useState(false);
   const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null);
   const prevOpenRef = useRef(false);
+  const autoNextTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     const wasOpen = prevOpenRef.current;
@@ -76,6 +77,20 @@ export function QuizTerminalModal({
     setFeedback(null);
     setCurrentIndex(pickIndex(frozenQuestions.length));
   }, [open, frozenQuestions.length]);
+
+  useEffect(() => {
+    // Cleanup any pending auto-next when closing or session changes.
+    if (!open && autoNextTimeoutRef.current !== null) {
+      window.clearTimeout(autoNextTimeoutRef.current);
+      autoNextTimeoutRef.current = null;
+    }
+    return () => {
+      if (autoNextTimeoutRef.current !== null) {
+        window.clearTimeout(autoNextTimeoutRef.current);
+        autoNextTimeoutRef.current = null;
+      }
+    };
+  }, [open, sessionId]);
 
   useEffect(() => {
     if (!open) return;
@@ -108,6 +123,18 @@ export function QuizTerminalModal({
     setFeedback(ok ? 'correct' : 'wrong');
     if (ok) onCorrect();
     else onWrong();
+
+    // Auto-advance (no need to click "next").
+    if (autoNextTimeoutRef.current !== null) {
+      window.clearTimeout(autoNextTimeoutRef.current);
+      autoNextTimeoutRef.current = null;
+    }
+    autoNextTimeoutRef.current = window.setTimeout(() => {
+      autoNextTimeoutRef.current = null;
+      setLocked(false);
+      setFeedback(null);
+      setCurrentIndex(pickIndex(frozenQuestions.length));
+    }, 900);
   };
 
   const next = () => {

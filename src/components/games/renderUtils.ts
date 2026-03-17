@@ -371,21 +371,35 @@ export function drawOreGem(
   t: number, scale: number = 1
 ) {
   const pulse = 0.8 + 0.2 * Math.sin(t * 4);
-  const size = (4 + value / 30) * scale * pulse;
-  drawGlow(ctx, x, y, size * 4, color, 0.2 * pulse);
+  const bob = Math.sin(t * 3 + x * 0.01) * 3.5 * scale;
+  const yy = y + bob;
+  const size = (5 + value / 28) * scale * pulse;
+  drawGlow(ctx, x, yy, size * 5, color, 0.28 * pulse);
   ctx.fillStyle = color;
   ctx.shadowBlur = 8;
   ctx.shadowColor = color;
   ctx.beginPath();
-  ctx.moveTo(x, y - size);
-  ctx.lineTo(x + size * 0.7, y + size * 0.5);
-  ctx.lineTo(x, y + size * 0.3);
-  ctx.lineTo(x - size * 0.7, y + size * 0.5);
+  // diamond shape
+  ctx.moveTo(x, yy - size);
+  ctx.lineTo(x + size * 0.85, yy);
+  ctx.lineTo(x, yy + size * 1.05);
+  ctx.lineTo(x - size * 0.85, yy);
   ctx.closePath();
   ctx.fill();
   ctx.shadowBlur = 0;
   ctx.strokeStyle = colorAlpha('#fff', 0.5);
   ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // sparkle
+  const sp = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * 6 + x * 0.02));
+  ctx.strokeStyle = colorAlpha('#ffffff', 0.25 * sp);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x, yy - size * 1.6);
+  ctx.lineTo(x, yy + size * 1.6);
+  ctx.moveTo(x - size * 1.1, yy);
+  ctx.lineTo(x + size * 1.1, yy);
   ctx.stroke();
 }
 

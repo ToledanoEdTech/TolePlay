@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Clock, HelpCircle, ShoppingCart, X, Trophy } from 'lucide-react';
 import { socket } from '../../socket';
 import { QuizTerminalModal } from './QuizTerminalModal';
+import { ShopPanel } from './ShopPanel';
 import {
   type Particle, type Star, type ShakeState,
   tickParticles,
@@ -49,87 +50,82 @@ function playerHslColor(id: string): string {
   return `hsl(${hash % 360}, 80%, 60%)`;
 }
 
-// IMPORTANT: must be defined at module scope (stable component identity).
-// If defined inside AsteroidHuntGame, React would remount it on every render
-// (because the function reference changes), which can look like "questions cycling".
-function QuizModalContent({
-  sessionId,
-  questions,
-  onCorrect,
-  onWrong,
+function ShopModal({
+  open,
+  credits,
+  ownedWeapons,
+  equippedWeapon,
+  laserDmg,
+  magnetRange,
+  hasShield,
+  onClose,
+  onBuy,
+  onEquip,
 }: {
-  sessionId: number;
-  questions: any[];
-  onCorrect: () => void;
-  onWrong: () => void;
+  open: boolean;
+  credits: number;
+  ownedWeapons: string[];
+  equippedWeapon: string;
+  laserDmg: number;
+  magnetRange: number;
+  hasShield: boolean;
+  onClose: () => void;
+  onBuy: (upgradeId: string, cost: number) => void;
+  onEquip: (weaponId: string) => void;
 }) {
-  const [q, setQ] = useState<any | null>(null);
-  const [locked, setLocked] = useState(false);
-  const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null);
-
-  useEffect(() => {
-    if (!Array.isArray(questions) || questions.length === 0) {
-      setQ(null);
-      return;
-    }
-    setLocked(false);
-    setFeedback(null);
-    setQ(questions[Math.floor(Math.random() * questions.length)] ?? null);
-  }, [sessionId, questions]);
-
-  if (!q) return <div className="text-center text-slate-300 p-4">אין שאלות זמינות</div>;
-  const opts: string[] = Array.isArray(q.opts) ? q.opts : Array.isArray(q.options) ? q.options : [];
-  const correctIdx: number = typeof q.a === 'number' ? q.a : typeof q.answerIndex === 'number' ? q.answerIndex : -1;
-
-  const choose = (idx: number) => {
-    if (locked) return;
-    setLocked(true);
-    const ok = idx === correctIdx;
-    setFeedback(ok ? 'correct' : 'wrong');
-    if (ok) onCorrect();
-    else onWrong();
-  };
-
-  const next = () => {
-    if (!Array.isArray(questions) || questions.length === 0) return;
-    setLocked(false);
-    setFeedback(null);
-    setQ(questions[Math.floor(Math.random() * questions.length)] ?? null);
-  };
-
+  if (!open) return null;
   return (
-    <div className="text-white">
-      <div className="text-center font-bold text-xl mb-4">{String(q.q ?? q.question ?? '')}</div>
-      <div className="grid grid-cols-2 gap-2">
-        {opts.map((opt, i) => (
-          <button
-            key={`${sessionId}-${i}`}
-            type="button"
-            disabled={locked}
-            onClick={() => choose(i)}
-            className={`p-4 rounded-xl font-bold border transition ${
-              locked && i === correctIdx ? 'bg-emerald-600 border-emerald-400' :
-              locked ? 'bg-slate-800 border-slate-700 text-slate-400' :
-              'bg-slate-700 hover:bg-slate-600 border-slate-600'
-            }`}
-          >
-            {String(opt)}
-          </button>
-        ))}
-      </div>
-      <div className="mt-4 flex justify-center gap-3 items-center">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onClose(); }}
+      style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
+    >
+      <div
+        className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 shadow-2xl bg-slate-950 text-white"
+        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      >
         <button
           type="button"
-          disabled={!locked}
-          onClick={next}
-          className={`px-5 py-2.5 rounded-xl font-bold border ${
-            !locked ? 'bg-slate-800/50 text-slate-500 border-slate-700' : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-400/40'
-          }`}
+          onClick={onClose}
+          className="absolute top-3 left-3 z-10 p-1.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
         >
-          שאלה הבאה
+          <X size={18} className="text-slate-400" />
         </button>
-        <div className="text-sm">
-          {feedback === 'correct' ? <span className="text-emerald-400 font-bold">✓ נכון!</span> : feedback === 'wrong' ? <span className="text-red-400 font-bold">✗ לא נכון</span> : null}
+
+        <div className="p-6 pt-12 overflow-y-auto max-h-[85vh]">
+          <ShopPanel
+            credits={credits}
+            ownedWeapons={ownedWeapons}
+            equippedWeapon={equippedWeapon}
+            laserDmg={laserDmg}
+            magnetRange={magnetRange}
+            hasShield={hasShield}
+            onBuy={onBuy}
+            onEquip={onEquip}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AmmoHud({ ammo, maxAmmo }: { ammo: number; maxAmmo: number }) {
+  return (
+    <div className="absolute bottom-4 right-4 z-30 pointer-events-none">
+      <div className="flex items-center gap-2 px-4 py-2 rounded-2xl border border-cyan-400/20 bg-black/45 backdrop-blur-md shadow-[0_0_0_1px_rgba(34,211,238,0.12),0_12px_28px_rgba(0,0,0,0.45)]">
+        <svg viewBox="0 0 64 64" className="w-5 h-5 text-cyan-200">
+          <path
+            d="M20 10 h16 a8 8 0 0 1 8 8 v28 a8 8 0 0 1-8 8H20z"
+            fill="currentColor"
+            opacity="0.85"
+          />
+          <path d="M20 10 h10 v44 H20z" fill="#ffffff" opacity="0.25" />
+        </svg>
+        <div className="text-right">
+          <div className="text-[10px] tracking-[0.22em] text-cyan-200/70 font-extrabold">AMMO</div>
+          <div className="font-extrabold text-slate-100">
+            {ammo} <span className="text-slate-400 font-bold">/ {maxAmmo}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -162,6 +158,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const floatTextsRef = useRef<{ x: number; y: number; text: string; life: number }[]>([]);
   const prevTimeRef = useRef(0);
   const prevAsteroidsRef = useRef<Map<string, any>>(new Map());
+  const prevAstHpRef = useRef<Map<string, number>>(new Map());
 
   // --- Client-side smoothing state (prediction + lerp-to-authority) ---
   // EXACT architecture requested:
@@ -173,7 +170,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   type AstTarget = { x: number; y: number; rotation: number; vx: number; vy: number; rotSpeed: number };
   type AstRender = { x: number; y: number; rotation: number };
   type ProjTarget = { x: number; y: number; vx: number; vy: number; type?: string; radius?: number; color?: string };
-  type ProjRender = { x: number; y: number; vx: number; vy: number; lastSeenAt: number; locked: boolean; type?: string; radius?: number; color?: string };
+  type ProjRender = { x: number; y: number; px: number; py: number; vx: number; vy: number; lastSeenAt: number; locked: boolean; type?: string; radius?: number; color?: string };
 
   const playerTargetsRef = useRef<Map<string, PlayerTarget>>(new Map());
   const playerRendersRef = useRef<Map<string, PlayerRender>>(new Map());
@@ -267,7 +264,9 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
 
     // Players
     const ap = allPlayers || {};
+    const alivePlayers = new Set<string>();
     for (const [id, pl] of Object.entries(ap)) {
+      alivePlayers.add(id);
       const x = safeNum((pl as any)?.x, WORLD_SIZE / 2);
       const y = safeNum((pl as any)?.y, WORLD_SIZE / 2);
       const angle = safeNum((pl as any)?.angle, safeNum((pl as any)?.modeState?.angle, 0));
@@ -277,12 +276,22 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       const vy = prev ? (y - prev.y) / dt : 0;
       playerTargetsRef.current.set(id, { x, y, angle, vx, vy });
     }
+    // strict cleanup for players that vanished
+    for (const id of Array.from(playerTargetsRef.current.keys())) {
+      if (!alivePlayers.has(id)) {
+        playerTargetsRef.current.delete(id);
+        playerRendersRef.current.delete(id);
+      }
+    }
 
     // Asteroids
     const asts: any[] = Array.isArray(globalState?.asteroids) ? globalState.asteroids : [];
+    const aliveAst = new Set<string>();
+    const nextHp = new Map<string, number>();
     for (const a of asts) {
       const id = typeof a?.id === 'string' ? a.id : undefined;
       if (!id) continue;
+      aliveAst.add(id);
       const x = safeNum(a?.x, WORLD_SIZE / 2);
       const y = safeNum(a?.y, WORLD_SIZE / 2);
       const rotation = safeNum(a?.rotation, 0);
@@ -292,6 +301,20 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       const vx = prev ? (x - prev.x) / dt : safeNum(a?.vx, 0);
       const vy = prev ? (y - prev.y) / dt : safeNum(a?.vy, 0);
       astTargetsRef.current.set(id, { x, y, rotation, rotSpeed, vx, vy });
+      const hp = safeNum(a?.hp, safeNum(a?.maxHp, 100));
+      nextHp.set(id, hp);
+    }
+    // strict cleanup for asteroids that vanished (prevents glitch lerp)
+    for (const id of Array.from(astTargetsRef.current.keys())) {
+      if (!aliveAst.has(id)) {
+        astTargetsRef.current.delete(id);
+        astRendersRef.current.delete(id);
+        prevAstHpRef.current.delete(id);
+      }
+    }
+    // prune missing asteroids from hp tracking
+    for (const id of Array.from(prevAstHpRef.current.keys())) {
+      if (!nextHp.has(id)) prevAstHpRef.current.delete(id);
     }
 
     // Projectiles (already have vx/vy from server; keep as target + let RAF predict+lerp)
@@ -301,14 +324,19 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       const x = safeNum(pr?.x, NaN);
       const y = safeNum(pr?.y, NaN);
       if (Number.isNaN(x) || Number.isNaN(y)) continue;
+      // Prefer stable server IDs. Fallback is best-effort.
       const id = typeof pr?.id === 'string'
         ? pr.id
-        : `${String(pr?.shooterId ?? 'u')}_${String(pr?.spawnTime ?? pr?.createdAt ?? '')}_${String(pr?.type ?? 'p')}`;
+        : `${String(pr?.shooterId ?? 'u')}_${String(pr?.spawnTime ?? pr?.createdAt ?? now)}_${String(pr?.type ?? 'p')}`;
       const vx = safeNum(pr?.vx, 0);
       const vy = safeNum(pr?.vy, 0);
       nextProj.set(id, { x, y, vx, vy, type: pr?.type, radius: pr?.radius, color: pr?.color });
     }
     projTargetsRef.current = nextProj;
+    // strict cleanup for dead projectiles (prevents phantom shots)
+    for (const id of Array.from(projRendersRef.current.keys())) {
+      if (!nextProj.has(id)) projRendersRef.current.delete(id);
+    }
   }, [allPlayers, globalState]);
 
   useEffect(() => {
@@ -325,7 +353,8 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const ammo = Math.floor(player?.resources || 0);
   const ore = player?.score || 0;
   const credits = player?.modeState?.credits ?? 0;
-  const weaponTier = player?.modeState?.weaponTier ?? 1;
+  const ownedWeapons: string[] = Array.isArray(player?.modeState?.ownedWeapons) ? player.modeState.ownedWeapons : ['weapon_tier_1'];
+  const equippedWeapon: string = typeof player?.modeState?.equippedWeapon === 'string' ? player.modeState.equippedWeapon : 'weapon_tier_1';
   const laserDmg = player?.modeState?.laserDamage ?? 25;
   const magnetRange = player?.modeState?.magnetRange ?? 50;
   const hasShield = !!player?.modeState?.hasShield;
@@ -350,9 +379,11 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     };
 
     // update local aim angle (used for rendering immediately and for server sync)
+    const myId = playerIdRef.current;
+    const myR = playerRendersRef.current.get(myId);
     const p = playerRef.current;
-    const shipX = typeof p?.x === 'number' && !Number.isNaN(p.x) ? p.x : WORLD_SIZE / 2;
-    const shipY = typeof p?.y === 'number' && !Number.isNaN(p.y) ? p.y : WORLD_SIZE / 2;
+    const shipX = typeof myR?.x === 'number' && !Number.isNaN(myR.x) ? myR.x : (typeof p?.x === 'number' && !Number.isNaN(p.x) ? p.x : WORLD_SIZE / 2);
+    const shipY = typeof myR?.y === 'number' && !Number.isNaN(myR.y) ? myR.y : (typeof p?.y === 'number' && !Number.isNaN(p.y) ? p.y : WORLD_SIZE / 2);
     localAimAngleRef.current = Math.atan2(mouseRef.current.worldY - shipY, mouseRef.current.worldX - shipX);
   }, []);
 
@@ -388,9 +419,17 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     if (quizOpen || shopOpen) return;
     const interval = setInterval(() => {
       const k = keysRef.current;
-      const dx = (k.right ? 1 : 0) - (k.left ? 1 : 0);
-      const dy = (k.down ? 1 : 0) - (k.up ? 1 : 0);
-      socket.emit('move', { code: roomCode, playerId, dx, dy, angle: localAimAngleRef.current });
+      // Top-down shooter controls:
+      // - Mouse controls facing (angle)
+      // - Keyboard controls thrust/strafe in ship-space, converted to world-space
+      const forward = (k.up ? 1 : 0) - (k.down ? 1 : 0);
+      const strafe = (k.right ? 1 : 0) - (k.left ? 1 : 0);
+      const a = localAimAngleRef.current;
+      let dx = forward * Math.cos(a) + strafe * Math.cos(a + Math.PI / 2);
+      let dy = forward * Math.sin(a) + strafe * Math.sin(a + Math.PI / 2);
+      const len = Math.hypot(dx, dy);
+      if (len > 1) { dx /= len; dy /= len; }
+      socket.emit('move', { code: roomCode, playerId, dx, dy, angle: a });
     }, 50);
     return () => clearInterval(interval);
   }, [roomCode, playerId, quizOpen, shopOpen]);
@@ -404,7 +443,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     if (quizOpen || shopOpen) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ammoCost = weaponTier === 4 ? 25 : 10;
+    const ammoCost = equippedWeapon === 'weapon_tier_4' ? 25 : 10;
     if ((player?.resources || 0) < ammoCost) return;
 
     let clientX: number, clientY: number;
@@ -417,12 +456,11 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       clientY = e.clientY;
     }
     updateMouseWorld(clientX, clientY);
-    const { worldX, worldY } = mouseRef.current;
-    const angle = Math.atan2(worldY - py, worldX - px);
+    const angle = localAimAngleRef.current;
 
     muzzleFlashRef.current = { active: true, angle, intensity: 1 };
     socket.emit('action', { code: roomCode, playerId, actionType: 'shoot', aimAngle: angle });
-  }, [roomCode, playerId, player?.resources, weaponTier, quizOpen, shopOpen, px, py, updateMouseWorld]);
+  }, [roomCode, playerId, player?.resources, equippedWeapon, quizOpen, shopOpen, px, py, updateMouseWorld]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -564,9 +602,30 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
 
         const cur = astRendersRef.current.get(id) ?? { x: target.x, y: target.y, rotation: target.rotation };
 
+        // ── Robust lerp guard (prevents "zombie asteroids" during rapid motion) ──
+        // If a target jumps a huge distance (stale render state, ID collision/reuse, or transient invalid data),
+        // snapping is safer than lerping/predicting which can appear as an asteroid flying across the screen.
+        const tx = target.x;
+        const ty = target.y;
+        const isInWorld =
+          typeof tx === 'number' && typeof ty === 'number' &&
+          !Number.isNaN(tx) && !Number.isNaN(ty) &&
+          tx > -300 && tx < WORLD_SIZE + 300 &&
+          ty > -300 && ty < WORLD_SIZE + 300;
+        const jumpDist = Math.hypot(tx - cur.x, ty - cur.y);
+        const MAX_AST_SNAP_DIST = 700; // ~< view size; tuned to stop extreme "flybys"
+        if (!isInWorld || jumpDist > MAX_AST_SNAP_DIST) {
+          cur.x = tx;
+          cur.y = ty;
+          cur.rotation = target.rotation;
+          astRendersRef.current.set(id, cur);
+        } else {
+
         // (optional) tiny prediction step so lerp has directionality
-        cur.x += (target.vx || 0) * dt;
-        cur.y += (target.vy || 0) * dt;
+        const pvx = Math.max(-1200, Math.min(1200, target.vx || 0));
+        const pvy = Math.max(-1200, Math.min(1200, target.vy || 0));
+        cur.x += pvx * dt;
+        cur.y += pvy * dt;
         cur.rotation += (target.rotSpeed || 0) * dt;
 
         // EXACT LERP requested
@@ -575,10 +634,22 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         cur.rotation += (target.rotation - cur.rotation) * POS_LERP;
 
         astRendersRef.current.set(id, cur);
+        }
 
         const rotation = cur.rotation;
         const maxHp = Math.max(1, safeNum(a.maxHp, 100));
-        const hpPct = Math.max(0, Math.min(1, safeNum(a.hp, maxHp) / maxHp));
+        const hp = safeNum(a.hp, maxHp);
+        const hpPct = Math.max(0, Math.min(1, hp / maxHp));
+
+        // Hit effect: when asteroid HP drops, spawn a small impact burst once.
+        const prevHp = prevAstHpRef.current.get(id);
+        if (typeof prevHp === 'number' && hp < prevHp - 0.001) {
+          particlesRef.current = particlesRef.current.concat(
+            emitAsteroidExplosion(cur.x, cur.y, type.body, type.glow, 10)
+          );
+          triggerShake(shakeRef.current, 1.4);
+        }
+        prevAstHpRef.current.set(id, hp);
 
         drawAsteroidStandalone(ctx, {
           x: cur.x,
@@ -609,22 +680,26 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       const nowMs = now;
       const targets = projTargetsRef.current;
       const renders = projRendersRef.current;
-      // prune renders that disappeared
-      for (const [id, r] of renders.entries()) {
-        if (!targets.has(id) && nowMs - r.lastSeenAt > 500) renders.delete(id);
+      // STRICT: if projectile is not in authoritative state, remove immediately.
+      for (const id of Array.from(renders.keys())) {
+        if (!targets.has(id)) renders.delete(id);
       }
       for (const [id, tgt] of targets.entries()) {
         const existing = renders.get(id);
-        const r = existing ?? { x: tgt.x, y: tgt.y, vx: tgt.vx, vy: tgt.vy, lastSeenAt: nowMs, locked: true, type: tgt.type, radius: tgt.radius, color: tgt.color };
+        const r = existing ?? { x: tgt.x, y: tgt.y, px: tgt.x, py: tgt.y, vx: tgt.vx, vy: tgt.vy, lastSeenAt: nowMs, locked: true, type: tgt.type, radius: tgt.radius, color: tgt.color };
         if (!existing) {
           // first sight: lock initial state
           r.x = tgt.x;
           r.y = tgt.y;
+          r.px = tgt.x;
+          r.py = tgt.y;
           r.vx = tgt.vx;
           r.vy = tgt.vy;
           r.locked = true;
         }
         // integrate forward only (straight line)
+        r.px = r.x;
+        r.py = r.y;
         r.x += (r.vx || 0) * dt;
         r.y += (r.vy || 0) * dt;
         r.type = tgt.type;
@@ -644,14 +719,11 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
           ctx.fill();
           ctx.shadowBlur = 0;
         } else {
-          ctx.beginPath();
-          ctx.arc(r.x, r.y, (r.radius || 4) * (viewW / VIEW_SIZE), 0, Math.PI * 2);
           const c = r.color || '#60a5fa';
-          ctx.fillStyle = c;
-          ctx.shadowBlur = 10;
-          ctx.shadowColor = c;
-          ctx.fill();
-          ctx.shadowBlur = 0;
+          const uiScale = viewW / VIEW_SIZE;
+          // laser streak (looks more like a shot than a slow dot)
+          drawBeam(ctx, r.px, r.py, r.x, r.y, c, 4.2 * uiScale, 0.95);
+          drawGlow(ctx, r.x, r.y, 16 * uiScale, c, 0.18);
         }
       }
 
@@ -798,6 +870,9 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const buyUpgrade = (id: string, cost: number) => {
     socket.emit('buyUpgrade', { code: roomCode, playerId, upgradeId: id, cost });
   };
+  const equipWeapon = (weaponId: string) => {
+    socket.emit('action', { code: roomCode, playerId, actionType: 'equipWeapon', weaponId });
+  };
   const onCorrect = () => {
     socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: true });
   };
@@ -813,6 +888,25 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   useEffect(() => {
     containerRef.current?.focus();
   }, []);
+
+  // Quick-switch weapons: 1/2/3/4
+  useEffect(() => {
+    const order = ['weapon_tier_1', 'weapon_tier_2', 'weapon_tier_3', 'weapon_tier_4'];
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (quizOpenRef.current || modalOpenRef.current) return;
+      const k = e.key;
+      if (k !== '1' && k !== '2' && k !== '3' && k !== '4') return;
+      const idx = Number(k) - 1;
+      const id = order[idx];
+      if (!id) return;
+      const owned = Array.isArray(playerRef.current?.modeState?.ownedWeapons) ? playerRef.current.modeState.ownedWeapons : ['weapon_tier_1'];
+      if (!owned.includes(id)) return;
+      e.preventDefault();
+      equipWeapon(id);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [roomCode, playerId]);
 
   return (
     <div
@@ -852,7 +946,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
             💰 {credits}
           </span>
           <span className="px-3 py-1.5 rounded-xl bg-slate-800/60 backdrop-blur-md border border-slate-600/40 text-slate-300 font-bold text-sm">
-            T{weaponTier}
+            {equippedWeapon === 'weapon_tier_4' ? 'PLASMA' : equippedWeapon === 'weapon_tier_3' ? 'SPREAD' : equippedWeapon === 'weapon_tier_2' ? 'DUAL' : 'LASER'}
           </span>
           <span className="px-3 py-1.5 rounded-xl bg-slate-800/60 backdrop-blur-md border border-slate-600/40 text-slate-300 font-bold text-sm">
             #{myRank}
@@ -944,174 +1038,21 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         }}
       />
 
-      <AnimatePresence>
-        {shopOpen && (
-          <ModalBackdrop key="shop-modal" onClose={() => setShopOpen(false)}>
-            <div className="p-6 pt-12 overflow-y-auto max-h-[85vh]">
-              <h2 className="text-xl font-bold text-center mb-2 text-orange-400">חנות שדרוגים</h2>
-              <p className="text-slate-400 text-sm text-center mb-4">מטבעות: {credits} 💰</p>
-              <div className="space-y-3">
-                <WeaponTierItem
-                  tier={2}
-                  title="תאומים"
-                  desc="שני לייזרים מקבילים"
-                  cost={100}
-                  icon="🔫🔫"
-                  canAfford={credits >= 100}
-                  owned={weaponTier >= 2}
-                  onBuy={() => buyUpgrade('weapon_tier_2', 100)}
-                />
-                <WeaponTierItem
-                  tier={3}
-                  title="פזורה"
-                  desc="3 לייזרים בצורת קונוס"
-                  cost={150}
-                  icon="🔫🔫🔫"
-                  canAfford={credits >= 150}
-                  owned={weaponTier >= 3}
-                  onBuy={() => buyUpgrade('weapon_tier_3', 150)}
-                />
-                <WeaponTierItem
-                  tier={4}
-                  title="פלזמה"
-                  desc="פגז גדול עם נזק אזורי"
-                  cost={250}
-                  icon="💥"
-                  canAfford={credits >= 250}
-                  owned={weaponTier >= 4}
-                  onBuy={() => buyUpgrade('weapon_tier_4', 250)}
-                />
-                <SpaceShopItem
-                  title="שדרוג נזק"
-                  desc={`נזק +25 (כרגע: ${laserDmg})`}
-                  cost={100}
-                  icon="⚔️"
-                  accentColor="#a855f7"
-                  canAfford={credits >= 100}
-                  onBuy={() => buyUpgrade('laser', 100)}
-                />
-                <SpaceShopItem
-                  title="מגנט"
-                  desc={`משוך עפרות (טווח +50, כרגע: ${magnetRange})`}
-                  cost={150}
-                  icon="🧲"
-                  accentColor="#3b82f6"
-                  canAfford={credits >= 150}
-                  onBuy={() => buyUpgrade('magnet', 150)}
-                />
-                <SpaceShopItem
-                  title="מגן"
-                  desc="הגנה מפני התנגשויות"
-                  cost={200}
-                  icon="🛡️"
-                  accentColor="#14b8a6"
-                  canAfford={credits >= 200}
-                  onBuy={() => buyUpgrade('shield', 200)}
-                />
-              </div>
-            </div>
-          </ModalBackdrop>
-        )}
-      </AnimatePresence>
+      <ShopModal
+        open={shopOpen}
+        credits={credits}
+        ownedWeapons={ownedWeapons}
+        equippedWeapon={equippedWeapon}
+        laserDmg={laserDmg}
+        magnetRange={magnetRange}
+        hasShield={hasShield}
+        onClose={() => setShopOpen(false)}
+        onBuy={(upgradeId, cost) => buyUpgrade(upgradeId, cost)}
+        onEquip={(weaponId) => equipWeapon(weaponId)}
+      />
+
+      <AmmoHud ammo={ammo} maxAmmo={100} />
     </div>
-  );
-}
-
-function WeaponTierItem({ tier, title, desc, cost, icon, canAfford, owned, onBuy }: {
-  tier: number;
-  title: string;
-  desc: string;
-  cost: number;
-  icon: string;
-  canAfford: boolean;
-  owned: boolean;
-  onBuy: () => void;
-}) {
-  return (
-    <motion.button
-      whileTap={canAfford && !owned ? { scale: 0.96 } : {}}
-      disabled={!canAfford || owned}
-      onClick={onBuy}
-      className={`w-full p-4 rounded-xl flex items-center gap-3 transition-all ${
-        owned
-          ? 'bg-emerald-500/20 border border-emerald-500/40 opacity-90'
-          : canAfford
-            ? 'bg-slate-800/60 border border-purple-900/30 hover:border-purple-500/40 backdrop-blur-sm'
-            : 'bg-slate-800/20 border border-slate-800/40 opacity-50'
-      }`}
-    >
-      <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl flex-shrink-0 bg-slate-700/50">
-        {icon}
-      </div>
-      <div className="flex-1 text-right min-w-0">
-        <h4 className="font-bold">
-          Tier {tier}: {title}
-        </h4>
-        <p className="text-xs text-slate-400">{desc}</p>
-      </div>
-      {owned ? (
-        <span className="text-emerald-400 font-bold text-sm">✓ נרכש</span>
-      ) : (
-        <span className={`font-bold text-sm px-3 py-1.5 rounded-lg ${canAfford ? 'bg-amber-500/20 text-amber-300' : 'text-slate-500'}`}>
-          💰{cost}
-        </span>
-      )}
-    </motion.button>
-  );
-}
-
-function SpaceShopItem({
-  title,
-  desc,
-  cost,
-  icon,
-  canAfford,
-  onBuy,
-  accentColor,
-}: {
-  title: string;
-  desc: string;
-  cost: number;
-  icon: string;
-  canAfford: boolean;
-  onBuy: () => void;
-  accentColor: string;
-}) {
-  return (
-    <motion.button
-      whileTap={canAfford ? { scale: 0.96 } : {}}
-      disabled={!canAfford}
-      onClick={onBuy}
-      className={`w-full p-3.5 rounded-xl flex items-center gap-3 transition-all ${
-        canAfford
-          ? 'bg-slate-800/60 border border-purple-900/30 hover:border-purple-500/30 backdrop-blur-sm'
-          : 'bg-slate-800/20 border border-slate-800/40 opacity-40'
-      }`}
-    >
-      <div
-        className="w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0"
-        style={{
-          background: canAfford ? `${accentColor}15` : '#1e293b',
-          border: `1px solid ${canAfford ? accentColor + '30' : '#334155'}`,
-        }}
-      >
-        {icon}
-      </div>
-      <div className="flex-1 text-right min-w-0">
-        <h4 className="font-bold text-sm">{title}</h4>
-        <p className="text-[11px] text-slate-400 truncate">{desc}</p>
-      </div>
-      <div
-        className="font-bold text-xs px-3 py-1.5 rounded-lg whitespace-nowrap"
-        style={{
-          background: canAfford ? `${accentColor}15` : '#1e293b',
-          color: canAfford ? accentColor : '#64748b',
-          border: `1px solid ${canAfford ? accentColor + '25' : '#334155'}`,
-        }}
-      >
-        💰{cost}
-      </div>
-    </motion.button>
   );
 }
 

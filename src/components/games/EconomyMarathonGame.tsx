@@ -579,7 +579,7 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
 
   const now = Date.now();
   // Subtle "wind" sway: deterministic based on time + per-object seed.
-  const windSkew = Math.sin(now / 900) * 0.06;
+  const windSkew = Math.sin(now / 1200) * 0.045;
   ctx.shadowColor = 'rgba(0,0,0,0.3)';
   ctx.shadowBlur = 10;
   ctx.shadowOffsetX = 2;
@@ -591,43 +591,44 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
       const r = seededRandom(seed);
       const rx = gx + r * gridSize * 0.8;
       const ry = gy + seededRandom(seed + 1) * gridSize * 0.8;
-      if (r < 0.12) {
+      // Slightly fuller environment: a bit more trees/bushes, still deterministic.
+      if (r < 0.15) {
         ctx.save();
         ctx.translate(rx, ry);
-        const sway = windSkew + Math.sin(t * 0.9 + seed) * 0.03 + seededRandom(seed + 2) * 0.02;
-        ctx.rotate(sway);
-        ctx.fillStyle = '#2d1a0a';
-        ctx.fillRect(-8, 0, 16, 50);
-        ctx.fillStyle = '#0d2818';
-        ctx.beginPath();
-        ctx.ellipse(0, -20, 28, 32, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#14532d';
-        ctx.beginPath();
-        ctx.ellipse(0, -28, 22, 26, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#166534';
-        ctx.beginPath();
-        ctx.ellipse(0, -32, 16, 20, 0, 0, Math.PI * 2);
-        ctx.fill();
+        const sway = windSkew + Math.sin(t * 0.45 + seed) * 0.024 + seededRandom(seed + 2) * 0.02;
+        const treeScale = 1.28;
+        drawTreeIllustration(ctx, seed, treeScale, sway);
         ctx.restore();
-      } else if (r < 0.22) {
+      } else if (r < 0.27) {
         ctx.save();
         ctx.translate(rx, ry);
-        const sway = windSkew * 0.7 + Math.sin(t * 0.8 + seed * 1.3) * 0.03 + seededRandom(seed + 3) * 0.03;
-        ctx.rotate(sway);
-        ctx.fillStyle = '#0d2818';
-        ctx.beginPath();
-        ctx.ellipse(0, 2, 24, 20, 0, 0, Math.PI * 2);
-        ctx.fill();
+        const sway = windSkew * 0.65 + Math.sin(t * 0.42 + seed * 1.3) * 0.026 + seededRandom(seed + 3) * 0.03;
+        const bushScale = 1.38;
+        drawBushIllustration(ctx, seed, bushScale, sway);
+        ctx.restore();
+      } else if (r < 0.31) {
+        // A few rocks to reduce empty gaps (very cheap).
+        ctx.save();
+        ctx.translate(rx, ry);
+        const s = 0.9 + seededRandom(seed + 5) * 0.9;
+        ctx.rotate(seededRandom(seed + 6) * 0.6 - 0.3);
+        ctx.globalAlpha = 0.8;
         ctx.fillStyle = '#14532d';
         ctx.beginPath();
-        ctx.ellipse(0, -2, 18, 16, 0, 0, Math.PI * 2);
+        ctx.ellipse(0, 10, 30 * s, 14 * s, 0, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = '#166534';
+        ctx.globalAlpha = 1;
+        const rock = ctx.createRadialGradient(-10, 2, 2, 0, 0, 22 * s);
+        rock.addColorStop(0, '#cbd5e1');
+        rock.addColorStop(0.5, '#94a3b8');
+        rock.addColorStop(1, '#334155');
+        ctx.fillStyle = rock;
         ctx.beginPath();
-        ctx.ellipse(0, -6, 12, 10, 0, 0, Math.PI * 2);
+        ctx.ellipse(0, 0, 22 * s, 16 * s, 0.2, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
         ctx.restore();
       }
     }
@@ -636,6 +637,99 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
   ctx.shadowBlur = 0;
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = 0;
+}
+
+function drawTreeIllustration(ctx: CanvasRenderingContext2D, seed: number, scale: number, sway: number) {
+  // Ground shadow
+  ctx.save();
+  ctx.globalAlpha = 0.2;
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(0, 58 * scale, 40 * scale, 14 * scale, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Trunk with taper + subtle highlight
+  ctx.save();
+  ctx.rotate(sway * 0.35);
+  const trunkH = 64 * scale;
+  const trunkWBottom = 22 * scale;
+  const trunkWTop = 14 * scale;
+  const trunkGrad = ctx.createLinearGradient(-trunkWBottom / 2, 0, trunkWBottom / 2, 0);
+  trunkGrad.addColorStop(0, '#2d1a0a');
+  trunkGrad.addColorStop(0.55, '#3a210d');
+  trunkGrad.addColorStop(1, '#5a3417'); // highlight side
+  ctx.fillStyle = trunkGrad;
+  ctx.beginPath();
+  ctx.moveTo(-trunkWBottom / 2, 0);
+  ctx.lineTo(-trunkWTop / 2, -trunkH);
+  ctx.lineTo(trunkWTop / 2, -trunkH);
+  ctx.lineTo(trunkWBottom / 2, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  // Canopy: fluffy overlapping circles with shade gradient (dark bottom -> light top)
+  ctx.save();
+  ctx.rotate(sway);
+  const baseY = -trunkH;
+  const blobs = 8;
+  for (let i = 0; i < blobs; i++) {
+    const rr = seededRandom(seed + i * 17);
+    const rr2 = seededRandom(seed + i * 17 + 9);
+    const ox = (rr - 0.5) * 64 * scale;
+    const oy = baseY + (rr2 - 0.5) * 42 * scale - 18 * scale;
+    const r = (18 + rr * 18) * scale;
+    const shade = rr2; // 0..1
+    const col = shade < 0.45 ? '#0d2818' : shade < 0.7 ? '#14532d' : '#22c55e';
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(ox, oy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Top highlight puff
+  ctx.globalAlpha = 0.18;
+  ctx.fillStyle = '#bbf7d0';
+  ctx.beginPath();
+  ctx.ellipse(-14 * scale, baseY - 44 * scale, 26 * scale, 18 * scale, -0.35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawBushIllustration(ctx: CanvasRenderingContext2D, seed: number, scale: number, sway: number) {
+  // Ground shadow
+  ctx.save();
+  ctx.globalAlpha = 0.2;
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(0, 34 * scale, 42 * scale, 14 * scale, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.rotate(sway);
+  const blobs = 9;
+  for (let i = 0; i < blobs; i++) {
+    const rr = seededRandom(seed + i * 13);
+    const rr2 = seededRandom(seed + i * 13 + 5);
+    const ox = (rr - 0.5) * 70 * scale;
+    const oy = (rr2 - 0.5) * 36 * scale - 8 * scale;
+    const r = (14 + rr * 16) * scale;
+    // darker lower blobs, lighter upper blobs
+    const col = (oy > 0) ? '#0d2818' : (oy > -18 * scale) ? '#14532d' : '#22c55e';
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(ox, oy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 0.16;
+  ctx.fillStyle = '#bbf7d0';
+  ctx.beginPath();
+  ctx.ellipse(-18 * scale, -26 * scale, 24 * scale, 16 * scale, -0.35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
 }
 
 function drawParallaxHills(
@@ -690,10 +784,10 @@ function drawCollectiblesWorld(
   const viewTop = cam.y - margin;
   const viewRight = cam.x + vpW / cam.zoom + margin;
   const viewBottom = cam.y + vpH / cam.zoom + margin;
-  const now = Date.now();
-  const hoverY = Math.sin(now / 200) * 6;
-
-  const pulseScale = 1 + Math.sin(now / 300) * 0.08;
+  const now = performance.now();
+  const hoverY = Math.sin(now * 0.004) * 7;
+  const pulseScale = 1 + Math.sin(now * 0.006) * 0.09;
+  const itemScale = 1.42; // baseline up-scale
 
   collectibles.forEach((c: any) => {
     if (c.x < viewLeft || c.x > viewRight || c.y < viewTop || c.y > viewBottom) return;
@@ -712,36 +806,83 @@ function drawCollectiblesWorld(
 
     ctx.save();
     ctx.translate(c.x, c.y + hoverY);
-    ctx.scale(pulseScale, pulseScale);
+    // Type-specific scaling impact:
+    // - Chest: +20–30% more than baseline
+    // - Coins/Bills: +15% more than baseline
+    const typeScale = type === 'treasure_chest' ? 1.25 : 1.15;
+    ctx.scale(pulseScale * itemScale * typeScale, pulseScale * itemScale * typeScale);
+
+    // Ground drop shadow under item (depth)
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetY = 5;
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(0, 26, 20, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
 
     ctx.shadowColor = type === 'money_bills' ? '#22c55e' : '#fbbf24';
     ctx.shadowBlur = 18;
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 0;
 
+    // Constraint: Canvas-only (no external images). Always render procedurally.
     if (type === 'treasure_chest') {
       const w = 56; const h = 40;
-      if (imgs.treasure_chest?.complete && imgs.treasure_chest.naturalWidth > 0) {
-        ctx.drawImage(imgs.treasure_chest, -w / 2, -h / 2, w, h);
-      } else {
-        const bg = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
-        bg.addColorStop(0, '#fde68a');
-        bg.addColorStop(0.5, '#fbbf24');
-        bg.addColorStop(1, '#b45309');
-        ctx.fillStyle = bg;
-        ctx.fillRect(-w / 2, -h / 2, w, h);
-        ctx.strokeStyle = '#78350f';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(-w / 2, -h / 2, w, h);
-        ctx.fillStyle = '#5c3317';
-        ctx.fillRect(-8, -h / 2 + 8, 16, 14);
-        ctx.strokeStyle = '#2d1a0a';
-        ctx.strokeRect(-8, -h / 2 + 8, 16, 14);
-        ctx.fillStyle = '#1a1a1a';
-        ctx.beginPath();
-        ctx.arc(0, -h / 2 + 15, 4, 0, Math.PI * 2);
-        ctx.fill();
+
+      // Strong gold aura to signal "big prize"
+      ctx.save();
+      ctx.shadowColor = '#fbbf24';
+      ctx.shadowBlur = 26;
+      ctx.globalAlpha = 0.9;
+      ctx.restore();
+
+      const bg = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
+      bg.addColorStop(0, '#fde68a');
+      bg.addColorStop(0.45, '#fbbf24');
+      bg.addColorStop(1, '#b45309');
+      ctx.fillStyle = bg;
+      ctx.fillRect(-w / 2, -h / 2, w, h);
+      ctx.strokeStyle = '#78350f';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-w / 2, -h / 2, w, h);
+
+      // Lid line
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.beginPath();
+      ctx.moveTo(-w / 2, -h / 2 + 12);
+      ctx.lineTo(w / 2, -h / 2 + 12);
+      ctx.stroke();
+
+      // Wooden slats
+      ctx.globalAlpha = 0.2;
+      ctx.fillStyle = '#2d1a0a';
+      for (let i = -2; i <= 2; i++) {
+        ctx.fillRect(i * 10 - 2, -h / 2, 4, h);
       }
+      ctx.globalAlpha = 1;
+
+      // Golden lock (new detail)
+      ctx.save();
+      ctx.translate(0, -h / 2 + 18);
+      const lock = ctx.createRadialGradient(-3, -3, 1, 0, 0, 10);
+      lock.addColorStop(0, '#fff7cc');
+      lock.addColorStop(0.5, '#fde047');
+      lock.addColorStop(1, '#b45309');
+      ctx.fillStyle = lock;
+      ctx.beginPath();
+      roundRect(ctx, -8, -6, 16, 18, 4);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.stroke();
+      ctx.fillStyle = '#111827';
+      ctx.beginPath();
+      ctx.arc(0, 6, 2.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
       ctx.font = 'bold 14px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillStyle = '#000';
@@ -750,18 +891,24 @@ function drawCollectiblesWorld(
       ctx.fillText(`$${value}`, 0, h / 2 + 10);
     } else if (type === 'coin_pile') {
       const w = 48; const h = 40;
-      if (imgs.coin_pile?.complete && imgs.coin_pile.naturalWidth > 0) {
-        ctx.drawImage(imgs.coin_pile, -w / 2, -h / 2, w, h);
-      } else {
-        [{ x: -10, y: 6 }, { x: 10, y: 3 }, { x: 0, y: -8 }].forEach((p: { x: number; y: number }) => {
-          ctx.fillStyle = '#b8860b';
-          ctx.beginPath(); ctx.arc(p.x + 1, p.y + 1, 12, 0, Math.PI * 2); ctx.fill();
-          ctx.fillStyle = '#FFD700';
-          ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2); ctx.fill();
-          ctx.strokeStyle = '#92400e';
-          ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2); ctx.stroke();
-        });
+      // Metallic coin look (radial gradients + highlight)
+      const coins = [{ x: -10, y: 6 }, { x: 10, y: 3 }, { x: 0, y: -8 }];
+      for (const p of coins) {
+        const rg = ctx.createRadialGradient(p.x - 5, p.y - 6, 2, p.x, p.y, 13);
+        rg.addColorStop(0, '#fff7cc');
+        rg.addColorStop(0.35, '#fde047');
+        rg.addColorStop(0.7, '#f59e0b');
+        rg.addColorStop(1, '#92400e');
+        ctx.fillStyle = rg;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 12.5, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 12.5, 0, Math.PI * 2); ctx.stroke();
+
+        ctx.globalAlpha = 0.32;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.ellipse(p.x - 4, p.y - 5, 5, 3.2, -0.6, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1;
       }
       ctx.font = 'bold 14px sans-serif';
       ctx.textBaseline = 'alphabetic';
@@ -771,19 +918,19 @@ function drawCollectiblesWorld(
       ctx.fillText(`$${value}`, 0, 26);
     } else {
       const w = 48; const h = 32;
-      if (imgs.money_bills?.complete && imgs.money_bills.naturalWidth > 0) {
-        ctx.drawImage(imgs.money_bills, -w / 2, -h / 2, w, h);
-      } else {
-        for (let i = 2; i >= 0; i--) {
-          const ox = i * 3 - 3; const oy = i * -3 + 3;
-          ctx.fillStyle = '#065f46';
-          ctx.fillRect(-22 + ox + 1, -12 + oy + 1, 44, 24);
-          ctx.fillStyle = '#4ade80';
-          ctx.fillRect(-22 + ox, -12 + oy, 44, 24);
-          ctx.strokeStyle = '#166534';
-          ctx.lineWidth = 2;
-          ctx.strokeRect(-22 + ox, -12 + oy, 44, 24);
-        }
+      for (let i = 2; i >= 0; i--) {
+        const ox = i * 3 - 3; const oy = i * -3 + 3;
+        ctx.fillStyle = '#065f46';
+        ctx.fillRect(-22 + ox + 1, -12 + oy + 1, 44, 24);
+        const billG = ctx.createLinearGradient(-22 + ox, -12 + oy, 22 + ox, 12 + oy);
+        billG.addColorStop(0, '#bbf7d0');
+        billG.addColorStop(0.25, '#4ade80');
+        billG.addColorStop(1, '#166534');
+        ctx.fillStyle = billG;
+        ctx.fillRect(-22 + ox, -12 + oy, 44, 24);
+        ctx.strokeStyle = '#166534';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(-22 + ox, -12 + oy, 44, 24);
       }
       ctx.font = 'bold 14px sans-serif';
       ctx.textBaseline = 'alphabetic';
