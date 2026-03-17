@@ -23,6 +23,8 @@ const COLLECTIBLE_FLOAT_AMPLITUDE = 10;
 const COLLECTIBLE_FLOAT_SPEED = 2.5;
 const PICKUP_RADIUS = 85; // match server
 
+type FacingDir = 'down' | 'up' | 'left' | 'right';
+
 interface Props {
   roomCode: string;
   playerId: string;
@@ -39,7 +41,13 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gsRef = useRef(globalState);
   const playersRef = useRef(allPlayers);
+  // Target (authoritative local) position. We move this immediately from input and send it to server.
   const posRef = useRef({
+    x: player?.x ?? MAP_CENTER,
+    y: player?.y ?? MAP_CENTER,
+  });
+  // Render position is smoothed towards target to avoid snapping/jitter.
+  const renderPosRef = useRef({
     x: player?.x ?? MAP_CENTER,
     y: player?.y ?? MAP_CENTER,
   });
@@ -62,9 +70,29 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
     money_bills: HTMLImageElement | null;
   }>({ treasure_chest: null, coin_pile: null, money_bills: null });
   const prevCollectiblesRef = useRef<{ id: string; x: number; y: number; type: string; value: number }[]>([]);
-  const floatingTextsRef = useRef<{ x: number; y: number; text: string; life: number; maxLife: number; vy: number }[]>([]);
-  const lastFacingAngleRef = useRef(0);
+  const floatingTextsRef = useRef<{ x: number; y: number; text: string; life: number; maxLife: number; vy: number; color: string }[]>([]);
+  const lastDirRef = useRef<FacingDir>('down');
   const dustTrailRef = useRef<{ x: number; y: number; r: number; life: number; maxLife: number }[]>([]);
+  const goldPulseRef = useRef(0);
+  const energyPulseRef = useRef(0);
+
+  // Optional sprite sheet support (future upgrade).
+  // Expected asset format (recommended):
+  // - Sprite sheet contains 4 rows in this order: down, left, right, up.
+  // - Each row contains N frames (idle can be frame 0; walk cycle frames 0..N-1).
+  // - Every frame is exactly FRAME_W x FRAME_H pixels.
+  // - Character's "feet" should be around ANCHOR_Y (0..1) of the frame height.
+  // Place your asset here (example):
+  //   public/images/character/character_sheet.png
+  // Then update the loader below to match your file name.
+  const characterSheetRef = useRef<HTMLImageElement | null>(null);
+  const characterSheetReadyRef = useRef(false);
+
+  const CHAR_FRAME_W = 96;
+  const CHAR_FRAME_H = 96;
+  const CHAR_FRAMES_PER_DIR = 6;
+  const CHAR_ANCHOR_X = 0.5;
+  const CHAR_ANCHOR_Y = 0.86; // feet pivot
 
   useEffect(() => {
     const base = import.meta.env.BASE_URL || '/';
@@ -78,6 +106,16 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
     load('treasure-chest.png', 'treasure_chest');
     load('coin-pile.png', 'coin_pile');
     load('money-bills.png', 'money_bills');
+
+    // Replace with your real sheet:
+    // e.g. loadCharacter('character/character_sheet.png')
+    const loadCharacter = (name: string) => {
+      const img = new Image();
+      img.src = `${basePath}/images/${name}`;
+      img.onload = () => { characterSheetRef.current = img; characterSheetReadyRef.current = true; };
+      img.onerror = () => { characterSheetRef.current = null; characterSheetReadyRef.current = false; };
+    };
+    loadCharacter('character/character_sheet.png');
   }, []);
 
   useEffect(() => { gsRef.current = globalState; }, [globalState]);
@@ -91,9 +129,14 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
     const newGold = player?.resources || 0;
     if (newGold > prevGoldRef.current) {
       triggerShake(shakeRef.current, Math.min(4, (newGold - prevGoldRef.current) * 0.01));
+      goldPulseRef.current = (goldPulseRef.current + 1) | 0;
     }
     prevGoldRef.current = newGold;
   }, [player?.resources]);
+  useEffect(() => {
+    // Pulse on energy changes (server or local replenish).
+    energyPulseRef.current = (energyPulseRef.current + 1) | 0;
+  }, [player?.modeState?.energy]);
 
   useEffect(() => setupKeyboardListeners(inputRef.current), []);
 
@@ -168,21 +211,30 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
         }
       }
 
+      // Smooth rendering (lerp) towards target position.
+      // Performance note: constant-time per frame, avoids per-pixel physics and keeps multiplayer smooth.
+      const target = posRef.current;
+      const rp = renderPosRef.current;
+      // Convert "smoothing" into framerate-independent factor.
+      const follow = 1 - Math.pow(0.001, dt); // ~0.1 at 60fps; converges quickly without snapping
+      rp.x = rp.x + (target.x - rp.x) * follow;
+      rp.y = rp.y + (target.y - rp.y) * follow;
+
       if (!camInitRef.current) {
-        cam.x = posRef.current.x - vpW / (2 * zoom);
-        cam.y = posRef.current.y - vpH / (2 * zoom);
+        cam.x = renderPosRef.current.x - vpW / (2 * zoom);
+        cam.y = renderPosRef.current.y - vpH / (2 * zoom);
         cam.zoom = zoom;
         camInitRef.current = true;
       }
       cam.zoom = zoom;
-      updateCamera(cam, posRef.current, vpW, vpH, WORLD_SIZE, WORLD_SIZE, 0.12);
+      updateCamera(cam, renderPosRef.current, vpW, vpH, WORLD_SIZE, WORLD_SIZE, 0.12);
 
       const shake = tickShake(shakeRef.current);
 
       const collectibles = gs?.collectibles || [];
       const prevCollectibles = prevCollectiblesRef.current;
-      const myX = posRef.current.x;
-      const myY = posRef.current.y;
+      const myX = renderPosRef.current.x;
+      const myY = renderPosRef.current.y;
       prevCollectibles.forEach((prev: { id: string; x: number; y: number; type: string; value: number }) => {
         const stillExists = collectibles.some((c: any) => (c.id && c.id === prev.id) || (Math.hypot(c.x - prev.x, c.y - prev.y) < 5));
         if (stillExists) return;
@@ -191,7 +243,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
         const value = prev.value ?? (prev.type === 'treasure_chest' ? 40 : prev.type === 'coin_pile' ? 20 : 10);
         const isGreen = prev.type === 'money_bills';
         const particleColor = isGreen ? '#4ade80' : '#fbbf24';
-        const burst = emitBurst(prev.x, prev.y, 12, 90, 0.65, particleColor, 5, { friction: 0.92, scaleDown: true });
+        const burst = emitBurst(prev.x, prev.y, 14, 110, 0.6, particleColor, 5, { friction: 0.92, scaleDown: true });
         particlesRef.current = [...particlesRef.current, ...burst];
         floatingTextsRef.current.push({
           x: prev.x,
@@ -200,6 +252,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
           life: 1,
           maxLife: 1,
           vy: 48,
+          color: isGreen ? '#4ade80' : '#fde68a',
         });
       });
       prevCollectiblesRef.current = collectibles.map((c: any) => ({
@@ -210,21 +263,27 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
         value: c.value ?? 10,
       }));
 
-      const myPos = posRef.current;
+      const myPos = renderPosRef.current;
       const vel = {
         x: (myPos.x - prevPosRef.current.x) / dt,
         y: (myPos.y - prevPosRef.current.y) / dt,
       };
       const isMoving = Math.hypot(vel.x, vel.y) > 20;
       const speed = Math.hypot(vel.x, vel.y);
-      const facingAngle = speed > 10
-        ? Math.atan2(vel.y, vel.x) + Math.PI / 2
-        : lastFacingAngleRef.current;
-      if (speed > 10) lastFacingAngleRef.current = facingAngle;
+      // Direction-based facing (no slow rotation/spinning).
+      let dir: FacingDir = lastDirRef.current;
+      if (speed > 10) {
+        if (Math.abs(vel.x) > Math.abs(vel.y)) dir = vel.x >= 0 ? 'right' : 'left';
+        else dir = vel.y >= 0 ? 'down' : 'up';
+        lastDirRef.current = dir;
+      }
 
       if (isMoving && Math.random() < 0.5) {
-        const fx = myPos.x - 55 * Math.sin(facingAngle);
-        const fy = myPos.y + 55 * Math.cos(facingAngle);
+        // Foot position for dust trail: behind movement direction.
+        const backX = dir === 'right' ? -1 : dir === 'left' ? 1 : 0;
+        const backY = dir === 'down' ? -1 : dir === 'up' ? 1 : 0;
+        const fx = myPos.x + backX * 42;
+        const fy = myPos.y + backY * 42;
         dustTrailRef.current.push({
           x: fx + (Math.random() - 0.5) * 20,
           y: fy + (Math.random() - 0.5) * 10,
@@ -244,7 +303,13 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
 
       drawWorld(ctx, cam, vpW, vpH, t);
       drawCollectiblesWorld(ctx, collectibles, collectibleImgsRef.current, cam, vpW, vpH);
-      drawPlayers(ctx, players, playerId, myPos, t, isMoving, vel, facingAngle);
+      drawPlayers(ctx, players, playerId, myPos, t, isMoving, vel, dir, characterSheetRef.current, characterSheetReadyRef.current, {
+        frameW: CHAR_FRAME_W,
+        frameH: CHAR_FRAME_H,
+        framesPerDir: CHAR_FRAMES_PER_DIR,
+        anchorX: CHAR_ANCHOR_X,
+        anchorY: CHAR_ANCHOR_Y,
+      });
 
       particlesRef.current = tickParticles(ctx, particlesRef.current);
       tickDustTrail(ctx, dustTrailRef.current, dt);
@@ -299,12 +364,24 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
               <span className="text-base font-bold text-amber-400">מרתון כלכלי</span>
               <p className="text-xs text-amber-300/80 mt-0.5">מי שאוסף הכי הרבה זהב מנצח!</p>
             </div>
-            <div className="bg-amber-900/70 px-4 py-1.5 rounded-lg border border-amber-600/50">
+            <motion.div
+              key={`gold-${goldPulseRef.current}`}
+              initial={{ scale: 1 }}
+              animate={{ scale: [1, 1.12, 1] }}
+              transition={{ duration: 0.35 }}
+              className="bg-amber-900/70 px-4 py-1.5 rounded-lg border border-amber-600/50"
+            >
               <span className="text-xl font-black text-amber-300">💰 {gold.toLocaleString()}</span>
-            </div>
-            <div className="bg-yellow-900/50 px-3 py-1.5 rounded border border-yellow-600/40">
+            </motion.div>
+            <motion.div
+              key={`energy-${energyPulseRef.current}`}
+              initial={{ scale: 1 }}
+              animate={{ scale: [1, 1.08, 1] }}
+              transition={{ duration: 0.35 }}
+              className="bg-yellow-900/50 px-3 py-1.5 rounded border border-yellow-600/40"
+            >
               <span className="text-base font-bold text-yellow-300">⚡ {energy}</span>
-            </div>
+            </motion.div>
             <span className="text-sm bg-indigo-900/60 px-2.5 py-1 rounded">#{myRank || '?'}</span>
             <span className="text-xs bg-green-900/60 px-2 py-1 rounded text-green-300">🗺️ {collectibleCount}</span>
           </div>
@@ -502,6 +579,10 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
   const viewTop = cam.y - 100;
   const viewW = vpW / cam.zoom + 200;
   const viewH = vpH / cam.zoom + 200;
+
+  // Parallax distant layer (soft hills). Moves slower than the camera to add depth.
+  drawParallaxHills(ctx, cam, viewLeft, viewTop, viewW, viewH, t);
+
   const g = ctx.createLinearGradient(viewLeft, viewTop, viewLeft + viewW, viewTop + viewH);
   g.addColorStop(0, '#0d2818');
   g.addColorStop(0.5, '#166534');
@@ -527,7 +608,8 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
   }
 
   const now = Date.now();
-  const windSkew = Math.sin(now / 1000) * 0.05;
+  // Subtle "wind" sway: deterministic based on time + per-object seed.
+  const windSkew = Math.sin(now / 900) * 0.06;
   ctx.shadowColor = 'rgba(0,0,0,0.3)';
   ctx.shadowBlur = 10;
   ctx.shadowOffsetX = 2;
@@ -542,7 +624,8 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
       if (r < 0.12) {
         ctx.save();
         ctx.translate(rx, ry);
-        ctx.rotate(windSkew + seededRandom(seed + 2) * 0.02);
+        const sway = windSkew + Math.sin(t * 0.9 + seed) * 0.03 + seededRandom(seed + 2) * 0.02;
+        ctx.rotate(sway);
         ctx.fillStyle = '#2d1a0a';
         ctx.fillRect(-8, 0, 16, 50);
         ctx.fillStyle = '#0d2818';
@@ -561,7 +644,8 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
       } else if (r < 0.22) {
         ctx.save();
         ctx.translate(rx, ry);
-        ctx.rotate(windSkew * 0.7 + seededRandom(seed + 3) * 0.03);
+        const sway = windSkew * 0.7 + Math.sin(t * 0.8 + seed * 1.3) * 0.03 + seededRandom(seed + 3) * 0.03;
+        ctx.rotate(sway);
         ctx.fillStyle = '#0d2818';
         ctx.beginPath();
         ctx.ellipse(0, 2, 24, 20, 0, 0, Math.PI * 2);
@@ -584,6 +668,45 @@ function drawWorld(ctx: CanvasRenderingContext2D, cam: CameraState, vpW: number,
   ctx.shadowOffsetY = 0;
 }
 
+function drawParallaxHills(
+  ctx: CanvasRenderingContext2D,
+  cam: CameraState,
+  viewLeft: number,
+  viewTop: number,
+  viewW: number,
+  viewH: number,
+  t: number
+) {
+  // Screen-space-ish parallax: offset is a small fraction of cam position.
+  // This keeps it cheap (no extra culling passes) and stable visually.
+  const px = cam.x * 0.25;
+  const py = cam.y * 0.15;
+  const baseY = viewTop + viewH * 0.35 + Math.sin(t * 0.15) * 10;
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  const grad = ctx.createLinearGradient(viewLeft, baseY - 140, viewLeft, baseY + 220);
+  grad.addColorStop(0, 'rgba(3,7,18,0.0)');
+  grad.addColorStop(0.4, 'rgba(3,7,18,0.25)');
+  grad.addColorStop(1, 'rgba(3,7,18,0.55)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(viewLeft, viewTop, viewW, viewH);
+
+  ctx.globalAlpha = 0.22;
+  ctx.fillStyle = '#052e16';
+  ctx.beginPath();
+  const step = 140;
+  for (let x = viewLeft - step; x <= viewLeft + viewW + step; x += step) {
+    const y = baseY + Math.sin((x + px) * 0.003 + 0.7) * 55 + Math.cos((x + px) * 0.0017) * 25 + py;
+    if (x === viewLeft - step) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.lineTo(viewLeft + viewW + step, viewTop + viewH + 220);
+  ctx.lineTo(viewLeft - step, viewTop + viewH + 220);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawCollectiblesWorld(
   ctx: CanvasRenderingContext2D,
   collectibles: any[],
@@ -604,8 +727,17 @@ function drawCollectiblesWorld(
 
   collectibles.forEach((c: any) => {
     if (c.x < viewLeft || c.x > viewRight || c.y < viewTop || c.y > viewBottom) return;
-    const rawType = c.type || 'money_bills';
-    const type = rawType === 'chest' ? 'treasure_chest' : rawType === 'coin' ? 'coin_pile' : rawType;
+    // Normalize type defensively (fixes invisible chests if server/client type varies by case/dash).
+    const rawType = (c.type || 'money_bills');
+    const norm = String(rawType).trim().toLowerCase().replace(/-/g, '_');
+    const type =
+      norm === 'chest' || norm === 'treasure' || norm === 'treasurechest' || norm === 'treasure_chest'
+        ? 'treasure_chest'
+        : norm === 'coin' || norm === 'coins' || norm === 'coin_pile'
+          ? 'coin_pile'
+          : norm === 'bills' || norm === 'money' || norm === 'money_bills'
+            ? 'money_bills'
+            : norm;
     const value = c.value ?? (type === 'treasure_chest' ? 40 : type === 'coin_pile' ? 20 : 10);
 
     ctx.save();
@@ -705,7 +837,10 @@ function drawPlayer(
   colors: { main: string; dark: string; light: string },
   velocityX: number,
   velocityY: number,
-  facingAngle: number
+  dir: FacingDir,
+  sheet: HTMLImageElement | null,
+  sheetReady: boolean,
+  sheetSpec: { frameW: number; frameH: number; framesPerDir: number; anchorX: number; anchorY: number }
 ) {
   const now = Date.now();
   const speed = Math.hypot(velocityX, velocityY);
@@ -719,10 +854,12 @@ function drawPlayer(
   const breathScale = moving ? 1 : 1 + Math.sin(now / 500) * 0.02;
   const lean = moving ? Math.sin(runPhase) * 0.04 : 0;
 
+  // IMPORTANT: Keep label + ground shadow screen-aligned.
+  // Rotating them with the character makes it look like the body "crawls/smears" on the ground.
   ctx.save();
   ctx.translate(x, y);
-  ctx.rotate(facingAngle);
 
+  // label (not rotated)
   ctx.font = 'bold 17px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -731,8 +868,7 @@ function drawPlayer(
   ctx.fillStyle = colors.light;
   ctx.fillText(name, 0, -91 - bob);
 
-  ctx.translate(0, -bob);
-
+  // ground shadow (not rotated)
   ctx.shadowColor = 'rgba(0,0,0,0.35)';
   ctx.shadowBlur = 14;
   ctx.shadowOffsetY = 5;
@@ -741,6 +877,23 @@ function drawPlayer(
   ctx.ellipse(0, 58, 46, 22, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
+  ctx.shadowOffsetY = 0;
+
+  // character body
+  ctx.save();
+  ctx.translate(0, -bob);
+
+  // Sprite sheet path (preferred) — supports professional walk cycles.
+  // If no sheet is available, fall back to procedural vector character.
+  if (sheet && sheetReady && sheet.naturalWidth > 0 && sheet.naturalHeight > 0) {
+    drawCharacterSprite(ctx, sheet, sheetSpec, dir, moving, speed, now);
+    if (isMe) {
+      drawGlow(ctx, 0, -52, 70, colors.main, 0.2);
+    }
+    ctx.restore(); // body
+    ctx.restore(); // translate
+    return;
+  }
 
   const legGrad = ctx.createLinearGradient(0, 0, 0, 52);
   legGrad.addColorStop(0, colors.light);
@@ -889,7 +1042,33 @@ function drawPlayer(
     ctx.stroke();
   }
 
-  ctx.restore();
+  ctx.restore(); // body rotation
+  ctx.restore(); // translate
+}
+
+function drawCharacterSprite(
+  ctx: CanvasRenderingContext2D,
+  sheet: HTMLImageElement,
+  spec: { frameW: number; frameH: number; framesPerDir: number; anchorX: number; anchorY: number },
+  dir: FacingDir,
+  moving: boolean,
+  speed: number,
+  nowMs: number
+) {
+  const row = dir === 'down' ? 0 : dir === 'left' ? 1 : dir === 'right' ? 2 : 3;
+  const fps = moving ? (8 + Math.min(8, speed / 80)) : 0;
+  const frame = moving ? Math.floor((nowMs / 1000) * fps) % spec.framesPerDir : 0;
+
+  const sx = frame * spec.frameW;
+  const sy = row * spec.frameH;
+  const dx = -spec.frameW * spec.anchorX;
+  const dy = -spec.frameH * spec.anchorY;
+
+  // For left direction, you may prefer a dedicated row OR a flip.
+  // This implementation uses the left row. If your sheet has only right-facing frames,
+  // you can flip when dir === 'left' by scaling(-1,1) and using the right row instead.
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(sheet, sx, sy, spec.frameW, spec.frameH, dx, dy, spec.frameW, spec.frameH);
 }
 
 function drawPlayers(
@@ -900,7 +1079,10 @@ function drawPlayers(
   t: number,
   isMoving: boolean,
   vel: { x: number; y: number },
-  facingAngle: number
+  myDir: FacingDir,
+  sheet: HTMLImageElement | null,
+  sheetReady: boolean,
+  sheetSpec: { frameW: number; frameH: number; framesPerDir: number; anchorX: number; anchorY: number }
 ) {
   const list = Object.values(players || {}).sort((a: any, b: any) => (a.id || '').localeCompare(b.id || ''));
   list.forEach((p: any, idx: number) => {
@@ -909,8 +1091,10 @@ function drawPlayers(
     const colors = PLAYER_COLORS[idx % PLAYER_COLORS.length];
     const vx = p.id === playerId ? vel.x : 0;
     const vy = p.id === playerId ? vel.y : 0;
-    const rot = p.id === playerId ? facingAngle : 0;
-    drawPlayer(ctx, px, py, p.id === playerId, p.name || '?', colors, vx, vy, rot);
+    // Remote players: without velocity from server tick, show them idle facing down for now.
+    // If you later stream velocity/dir from server, pass it here.
+    const dir: FacingDir = p.id === playerId ? myDir : 'down';
+    drawPlayer(ctx, px, py, p.id === playerId, p.name || '?', colors, vx, vy, dir, sheet, sheetReady, sheetSpec);
   });
 }
 
@@ -941,7 +1125,7 @@ function tickDustTrail(
 
 function tickFloatingTexts(
   ctx: CanvasRenderingContext2D,
-  list: { x: number; y: number; text: string; life: number; maxLife: number; vy: number }[],
+  list: { x: number; y: number; text: string; life: number; maxLife: number; vy: number; color: string }[],
   dt: number
 ) {
   for (let i = list.length - 1; i >= 0; i--) {
@@ -960,7 +1144,7 @@ function tickFloatingTexts(
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#000';
     ctx.fillText(ft.text, ft.x + 2, ft.y + 2);
-    ctx.fillStyle = '#fde68a';
+    ctx.fillStyle = ft.color || '#fde68a';
     ctx.fillText(ft.text, ft.x, ft.y);
     ctx.restore();
   }

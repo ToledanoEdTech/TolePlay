@@ -13,6 +13,9 @@ import {
   emitAsteroidExplosion,
   drawOreGem, drawMuzzleFlash,
   type ParallaxLayer,
+  drawSpaceship,
+  drawAsteroidStandalone,
+  emitThrusterParticles,
 } from './renderUtils';
 
 const WORLD_SIZE = 4000;
@@ -41,21 +44,23 @@ function getAsteroidType(value: number) {
   return ASTEROID_TYPES[0];
 }
 
-const PLAYER_COLORS = ['#38bdf8', '#f43f5e', '#a855f7', '#10b981', '#f59e0b', '#06b6d4', '#ec4899', '#84cc16'];
-
-function playerColor(playerId: string): string {
-  let h = 0;
-  for (let i = 0; i < playerId.length; i++) h = (h * 31 + playerId.charCodeAt(i)) >>> 0;
-  return PLAYER_COLORS[h % PLAYER_COLORS.length];
+function playerHslColor(id: string): string {
+  const hash = id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  return `hsl(${hash % 360}, 80%, 60%)`;
 }
 
 export function AsteroidHuntGame({ roomCode, playerId, player, questions, globalState, allPlayers, startTime }: Props) {
   const [quizOpen, setQuizOpen] = useState(false);
   const [shopOpen, setShopOpen] = useState(false);
+  const [quizQuestions, setQuizQuestions] = useState<any[]>(() => Array.isArray(questions) ? questions : []);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const gsRef = useRef(globalState);
   const playerRef = useRef(player);
+  const allPlayersRef = useRef<Record<string, any>>(allPlayers || {});
+  const playerIdRef = useRef(playerId);
+  const localAimAngleRef = useRef(0);
+  const quizOpenRef = useRef(false);
   const starsRef = useRef<Star[]>([]);
   const nebulasRef = useRef<ParallaxLayer[]>([]);
   const particlesRef = useRef<Particle[]>([]);
@@ -67,11 +72,118 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const modalOpenRef = useRef(false);
   const floatTextsRef = useRef<{ x: number; y: number; text: string; life: number }[]>([]);
   const prevTimeRef = useRef(0);
-  const seenCollectiblesRef = useRef<Set<string>>(new Set());
+  const prevAsteroidsRef = useRef<Map<string, any>>(new Map());
+
+  // --- Client-side smoothing state (prediction + lerp-to-authority) ---
+  // EXACT architecture requested:
+  // - targetX/targetY (authoritative from server)
+  // - renderX/renderY (what we draw)
+  // - render += (target - render) * 0.15 each RAF tick
+  type PlayerTarget = { x: number; y: number; angle: number; vx: number; vy: number };
+  type PlayerRender = { x: number; y: number; angle: number };
+  type AstTarget = { x: number; y: number; rotation: number; vx: number; vy: number; rotSpeed: number };
+  type AstRender = { x: number; y: number; rotation: number };
+  type ProjTarget = { x: number; y: number; vx: number; vy: number; type?: string; radius?: number; color?: string };
+  type ProjRender = { x: number; y: number; vx: number; vy: number; lastSeenAt: number; type?: string; radius?: number; color?: string };
+
+  const playerTargetsRef = useRef<Map<string, PlayerTarget>>(new Map());
+  const playerRendersRef = useRef<Map<string, PlayerRender>>(new Map());
+  const astTargetsRef = useRef<Map<string, AstTarget>>(new Map());
+  const astRendersRef = useRef<Map<string, AstRender>>(new Map());
+  const projTargetsRef = useRef<Map<string, ProjTarget>>(new Map());
+  const projRendersRef = useRef<Map<string, ProjRender>>(new Map());
 
   gsRef.current = globalState;
   playerRef.current = player;
+  allPlayersRef.current = allPlayers || {};
+  playerIdRef.current = playerId;
   modalOpenRef.current = quizOpen || shopOpen;
+  quizOpenRef.current = quizOpen;
+
+  // Snapshot questions ONCE when opening quiz to prevent rapid remount / cycling
+  useEffect(() => {
+    if (!quizOpen) return;
+    setQuizQuestions(Array.isArray(questions) ? questions : []);
+  }, [quizOpen]);
+
+  // Input fix: when quiz opens, clear local keys and stop movement on server.
+  useEffect(() => {
+    if (!quizOpen) return;
+
+    // Clear stuck key states (canvas loses focus, keyup may never fire)
+    keysRef.current = { up: false, down: false, left: false, right: false };
+
+    // Emit "stop" movement so server doesn't keep last vx/vy forever
+    socket.emit('move', { code: roomCode, playerId, dx: 0, dy: 0, angle: localAimAngleRef.current });
+  }, [quizOpen, roomCode, playerId]);
+
+  // Also clear inputs when the window/canvas loses focus (prevents stuck keys even without opening quiz).
+  useEffect(() => {
+    const clearInputs = () => {
+      keysRef.current = { up: false, down: false, left: false, right: false };
+      socket.emit('move', { code: roomCode, playerId, dx: 0, dy: 0, angle: localAimAngleRef.current });
+    };
+    const onWindowBlur = () => clearInputs();
+    const onVisibility = () => { if (document.hidden) clearInputs(); };
+    window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('blur', onWindowBlur);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [roomCode, playerId]);
+
+  // Update targets from server tick, and derive velocities for prediction (vx/vy)
+  useEffect(() => {
+    const now = performance.now();
+    const safeNum = (v: unknown, def: number): number =>
+      typeof v === 'number' && !Number.isNaN(v) ? v : def;
+
+    // Players
+    const ap = allPlayers || {};
+    for (const [id, pl] of Object.entries(ap)) {
+      const x = safeNum((pl as any)?.x, WORLD_SIZE / 2);
+      const y = safeNum((pl as any)?.y, WORLD_SIZE / 2);
+      const angle = safeNum((pl as any)?.angle, safeNum((pl as any)?.modeState?.angle, 0));
+      const prev = playerTargetsRef.current.get(id);
+      const dt = prev ? Math.max(0.001, 0.05) : 0.05;
+      const vx = prev ? (x - prev.x) / dt : 0;
+      const vy = prev ? (y - prev.y) / dt : 0;
+      playerTargetsRef.current.set(id, { x, y, angle, vx, vy });
+    }
+
+    // Asteroids
+    const asts: any[] = Array.isArray(globalState?.asteroids) ? globalState.asteroids : [];
+    for (const a of asts) {
+      const id = typeof a?.id === 'string' ? a.id : undefined;
+      if (!id) continue;
+      const x = safeNum(a?.x, WORLD_SIZE / 2);
+      const y = safeNum(a?.y, WORLD_SIZE / 2);
+      const rotation = safeNum(a?.rotation, 0);
+      const rotSpeed = safeNum(a?.rotSpeed, 0);
+      const prev = astTargetsRef.current.get(id);
+      const dt = prev ? Math.max(0.001, 0.05) : 0.05;
+      const vx = prev ? (x - prev.x) / dt : safeNum(a?.vx, 0);
+      const vy = prev ? (y - prev.y) / dt : safeNum(a?.vy, 0);
+      astTargetsRef.current.set(id, { x, y, rotation, rotSpeed, vx, vy });
+    }
+
+    // Projectiles (already have vx/vy from server; keep as target + let RAF predict+lerp)
+    const projs: any[] = Array.isArray(globalState?.projectiles) ? globalState.projectiles : [];
+    const nextProj = new Map<string, ProjTarget>();
+    for (const pr of projs) {
+      const x = safeNum(pr?.x, NaN);
+      const y = safeNum(pr?.y, NaN);
+      if (Number.isNaN(x) || Number.isNaN(y)) continue;
+      const id = typeof pr?.id === 'string'
+        ? pr.id
+        : `${String(pr?.shooterId ?? 'u')}_${String(pr?.spawnTime ?? pr?.createdAt ?? '')}_${String(pr?.type ?? 'p')}`;
+      const vx = safeNum(pr?.vx, 0);
+      const vy = safeNum(pr?.vy, 0);
+      nextProj.set(id, { x, y, vx, vy, type: pr?.type, radius: pr?.radius, color: pr?.color });
+    }
+    projTargetsRef.current = nextProj;
+  }, [allPlayers, globalState]);
 
   useEffect(() => {
     const w = window.innerWidth;
@@ -110,6 +222,12 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       worldX: cam.x + (screenX / viewW) * viewW,
       worldY: cam.y + (screenY / viewH) * viewH,
     };
+
+    // update local aim angle (used for rendering immediately and for server sync)
+    const p = playerRef.current;
+    const shipX = typeof p?.x === 'number' && !Number.isNaN(p.x) ? p.x : WORLD_SIZE / 2;
+    const shipY = typeof p?.y === 'number' && !Number.isNaN(p.y) ? p.y : WORLD_SIZE / 2;
+    localAimAngleRef.current = Math.atan2(mouseRef.current.worldY - shipY, mouseRef.current.worldX - shipX);
   }, []);
 
   const handleMouseMove = useCallback((e: RMouseEvent<HTMLCanvasElement>) => {
@@ -146,7 +264,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       const k = keysRef.current;
       const dx = (k.right ? 1 : 0) - (k.left ? 1 : 0);
       const dy = (k.down ? 1 : 0) - (k.up ? 1 : 0);
-      socket.emit('move', { code: roomCode, playerId, dx, dy });
+      socket.emit('move', { code: roomCode, playerId, dx, dy, angle: localAimAngleRef.current });
     }, 50);
     return () => clearInterval(interval);
   }, [roomCode, playerId, quizOpen, shopOpen]);
@@ -214,14 +332,34 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       const t = now * 0.001;
       const gs = gsRef.current || {};
       const p = playerRef.current;
+      const ap = allPlayersRef.current || {};
+      const myId = playerIdRef.current;
       const viewW = Math.max(320, canvas.width);
       const viewH = Math.max(240, canvas.height);
+      const POS_LERP = 0.2; // EXACT factor requested
 
       const cam = cameraRef.current;
-      const plX = safeNum(p?.x, WORLD_SIZE / 2);
-      const plY = safeNum(p?.y, WORLD_SIZE / 2);
-      cam.x = plX - viewW / 2;
-      cam.y = plY - viewH / 2;
+
+      // Use smoothed local render position for camera to eliminate "world stutter"
+      const myTarget = playerTargetsRef.current.get(myId);
+      if (myTarget) {
+        const cur = playerRendersRef.current.get(myId) ?? { x: myTarget.x, y: myTarget.y, angle: myTarget.angle };
+        cur.x += (myTarget.vx || 0) * dt;
+        cur.y += (myTarget.vy || 0) * dt;
+        cur.x += (myTarget.x - cur.x) * POS_LERP;
+        cur.y += (myTarget.y - cur.y) * POS_LERP;
+        const targetAngle = localAimAngleRef.current;
+        const da = Math.atan2(Math.sin(targetAngle - cur.angle), Math.cos(targetAngle - cur.angle));
+        cur.angle = cur.angle + da * POS_LERP;
+        playerRendersRef.current.set(myId, cur);
+        cam.x = cur.x - viewW / 2;
+        cam.y = cur.y - viewH / 2;
+      } else {
+        const plX = safeNum(p?.x, WORLD_SIZE / 2);
+        const plY = safeNum(p?.y, WORLD_SIZE / 2);
+        cam.x = plX - viewW / 2;
+        cam.y = plY - viewH / 2;
+      }
       cam.x = Math.max(0, Math.min(WORLD_SIZE - viewW, cam.x));
       cam.y = Math.max(0, Math.min(WORLD_SIZE - viewH, cam.y));
 
@@ -250,156 +388,209 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       ctx.lineWidth = 4;
       ctx.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
 
-      const toScreen = (wx: number, wy: number) => ({
-        x: safeNum(wx, 0) - cam.x,
-        y: safeNum(wy, 0) - cam.y,
-      });
+      // Asteroids (server state is source-of-truth) + explosion detection
+      const asteroids: any[] = Array.isArray(gs.asteroids) ? gs.asteroids : [];
+      const curAstMap = new Map<string, any>();
+      for (const a of asteroids) {
+        const id = typeof a?.id === 'string' ? a.id : undefined;
+        if (id) curAstMap.set(id, a);
+      }
+      // detect destroyed asteroids (present in prev, missing now)
+      if (prevAsteroidsRef.current.size > 0) {
+        prevAsteroidsRef.current.forEach((prevAst, id) => {
+          if (curAstMap.has(id)) return;
+          const ax = safeNum(prevAst?.x, NaN);
+          const ay = safeNum(prevAst?.y, NaN);
+          if (Number.isNaN(ax) || Number.isNaN(ay)) return;
+          const type = getAsteroidType(safeNum(prevAst?.value, 50));
+          particlesRef.current = particlesRef.current.concat(emitAsteroidExplosion(ax, ay, type.body, type.glow, 26));
+          triggerShake(shakeRef.current, 7);
+        });
+      }
+      prevAsteroidsRef.current = curAstMap;
 
-      (gs.asteroids || []).forEach((a: any) => {
+      asteroids.forEach((a: any) => {
         const ax = safeNum(a.x, WORLD_SIZE / 2);
         const ay = safeNum(a.y, WORLD_SIZE / 2);
-        const { x: sx, y: sy } = toScreen(ax, ay);
-        if (Number.isNaN(sx) || Number.isNaN(sy) || sx < -200 || sx > viewW + 200 || sy < -200 || sy > viewH + 200) return;
+        if (Number.isNaN(ax) || Number.isNaN(ay)) return;
+        // cull by camera bounds (in world coords; ctx already translated)
+        if (ax < cam.x - 200 || ax > cam.x + viewW + 200 || ay < cam.y - 200 || ay > cam.y + viewH + 200) return;
         const type = getAsteroidType(safeNum(a.value, 50));
-        const scale = Math.max(0.3, (viewW / VIEW_SIZE) * 0.5);
-        const size = Math.max(8, safeNum(a.radius, 25) * scale);
-        const rotation = safeNum(a.rotation, 0) + ax * 0.01;
+        const scale = Math.max(0.35, (viewW / VIEW_SIZE) * 0.65);
+        const radius = Math.max(10, safeNum(a.radius, 25) * scale);
+
+        const id = typeof a?.id === 'string' ? a.id : undefined;
+        const target = id ? astTargetsRef.current.get(id) : undefined;
+        if (!id || !target) return;
+
+        const cur = astRendersRef.current.get(id) ?? { x: target.x, y: target.y, rotation: target.rotation };
+
+        // (optional) tiny prediction step so lerp has directionality
+        cur.x += (target.vx || 0) * dt;
+        cur.y += (target.vy || 0) * dt;
+        cur.rotation += (target.rotSpeed || 0) * dt;
+
+        // EXACT LERP requested
+        cur.x += (target.x - cur.x) * POS_LERP;
+        cur.y += (target.y - cur.y) * POS_LERP;
+        cur.rotation += (target.rotation - cur.rotation) * POS_LERP;
+
+        astRendersRef.current.set(id, cur);
+
+        const rotation = cur.rotation;
         const maxHp = Math.max(1, safeNum(a.maxHp, 100));
         const hpPct = Math.max(0, Math.min(1, safeNum(a.hp, maxHp) / maxHp));
-        drawAsteroid(ctx, sx, sy, size, type, rotation, hpPct);
-        const barColor = hpPct > 0.5 ? type.glow : hpPct > 0.25 ? '#f59e0b' : '#ef4444';
-        drawHPBar(ctx, sx, sy - size - 6, size * 1.6, 3, hpPct, barColor);
+
+        drawAsteroidStandalone(ctx, {
+          x: cur.x,
+          y: cur.y,
+          radius,
+          color: type.body,
+          rotation,
+          vertices: Array.isArray(a.vertices) ? a.vertices : undefined,
+          craters: Array.isArray(a.craters) ? a.craters : undefined,
+        }, { outline: type.outline, hpPct });
+
+        if (hpPct < 1) {
+          const barColor = hpPct > 0.5 ? type.glow : hpPct > 0.25 ? '#f59e0b' : '#ef4444';
+          drawHPBar(ctx, cur.x, cur.y - radius - 10, radius * 1.6, 3, hpPct, barColor);
+        }
       });
 
       (gs.collectibles || []).forEach((c: any) => {
         const cx = safeNum(c.x, 0);
         const cy = safeNum(c.y, 0);
-        const { x: scrX, y: scrY } = toScreen(cx, cy);
-        if (Number.isNaN(scrX) || Number.isNaN(scrY) || scrX < -30 || scrX > viewW + 30 || scrY < -30 || scrY > viewH + 30) return;
+        if (Number.isNaN(cx) || Number.isNaN(cy)) return;
+        if (cx < cam.x - 40 || cx > cam.x + viewW + 40 || cy < cam.y - 40 || cy > cam.y + viewH + 40) return;
         const gemColor = c.color || (safeNum(c.value, 50) >= 100 ? '#c084fc' : safeNum(c.value, 50) >= 70 ? '#67e8f9' : '#9ca3af');
-        drawOreGem(ctx, scrX, scrY, safeNum(c.value, 50), gemColor, t, viewW / VIEW_SIZE);
+        drawOreGem(ctx, cx, cy, safeNum(c.value, 50), gemColor, t, viewW / VIEW_SIZE);
       });
 
-      (gs.projectiles || []).filter((proj: any) => {
-        const projX = proj.x;
-        const projY = proj.y;
-        return typeof projX === 'number' && !Number.isNaN(projX) && typeof projY === 'number' && !Number.isNaN(projY);
-      }).forEach((proj: any) => {
-        const { x: px, y: py } = toScreen(proj.x, proj.y);
-        if (Number.isNaN(px) || Number.isNaN(py) || px < -30 || px > viewW + 30 || py < -30 || py > viewH + 30) return;
-        if (proj.type === 'plasma') {
-          drawGlow(ctx, px, py, 25 * (viewW / VIEW_SIZE), '#a855f7', 0.4);
+      // Projectiles: smooth at 60fps using prediction + LERP to authoritative positions
+      const nowMs = now;
+      const targets = projTargetsRef.current;
+      const renders = projRendersRef.current;
+      // prune renders that disappeared
+      for (const [id, r] of renders.entries()) {
+        if (!targets.has(id) && nowMs - r.lastSeenAt > 500) renders.delete(id);
+      }
+      for (const [id, tgt] of targets.entries()) {
+        const r = renders.get(id) ?? { x: tgt.x, y: tgt.y, vx: tgt.vx, vy: tgt.vy, lastSeenAt: nowMs, type: tgt.type, radius: tgt.radius, color: tgt.color };
+        // predict
+        r.x += (r.vx || 0) * dt;
+        r.y += (r.vy || 0) * dt;
+        // lerp to server target
+        r.x += (tgt.x - r.x) * POS_LERP;
+        r.y += (tgt.y - r.y) * POS_LERP;
+        // velocity converge (helps reduce “slow” feel if server velocities spike)
+        r.vx += ((tgt.vx || 0) - (r.vx || 0)) * POS_LERP;
+        r.vy += ((tgt.vy || 0) - (r.vy || 0)) * POS_LERP;
+        r.type = tgt.type;
+        r.radius = tgt.radius;
+        r.color = tgt.color;
+        r.lastSeenAt = nowMs;
+        renders.set(id, r);
+
+        if (r.x < cam.x - 80 || r.x > cam.x + viewW + 80 || r.y < cam.y - 80 || r.y > cam.y + viewH + 80) continue;
+        if (r.type === 'plasma') {
+          drawGlow(ctx, r.x, r.y, 25 * (viewW / VIEW_SIZE), '#a855f7', 0.4);
           ctx.fillStyle = colorAlpha('#a855f7', 0.9);
           ctx.shadowBlur = 15;
           ctx.shadowColor = '#a855f7';
           ctx.beginPath();
-          ctx.arc(px, py, 12 * (viewW / VIEW_SIZE), 0, Math.PI * 2);
+          ctx.arc(r.x, r.y, 12 * (viewW / VIEW_SIZE), 0, Math.PI * 2);
           ctx.fill();
           ctx.shadowBlur = 0;
         } else {
           ctx.beginPath();
-          ctx.arc(px, py, (proj.radius || 4) * (viewW / VIEW_SIZE), 0, Math.PI * 2);
-          ctx.fillStyle = proj.color || '#60a5fa';
+          ctx.arc(r.x, r.y, (r.radius || 4) * (viewW / VIEW_SIZE), 0, Math.PI * 2);
+          const c = r.color || '#60a5fa';
+          ctx.fillStyle = c;
           ctx.shadowBlur = 10;
-          ctx.shadowColor = proj.color || '#60a5fa';
+          ctx.shadowColor = c;
           ctx.fill();
           ctx.shadowBlur = 0;
         }
-      });
+      }
 
-      const allPlayersMap = allPlayers || {};
-      const playersList: Array<{ id: string; x?: number; y?: number; angle?: number; name?: string; modeState?: any }> = Object.entries(allPlayersMap).map(([id, pl]) => ({ ...pl, id }));
-      if (!playersList.some((pl: any) => pl.id === playerId)) {
+      // Players: build list from ref (prevents stale closure / invisible remotes)
+      const playersList: Array<{ id: string; x?: number; y?: number; angle?: number; name?: string; modeState?: any; color?: string }> =
+        Object.entries(ap).map(([id, pl]) => ({ ...(pl as any), id }));
+
+      if (!playersList.some((pl: any) => pl.id === myId)) {
         playersList.push({
-          id: playerId,
+          id: myId,
           x: plX,
           y: plY,
-          angle: typeof p?.angle === 'number' ? p.angle : 0,
+          angle: localAimAngleRef.current,
           name: p?.name,
           modeState: p?.modeState,
         });
       }
       playersList.forEach((pl: any) => {
-        const plx = safeNum(pl.x, WORLD_SIZE / 2);
-        const ply = safeNum(pl.y, WORLD_SIZE / 2);
-        const { x: sx, y: sy } = toScreen(plx, ply);
-        if (Number.isNaN(sx) || Number.isNaN(sy) || sx < -80 || sx > viewW + 80 || sy < -80 || sy > viewH + 80) return;
-        const angle = safeNum(pl.angle, 0);
-        const color = pl.color || playerColor(pl.id);
+        const id = String(pl.id);
+        const target = playerTargetsRef.current.get(id);
+        if (!target) return;
+
+        const cur = playerRendersRef.current.get(id) ?? { x: target.x, y: target.y, angle: target.angle };
+
+        // optional prediction
+        cur.x += (target.vx || 0) * dt;
+        cur.y += (target.vy || 0) * dt;
+
+        // EXACT LERP requested
+        cur.x += (target.x - cur.x) * POS_LERP;
+        cur.y += (target.y - cur.y) * POS_LERP;
+
+        const targetAngle = id === myId ? localAimAngleRef.current : target.angle;
+        const da = Math.atan2(Math.sin(targetAngle - cur.angle), Math.cos(targetAngle - cur.angle));
+        cur.angle = cur.angle + da * POS_LERP;
+
+        playerRendersRef.current.set(id, cur);
+
+        const plx = cur.x;
+        const ply = cur.y;
+        if (Number.isNaN(plx) || Number.isNaN(ply)) return;
+        if (plx < cam.x - 120 || plx > cam.x + viewW + 120 || ply < cam.y - 120 || ply > cam.y + viewH + 120) return;
+        const angle = cur.angle;
+        const color = playerHslColor(id);
         const scale = Math.max(0.3, (viewW / VIEW_SIZE) * 0.5);
         const radius = Math.max(12, 26 * scale);
-        const isLocal = pl.id === playerId;
+        const isLocal = pl.id === myId;
 
-        if (isLocal) {
-          drawGlow(ctx, sx, sy, radius + 25, color, 0.2);
-          ctx.beginPath();
-          ctx.arc(sx, sy, (pl.modeState?.magnetRange ?? 50) * scale, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        }
-        if (pl.modeState?.hasShield) {
-          ctx.beginPath();
-          ctx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(59, 130, 246, 0.9)';
-          ctx.lineWidth = 3;
-          ctx.stroke();
-          ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
-          ctx.fill();
+        // Thrusters for everyone (based on server movement intent)
+        const mvx = safeNum(pl.modeState?.vx, 0);
+        const mvy = safeNum(pl.modeState?.vy, 0);
+        const moveLen = Math.hypot(mvx, mvy);
+        if (moveLen > 0.05 && Math.random() < 0.7) {
+          // rear of ship based on its current rotation (not movement vector)
+          const thrusterAngle = angle + Math.PI;
+          const backX = plx - Math.cos(angle) * (radius * 0.95);
+          const backY = ply - Math.sin(angle) * (radius * 0.95);
+          particlesRef.current = particlesRef.current.concat(
+            emitThrusterParticles(backX, backY, thrusterAngle, isLocal ? color : colorAlpha(color, 0.9), Math.min(1, moveLen), viewW / VIEW_SIZE)
+          );
         }
 
-        ctx.save();
-        ctx.translate(safeNum(sx, viewW / 2), safeNum(sy, viewH / 2));
-        ctx.rotate(angle);
-        ctx.strokeStyle = colorAlpha('#fff', 0.35);
-        ctx.lineWidth = 2;
-        ctx.fillStyle = color;
-        ctx.shadowBlur = 12;
-        ctx.shadowColor = color;
-        ctx.beginPath();
-        ctx.moveTo(radius, 0);
-        ctx.lineTo(-radius * 0.5, radius * 0.4);
-        ctx.lineTo(-radius * 0.8, 0);
-        ctx.lineTo(-radius * 0.5, -radius * 0.4);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-        ctx.beginPath();
-        ctx.moveTo(-radius * 0.2, radius * 0.3);
-        ctx.lineTo(-radius, radius * 0.9);
-        ctx.lineTo(-radius * 0.7, radius * 0.3);
-        ctx.closePath();
-        ctx.fillStyle = '#334155';
-        ctx.fill();
-        ctx.strokeStyle = colorAlpha('#fff', 0.15);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(-radius * 0.2, -radius * 0.3);
-        ctx.lineTo(-radius, -radius * 0.9);
-        ctx.lineTo(-radius * 0.7, -radius * 0.3);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        ctx.fillStyle = '#bae6fd';
-        ctx.beginPath();
-        ctx.ellipse(radius * 0.2, 0, radius * 0.4, radius * 0.15, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-
-        ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.font = `bold ${14 * (viewW / VIEW_SIZE)}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.fillText(pl.name || pl.id, sx, sy - radius - 18);
+        drawSpaceship(ctx, plx, ply, angle, color, radius, {
+          playerId: id,
+          name: pl.name || pl.id,
+          isLocal,
+          magnetRange: (pl.modeState?.magnetRange ?? 50) * scale,
+          hasShield: !!pl.modeState?.hasShield,
+          uiScale: viewW / VIEW_SIZE,
+          showGlow: true,
+        });
       });
 
-      if (muzzleFlashRef.current.active && p?.id === playerId) {
+      if (muzzleFlashRef.current.active && myId === playerId) {
         const mf = muzzleFlashRef.current;
-        const sx = safeNum(plX - cam.x, viewW / 2);
-        const sy = safeNum(plY - cam.y, viewH / 2);
+        const myR = playerRendersRef.current.get(myId);
+        const sx = safeNum(myR?.x, safeNum(p?.x, WORLD_SIZE / 2));
+        const sy = safeNum(myR?.y, safeNum(p?.y, WORLD_SIZE / 2));
         const mfAngle = safeNum(mf.angle, 0);
         const mfIntensity = safeNum(mf.intensity, 0.5);
-        if (!Number.isNaN(sx) && !Number.isNaN(sy)) {
+        if (!Number.isNaN(sx) && !Number.isNaN(sy) && sx >= cam.x - 120 && sx <= cam.x + viewW + 120 && sy >= cam.y - 120 && sy <= cam.y + viewH + 120) {
           drawMuzzleFlash(ctx, sx, sy, mfAngle, mfIntensity);
         }
         muzzleFlashRef.current.intensity = mfIntensity - dt * 8;
@@ -440,9 +631,9 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         ctx.fillRect(mmX + ax * scale, mmY + ay * scale, 2, 2);
       });
       playersList.forEach((pl: any) => {
-        ctx.fillStyle = pl.color || playerColor(pl.id);
+        ctx.fillStyle = playerHslColor(String(pl.id));
         ctx.beginPath();
-        ctx.arc(mmX + safeNum(pl.x, 0) * scale, mmY + safeNum(pl.y, 0) * scale, pl.id === playerId ? 5 : 4, 0, Math.PI * 2);
+        ctx.arc(mmX + safeNum(pl.x, 0) * scale, mmY + safeNum(pl.y, 0) * scale, pl.id === myId ? 5 : 4, 0, Math.PI * 2);
         ctx.fill();
       });
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
@@ -521,7 +712,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     >
       <canvas
         ref={canvasRef}
-        className="absolute inset-0 w-full h-full cursor-crosshair"
+        className={`absolute inset-0 w-full h-full cursor-crosshair ${quizOpen || shopOpen ? 'pointer-events-none' : ''}`}
         style={{ width: '100%', height: '100%' }}
         onClick={handleCanvasClick}
         onTouchEnd={handleCanvasClick}
@@ -580,7 +771,15 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
-          onClick={() => setQuizOpen(true)}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            // Clear inputs immediately so we don't get "stuck moving" if keyup never fires.
+            keysRef.current = { up: false, down: false, left: false, right: false };
+            socket.emit('move', { code: roomCode, playerId, dx: 0, dy: 0, angle: localAimAngleRef.current });
+            if (quizOpenRef.current) return;
+            setQuizOpen(true);
+          }}
           className="px-6 py-3 rounded-xl font-bold flex items-center gap-2 bg-purple-600/90 hover:bg-purple-500 border border-purple-400/30 shadow-lg shadow-purple-500/20 backdrop-blur-sm"
         >
           <HelpCircle size={18} /> טרמינל שאלות
@@ -621,7 +820,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
               <h2 className="text-xl font-bold text-center mb-4 text-white">טרמינל שאלות</h2>
               <p className="text-slate-300 text-sm text-center mb-4">תשובה נכונה = +20 ⚡ + 10 💰</p>
               <div className="min-h-[220px] relative" style={{ overflow: 'visible' }}>
-                <QuestionPanel questions={questions} onCorrect={onCorrect} onWrong={onWrong} earnLabel="+20 ⚡ +10 💰" compact staticDisplay />
+                <QuestionPanel questions={quizQuestions as any} isOpen={quizOpen} onCorrect={onCorrect} onWrong={onWrong} earnLabel="+20 ⚡ +10 💰" compact staticDisplay />
               </div>
             </div>
           </ModalBackdrop>

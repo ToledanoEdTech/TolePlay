@@ -217,6 +217,20 @@ export function lerp(a: number, b: number, t: number): number {
 
 export function colorAlpha(color: string, alpha: number): string {
   const safeAlpha = typeof alpha === 'number' && !Number.isNaN(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.8;
+  if (color && typeof color === 'string') {
+    const c = color.trim();
+    // Support hsl() / hsla() for deterministic per-player coloring.
+    if (c.startsWith('hsl(')) {
+      const inner = c.slice(4, -1);
+      return `hsla(${inner},${safeAlpha})`;
+    }
+    if (c.startsWith('hsla(')) {
+      // Replace alpha component if present (best-effort).
+      const inner = c.slice(5, -1);
+      const parts = inner.split(',');
+      if (parts.length >= 3) return `hsla(${parts[0]},${parts[1]},${parts[2]},${safeAlpha})`;
+    }
+  }
   if (color && typeof color === 'string' && color.startsWith('#')) {
     const r = parseInt(color.slice(1, 3), 16);
     const g = parseInt(color.slice(3, 5), 16);
@@ -404,4 +418,205 @@ export function drawMuzzleFlash(
   } catch (_) {
     try { ctx.restore(); } catch (_) {}
   }
+}
+
+// ── Standalone-style spaceship rendering ──
+
+export function drawSpaceship(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  angle: number,
+  color: string,
+  radius: number,
+  opts?: {
+    playerId?: string;
+    name?: string;
+    isLocal?: boolean;
+    magnetRange?: number;
+    hasShield?: boolean;
+    shieldColor?: string;
+    showGlow?: boolean;
+    uiScale?: number;
+  }
+) {
+  const safeX = typeof x === 'number' && !Number.isNaN(x) ? x : 0;
+  const safeY = typeof y === 'number' && !Number.isNaN(y) ? y : 0;
+  const safeAngle = typeof angle === 'number' && !Number.isNaN(angle) ? angle : 0;
+  const safeR = typeof radius === 'number' && !Number.isNaN(radius) ? Math.max(4, radius) : 18;
+  // Required player coloring logic (stable across clients)
+  const pid = opts?.playerId ?? '';
+  const hash = pid ? pid.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) : 0;
+  const playerColor = pid ? `hsl(${hash % 360}, 80%, 60%)` : color;
+  const safeColor = playerColor || (color && typeof color === 'string' ? color : '#60a5fa');
+  const uiScale = typeof opts?.uiScale === 'number' && !Number.isNaN(opts.uiScale) ? Math.max(0.2, opts.uiScale) : 1;
+
+  // local-only helpers (magnet ring + soft glow)
+  if (opts?.isLocal && typeof opts?.magnetRange === 'number' && opts.magnetRange > 0) {
+    ctx.beginPath();
+    ctx.arc(safeX, safeY, opts.magnetRange, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  if (opts?.showGlow ?? true) {
+    drawGlow(ctx, safeX, safeY, safeR + 22, safeColor, opts?.isLocal ? 0.18 : 0.1);
+  }
+
+  if (opts?.hasShield) {
+    const shield = (opts.shieldColor && opts.shieldColor.startsWith('#')) ? opts.shieldColor : '#3b82f6';
+    ctx.beginPath();
+    ctx.arc(safeX, safeY, safeR + 12, 0, Math.PI * 2);
+    ctx.strokeStyle = colorAlpha(shield, 0.9);
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = colorAlpha(shield, 0.15);
+    ctx.fill();
+  }
+
+  ctx.save();
+  ctx.translate(safeX, safeY);
+  ctx.rotate(safeAngle);
+
+  ctx.shadowBlur = 14;
+  ctx.shadowColor = safeColor;
+
+  // main hull
+  ctx.beginPath();
+  ctx.moveTo(safeR, 0);
+  ctx.lineTo(-safeR * 0.5, safeR * 0.4);
+  ctx.lineTo(-safeR * 0.8, 0);
+  ctx.lineTo(-safeR * 0.5, -safeR * 0.4);
+  ctx.closePath();
+  ctx.fillStyle = safeColor;
+  ctx.fill();
+
+  // fins (left/right)
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#334155';
+  ctx.beginPath();
+  ctx.moveTo(-safeR * 0.2, safeR * 0.3);
+  ctx.lineTo(-safeR, safeR * 0.9);
+  ctx.lineTo(-safeR * 0.7, safeR * 0.3);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(-safeR * 0.2, -safeR * 0.3);
+  ctx.lineTo(-safeR, -safeR * 0.9);
+  ctx.lineTo(-safeR * 0.7, -safeR * 0.3);
+  ctx.closePath();
+  ctx.fill();
+
+  // cockpit window
+  ctx.beginPath();
+  ctx.ellipse(safeR * 0.2, 0, safeR * 0.4, safeR * 0.15, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#bae6fd';
+  ctx.fill();
+
+  ctx.restore();
+
+  // label
+  if (opts?.name) {
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.font = `bold ${Math.max(10, Math.round(14 * uiScale))}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(opts.name, safeX, safeY - safeR - Math.max(12, 18 * uiScale));
+  }
+}
+
+// ── Standalone-style asteroid rendering (supports vertices + craters) ──
+
+export function drawAsteroidStandalone(
+  ctx: CanvasRenderingContext2D,
+  asteroid: {
+    x: number;
+    y: number;
+    radius: number;
+    color?: string;
+    rotation?: number;
+    vertices?: number[];
+    craters?: Array<{ dist: number; angle: number; size: number }>;
+  },
+  opts?: {
+    outline?: string;
+    shadowColor?: string;
+    hpPct?: number;
+  }
+) {
+  const ax = typeof asteroid.x === 'number' && !Number.isNaN(asteroid.x) ? asteroid.x : 0;
+  const ay = typeof asteroid.y === 'number' && !Number.isNaN(asteroid.y) ? asteroid.y : 0;
+  const r = typeof asteroid.radius === 'number' && !Number.isNaN(asteroid.radius) ? Math.max(6, asteroid.radius) : 20;
+  const rot = typeof asteroid.rotation === 'number' && !Number.isNaN(asteroid.rotation) ? asteroid.rotation : 0;
+  const baseColor = asteroid.color && asteroid.color.startsWith('#') ? asteroid.color : '#737373';
+  const outline = (opts?.outline && opts.outline.startsWith('#')) ? opts.outline : 'rgba(255,255,255,0.2)';
+
+  const verts = Array.isArray(asteroid.vertices) && asteroid.vertices.length >= 6
+    ? asteroid.vertices
+    : Array.from({ length: 10 }, () => 0.85 + Math.random() * 0.2);
+
+  ctx.save();
+  ctx.translate(ax, ay);
+  ctx.rotate(rot);
+
+  const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r);
+  grad.addColorStop(0, baseColor);
+  grad.addColorStop(1, '#111');
+
+  ctx.beginPath();
+  const n = verts.length;
+  for (let j = 0; j < n; j++) {
+    const a = (j / n) * Math.PI * 2;
+    const rr = r * (typeof verts[j] === 'number' ? verts[j] : 0.9);
+    const vx = Math.cos(a) * rr;
+    const vy = Math.sin(a) * rr;
+    if (j === 0) ctx.moveTo(vx, vy);
+    else ctx.lineTo(vx, vy);
+  }
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = outline;
+  ctx.stroke();
+
+  const craters = Array.isArray(asteroid.craters) ? asteroid.craters : [];
+  for (const crater of craters) {
+    if (!crater) continue;
+    const dist = typeof crater.dist === 'number' && !Number.isNaN(crater.dist) ? crater.dist : 0.25;
+    const ang = typeof crater.angle === 'number' && !Number.isNaN(crater.angle) ? crater.angle : 0;
+    const size = typeof crater.size === 'number' && !Number.isNaN(crater.size) ? crater.size : 0.2;
+    ctx.beginPath();
+    const cx = Math.cos(ang) * r * dist;
+    const cy = Math.sin(ang) * r * dist;
+    ctx.arc(cx, cy, r * size, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// ── Thruster particles helper ──
+
+export function emitThrusterParticles(
+  x: number,
+  y: number,
+  angle: number,
+  color: string,
+  intensity: number,
+  uiScale: number = 1
+): Particle[] {
+  const safeIntensity = typeof intensity === 'number' && !Number.isNaN(intensity) ? Math.max(0, Math.min(1, intensity)) : 0.5;
+  const count = Math.round(3 + safeIntensity * 6);
+  const speed = (2.2 + safeIntensity * 3.8) * uiScale;
+  const life = 0.25 + safeIntensity * 0.25;
+  return emitDirectional(x, y, angle, 0.6, count, speed, life, colorAlpha(color, 0.9), 2.2 * uiScale, {
+    gravity: 0.02 * uiScale,
+    friction: 0.92,
+    type: 'spark',
+  });
 }

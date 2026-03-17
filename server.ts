@@ -15,6 +15,7 @@ interface Player {
   socketId: string;
   x: number;
   y: number;
+  angle?: number;
   modeState: any;
 }
 
@@ -1058,7 +1059,7 @@ async function startServer() {
       }
     });
 
-    socket.on("move", ({ code, playerId, dx, dy }) => {
+    socket.on("move", ({ code, playerId, dx, dy, angle }) => {
       const room = rooms[code];
       if (!room || room.state !== 'playing' || room.mode !== 'farm') return;
       const player = room.players[playerId];
@@ -1066,6 +1067,10 @@ async function startServer() {
       player.modeState = player.modeState || {};
       player.modeState.vx = typeof dx === 'number' ? Math.max(-1, Math.min(1, dx)) : 0;
       player.modeState.vy = typeof dy === 'number' ? Math.max(-1, Math.min(1, dy)) : 0;
+      if (typeof angle === 'number' && !Number.isNaN(angle)) {
+        player.angle = angle;
+        player.modeState.angle = angle;
+      }
     });
 
     socket.on("disconnect", () => {
@@ -1594,8 +1599,11 @@ async function startServer() {
       else if (room.mode === 'farm') {
         const FARM_WORLD = 4000;
         const PLAYER_RADIUS = 26;
-        const MOVE_SPEED = 14;
-        const dt = 1 / 30;
+        // Tick is emitted every 50ms (~20Hz). The original standalone tuned many values
+        // for ~60fps-per-frame updates, so we rescale to this tick.
+        const MOVE_SPEED_PER_SEC = 420;
+        const dt = 1 / 20;
+        const tickScale60 = dt * 60;
 
         // Spawn asteroids across full world
         if (state.asteroids.length < 100 && Math.random() < 0.1) {
@@ -1631,8 +1639,9 @@ async function startServer() {
         }
 
         state.asteroids.forEach((a: any) => {
-          a.x += a.vx; a.y += a.vy;
-          a.rotation = (a.rotation || 0) + (a.rotSpeed || 0);
+          a.x += (a.vx || 0) * tickScale60;
+          a.y += (a.vy || 0) * tickScale60;
+          a.rotation = (a.rotation || 0) + (a.rotSpeed || 0) * tickScale60;
           if (a.x < -100) a.x = FARM_WORLD + 100;
           if (a.x > FARM_WORLD + 100) a.x = -100;
           if (a.y < -100) a.y = FARM_WORLD + 100;
@@ -1640,10 +1649,10 @@ async function startServer() {
         });
 
         Object.values(room.players).forEach((pl: any) => {
-          const vx = (pl.modeState?.vx || 0) * MOVE_SPEED;
-          const vy = (pl.modeState?.vy || 0) * MOVE_SPEED;
-          pl.x = Math.max(PLAYER_RADIUS, Math.min(FARM_WORLD - PLAYER_RADIUS, (pl.x ?? 2000) + vx));
-          pl.y = Math.max(PLAYER_RADIUS, Math.min(FARM_WORLD - PLAYER_RADIUS, (pl.y ?? 2000) + vy));
+          const vx = (pl.modeState?.vx || 0);
+          const vy = (pl.modeState?.vy || 0);
+          pl.x = Math.max(PLAYER_RADIUS, Math.min(FARM_WORLD - PLAYER_RADIUS, (pl.x ?? 2000) + vx * MOVE_SPEED_PER_SEC * dt));
+          pl.y = Math.max(PLAYER_RADIUS, Math.min(FARM_WORLD - PLAYER_RADIUS, (pl.y ?? 2000) + vy * MOVE_SPEED_PER_SEC * dt));
         });
 
         const projs = (state.projectiles || []).filter((p: any) =>

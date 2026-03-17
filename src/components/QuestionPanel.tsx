@@ -17,6 +17,8 @@ interface Props {
   compact?: boolean;
   /** When true, question text is static and readable (no rapid transitions). */
   staticDisplay?: boolean;
+  /** When true, panel is active/open and may initialize a question once. */
+  isOpen?: boolean;
 }
 
 interface ConfettiPiece {
@@ -27,8 +29,20 @@ interface ConfettiPiece {
   life: number;
 }
 
-export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLabel = '+10', penaltySeconds = 3, compact, staticDisplay = false }: Props) {
-  const [qIndex, setQIndex] = useState(() => Math.floor(Math.random() * Math.max(1, questions.length)));
+export function QuestionPanel({
+  questions,
+  onCorrect,
+  onWrong,
+  disabled,
+  earnLabel = '+10',
+  penaltySeconds = 3,
+  compact,
+  staticDisplay = false,
+  isOpen = true,
+}: Props) {
+  // IMPORTANT: do not "advance questions" from effects.
+  // We only set a question (A) once when opened, and (B) after user answers.
+  const [qIndex, setQIndex] = useState<number | null>(null);
   const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null);
   const [locked, setLocked] = useState(false);
   const [lockTime, setLockTime] = useState(0);
@@ -37,12 +51,36 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number>(0);
   const lastAnswerAtRef = useRef(0);
+  const didInitForOpenRef = useRef(false);
+
+  // (A) Initialize a question ONCE when panel opens.
+  useEffect(() => {
+    if (!isOpen) {
+      didInitForOpenRef.current = false;
+      return;
+    }
+    if (didInitForOpenRef.current) return;
+    didInitForOpenRef.current = true;
+    if (!questions.length) {
+      setQIndex(null);
+      return;
+    }
+    setFeedback(null);
+    setLocked(false);
+    setLockTime(0);
+    setShowFloat(false);
+    setQIndex(Math.floor(Math.random() * questions.length));
+  }, [isOpen]); // intentionally ONLY depends on open/close lifecycle
 
   useEffect(() => {
-    if (lockTime <= 0) { setLocked(false); return; }
+    // Never set state on every render. Only unlock when we were locked.
+    if (lockTime <= 0) {
+      if (locked) setLocked(false);
+      return;
+    }
     const t = setTimeout(() => setLockTime(prev => prev - 1), 1000);
     return () => clearTimeout(t);
-  }, [lockTime]);
+  }, [lockTime, locked]);
 
   // Confetti canvas renderer
   useEffect(() => {
@@ -102,13 +140,16 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
 
   const next = useCallback(() => {
     setFeedback(null);
+    if (!questions.length) return;
     setQIndex(Math.floor(Math.random() * questions.length));
   }, [questions.length]);
 
   const answer = (i: number) => {
     if (feedback || locked || disabled || !questions.length) return;
-    if (staticDisplay && Date.now() - lastAnswerAtRef.current < 800) return;
+    // Prevent double-firing from pointer+click (or touch) events.
+    if (Date.now() - lastAnswerAtRef.current < (staticDisplay ? 800 : 250)) return;
     lastAnswerAtRef.current = Date.now();
+    if (qIndex === null) return;
     const correct = i === questions[qIndex % questions.length]?.a;
 
     if (correct) {
@@ -127,6 +168,7 @@ export function QuestionPanel({ questions, onCorrect, onWrong, disabled, earnLab
   };
 
   if (!questions.length) return <div className="p-6 text-center text-slate-300">אין שאלות זמינות</div>;
+  if (qIndex === null) return null;
   const q = questions[qIndex % questions.length];
   if (!q) return null;
 
