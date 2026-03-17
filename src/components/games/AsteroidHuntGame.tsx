@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, type MouseEvent as RMouseEvent, type TouchEvent as RTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { QuestionPanel } from '../QuestionPanel';
 import { Clock, HelpCircle, ShoppingCart, X, Trophy } from 'lucide-react';
 import { socket } from '../../socket';
+import { QuizTerminalModal } from './QuizTerminalModal';
 import {
   type Particle, type Star, type ShakeState,
   tickParticles,
@@ -49,10 +49,98 @@ function playerHslColor(id: string): string {
   return `hsl(${hash % 360}, 80%, 60%)`;
 }
 
+// IMPORTANT: must be defined at module scope (stable component identity).
+// If defined inside AsteroidHuntGame, React would remount it on every render
+// (because the function reference changes), which can look like "questions cycling".
+function QuizModalContent({
+  sessionId,
+  questions,
+  onCorrect,
+  onWrong,
+}: {
+  sessionId: number;
+  questions: any[];
+  onCorrect: () => void;
+  onWrong: () => void;
+}) {
+  const [q, setQ] = useState<any | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null);
+
+  useEffect(() => {
+    if (!Array.isArray(questions) || questions.length === 0) {
+      setQ(null);
+      return;
+    }
+    setLocked(false);
+    setFeedback(null);
+    setQ(questions[Math.floor(Math.random() * questions.length)] ?? null);
+  }, [sessionId, questions]);
+
+  if (!q) return <div className="text-center text-slate-300 p-4">אין שאלות זמינות</div>;
+  const opts: string[] = Array.isArray(q.opts) ? q.opts : Array.isArray(q.options) ? q.options : [];
+  const correctIdx: number = typeof q.a === 'number' ? q.a : typeof q.answerIndex === 'number' ? q.answerIndex : -1;
+
+  const choose = (idx: number) => {
+    if (locked) return;
+    setLocked(true);
+    const ok = idx === correctIdx;
+    setFeedback(ok ? 'correct' : 'wrong');
+    if (ok) onCorrect();
+    else onWrong();
+  };
+
+  const next = () => {
+    if (!Array.isArray(questions) || questions.length === 0) return;
+    setLocked(false);
+    setFeedback(null);
+    setQ(questions[Math.floor(Math.random() * questions.length)] ?? null);
+  };
+
+  return (
+    <div className="text-white">
+      <div className="text-center font-bold text-xl mb-4">{String(q.q ?? q.question ?? '')}</div>
+      <div className="grid grid-cols-2 gap-2">
+        {opts.map((opt, i) => (
+          <button
+            key={`${sessionId}-${i}`}
+            type="button"
+            disabled={locked}
+            onClick={() => choose(i)}
+            className={`p-4 rounded-xl font-bold border transition ${
+              locked && i === correctIdx ? 'bg-emerald-600 border-emerald-400' :
+              locked ? 'bg-slate-800 border-slate-700 text-slate-400' :
+              'bg-slate-700 hover:bg-slate-600 border-slate-600'
+            }`}
+          >
+            {String(opt)}
+          </button>
+        ))}
+      </div>
+      <div className="mt-4 flex justify-center gap-3 items-center">
+        <button
+          type="button"
+          disabled={!locked}
+          onClick={next}
+          className={`px-5 py-2.5 rounded-xl font-bold border ${
+            !locked ? 'bg-slate-800/50 text-slate-500 border-slate-700' : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-400/40'
+          }`}
+        >
+          שאלה הבאה
+        </button>
+        <div className="text-sm">
+          {feedback === 'correct' ? <span className="text-emerald-400 font-bold">✓ נכון!</span> : feedback === 'wrong' ? <span className="text-red-400 font-bold">✗ לא נכון</span> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AsteroidHuntGame({ roomCode, playerId, player, questions, globalState, allPlayers, startTime }: Props) {
   const [quizOpen, setQuizOpen] = useState(false);
   const [shopOpen, setShopOpen] = useState(false);
   const [quizQuestions, setQuizQuestions] = useState<any[]>(() => Array.isArray(questions) ? questions : []);
+  const [quizSessionId, setQuizSessionId] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const gsRef = useRef(globalState);
@@ -61,6 +149,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const playerIdRef = useRef(playerId);
   const localAimAngleRef = useRef(0);
   const quizOpenRef = useRef(false);
+  const quizOpenedAtRef = useRef(0);
   const starsRef = useRef<Star[]>([]);
   const nebulasRef = useRef<ParallaxLayer[]>([]);
   const particlesRef = useRef<Particle[]>([]);
@@ -84,7 +173,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   type AstTarget = { x: number; y: number; rotation: number; vx: number; vy: number; rotSpeed: number };
   type AstRender = { x: number; y: number; rotation: number };
   type ProjTarget = { x: number; y: number; vx: number; vy: number; type?: string; radius?: number; color?: string };
-  type ProjRender = { x: number; y: number; vx: number; vy: number; lastSeenAt: number; type?: string; radius?: number; color?: string };
+  type ProjRender = { x: number; y: number; vx: number; vy: number; lastSeenAt: number; locked: boolean; type?: string; radius?: number; color?: string };
 
   const playerTargetsRef = useRef<Map<string, PlayerTarget>>(new Map());
   const playerRendersRef = useRef<Map<string, PlayerRender>>(new Map());
@@ -103,7 +192,18 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   // Snapshot questions ONCE when opening quiz to prevent rapid remount / cycling
   useEffect(() => {
     if (!quizOpen) return;
-    setQuizQuestions(Array.isArray(questions) ? questions : []);
+    const src = Array.isArray(questions) ? questions : [];
+    // IMPORTANT: freeze questions for this modal session.
+    // Upstream may mutate/reorder the questions array during server ticks, which looks like "cycling at lightspeed".
+    try {
+      // structuredClone keeps nested arrays/objects stable
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cloned = (globalThis as any).structuredClone ? (globalThis as any).structuredClone(src) : JSON.parse(JSON.stringify(src));
+      setQuizQuestions(cloned);
+    } catch {
+      // fallback shallow clone
+      setQuizQuestions(src.map((q: any) => ({ ...q, opts: Array.isArray(q?.opts) ? [...q.opts] : q?.opts })));
+    }
   }, [quizOpen]);
 
   // Input fix: when quiz opens, clear local keys and stop movement on server.
@@ -116,6 +216,32 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     // Emit "stop" movement so server doesn't keep last vx/vy forever
     socket.emit('move', { code: roomCode, playerId, dx: 0, dy: 0, angle: localAimAngleRef.current });
   }, [quizOpen, roomCode, playerId]);
+
+  // While quiz is open, block keyboard events from triggering button activation (Space/Enter repeats).
+  useEffect(() => {
+    if (!quizOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [quizOpen]);
+
+  // Allow closing quiz with Escape (and guarantees ref sync)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && quizOpenRef.current) {
+        e.preventDefault();
+        quizOpenRef.current = false;
+        setQuizOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   // Also clear inputs when the window/canvas loses focus (prevents stuck keys even without opening quiz).
   useEffect(() => {
@@ -338,6 +464,19 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       const viewH = Math.max(240, canvas.height);
       const POS_LERP = 0.2; // EXACT factor requested
 
+      // If a modal is open, pause heavy world rendering to prevent freezes.
+      // (The authoritative state will keep updating; rendering resumes smoothly on close.)
+      if (modalOpenRef.current) {
+        ctx.clearRect(0, 0, viewW, viewH);
+        const bg = ctx.createLinearGradient(0, 0, 0, viewH);
+        bg.addColorStop(0, '#020210');
+        bg.addColorStop(1, '#020210');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, viewW, viewH);
+        raf = requestAnimationFrame(render);
+        return;
+      }
+
       const cam = cameraRef.current;
 
       // Use smoothed local render position for camera to eliminate "world stutter"
@@ -466,7 +605,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         drawOreGem(ctx, cx, cy, safeNum(c.value, 50), gemColor, t, viewW / VIEW_SIZE);
       });
 
-      // Projectiles: smooth at 60fps using prediction + LERP to authoritative positions
+      // Projectiles: once spawned, fly straight (stable trajectory)
       const nowMs = now;
       const targets = projTargetsRef.current;
       const renders = projRendersRef.current;
@@ -475,16 +614,19 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         if (!targets.has(id) && nowMs - r.lastSeenAt > 500) renders.delete(id);
       }
       for (const [id, tgt] of targets.entries()) {
-        const r = renders.get(id) ?? { x: tgt.x, y: tgt.y, vx: tgt.vx, vy: tgt.vy, lastSeenAt: nowMs, type: tgt.type, radius: tgt.radius, color: tgt.color };
-        // predict
+        const existing = renders.get(id);
+        const r = existing ?? { x: tgt.x, y: tgt.y, vx: tgt.vx, vy: tgt.vy, lastSeenAt: nowMs, locked: true, type: tgt.type, radius: tgt.radius, color: tgt.color };
+        if (!existing) {
+          // first sight: lock initial state
+          r.x = tgt.x;
+          r.y = tgt.y;
+          r.vx = tgt.vx;
+          r.vy = tgt.vy;
+          r.locked = true;
+        }
+        // integrate forward only (straight line)
         r.x += (r.vx || 0) * dt;
         r.y += (r.vy || 0) * dt;
-        // lerp to server target
-        r.x += (tgt.x - r.x) * POS_LERP;
-        r.y += (tgt.y - r.y) * POS_LERP;
-        // velocity converge (helps reduce “slow” feel if server velocities spike)
-        r.vx += ((tgt.vx || 0) - (r.vx || 0)) * POS_LERP;
-        r.vy += ((tgt.vy || 0) - (r.vy || 0)) * POS_LERP;
         r.type = tgt.type;
         r.radius = tgt.radius;
         r.color = tgt.color;
@@ -666,37 +808,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const sorted = Object.values(allPlayers || {}).sort((a: any, b: any) => (b.score || 0) - (a.score || 0));
   const myRank = sorted.findIndex((p: any) => p.id === playerId) + 1;
 
-  const ModalBackdrop = ({ children, onClose }: { children: React.ReactNode; onClose: () => void }) => (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      onClick={onClose}
-      className="fixed inset-0 z-40 flex items-center justify-center p-4"
-      style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
-    >
-      <motion.div
-        initial={{ scale: 0.85, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        exit={{ scale: 0.9, opacity: 0 }}
-        transition={{ type: 'spring', damping: 22, stiffness: 300 }}
-        onClick={(e) => e.stopPropagation()}
-        className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 shadow-2xl"
-        style={{
-          background: 'rgb(2, 6, 23)',
-          boxShadow: '0 25px 50px -12px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.05)',
-        }}
-      >
-        <button
-          onClick={onClose}
-          className="absolute top-3 left-3 z-10 p-1.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
-        >
-          <X size={18} className="text-slate-400" />
-        </button>
-        {children}
-      </motion.div>
-    </motion.div>
-  );
+  // Note: quiz modal is now a dedicated component (no mount/unmount flicker).
 
   useEffect(() => {
     containerRef.current?.focus();
@@ -774,10 +886,16 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
+            const now = performance.now();
+            // Prevent double-fire from touch+click and repeated opens.
+            if (quizOpenRef.current) return;
+            if (now - quizOpenedAtRef.current < 500) return;
             // Clear inputs immediately so we don't get "stuck moving" if keyup never fires.
             keysRef.current = { up: false, down: false, left: false, right: false };
             socket.emit('move', { code: roomCode, playerId, dx: 0, dy: 0, angle: localAimAngleRef.current });
-            if (quizOpenRef.current) return;
+            quizOpenedAtRef.current = now;
+            quizOpenRef.current = true; // set immediately (before React state flush)
+            setQuizSessionId((s) => s + 1);
             setQuizOpen(true);
           }}
           className="px-6 py-3 rounded-xl font-bold flex items-center gap-2 bg-purple-600/90 hover:bg-purple-500 border border-purple-400/30 shadow-lg shadow-purple-500/20 backdrop-blur-sm"
@@ -813,19 +931,18 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         WASD / חצים לזוז • לחץ לירי (כיוון העכבר)
       </div>
 
-      <AnimatePresence>
-        {quizOpen && (
-          <ModalBackdrop key="quiz-modal" onClose={() => setQuizOpen(false)}>
-            <div className="p-6 pt-12 overflow-y-auto max-h-[90vh] rounded-2xl bg-slate-950 text-white border border-slate-700/50">
-              <h2 className="text-xl font-bold text-center mb-4 text-white">טרמינל שאלות</h2>
-              <p className="text-slate-300 text-sm text-center mb-4">תשובה נכונה = +20 ⚡ + 10 💰</p>
-              <div className="min-h-[220px] relative" style={{ overflow: 'visible' }}>
-                <QuestionPanel questions={quizQuestions as any} isOpen={quizOpen} onCorrect={onCorrect} onWrong={onWrong} earnLabel="+20 ⚡ +10 💰" compact staticDisplay />
-              </div>
-            </div>
-          </ModalBackdrop>
-        )}
-      </AnimatePresence>
+      <QuizTerminalModal
+        open={quizOpen}
+        sessionId={quizSessionId}
+        questions={quizQuestions as any[]}
+        onCorrect={onCorrect}
+        onWrong={onWrong}
+        onClose={() => {
+          quizOpenRef.current = false;
+          setQuizOpen(false);
+          containerRef.current?.focus();
+        }}
+      />
 
       <AnimatePresence>
         {shopOpen && (

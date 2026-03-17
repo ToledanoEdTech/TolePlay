@@ -16,6 +16,8 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
   const [gameState, setGameState] = useState<'join' | 'lobby' | 'playing' | 'ended'>('join');
   const [player, setPlayer] = useState<any>(null);
   const [room, setRoom] = useState<any>(null);
+  const [mode, setMode] = useState<string | null>(null);
+  const [roomQuestions, setRoomQuestions] = useState<any[]>([]);
   const [globalState, setGlobalState] = useState<any>({});
   const [allPlayers, setAllPlayers] = useState<Record<string, any>>({});
   const [winner, setWinner] = useState<string | null>(null);
@@ -26,6 +28,8 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
 
   const playerIdRef = useRef<string>('');
   const roomRef = useRef<any>(null);
+  const modeRef = useRef<string | null>(null);
+  const questionsRef = useRef<any[]>([]);
   const gameStateRef = useRef<{ players: Record<string, any>; globalState: any }>({ players: {}, globalState: {} });
   const lastCtfHudUpdate = useRef(0);
 
@@ -44,6 +48,12 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
         setPlayer({ ...p, id: res.playerId });
         roomRef.current = res.room;
         setRoom(res.room);
+        const joinedMode = res.room?.mode ?? null;
+        modeRef.current = joinedMode;
+        setMode(joinedMode);
+        const qs = Array.isArray(res.room?.questions) ? res.room.questions : [];
+        questionsRef.current = qs;
+        setRoomQuestions(qs);
         setGlobalState(res.room.globalState || {});
         setAllPlayers(res.room.players || {});
         setLobbyCount(Object.keys(res.room.players).length);
@@ -60,10 +70,25 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
       setRoom(r);
       setAllPlayers(r.players || {});
       setLobbyCount(Object.keys(r.players || {}).length);
+      // Keep mode/questions stable during play; only update if server explicitly sends them.
+      if (typeof r?.mode === 'string') {
+        modeRef.current = r.mode;
+        setMode(r.mode);
+      }
+      if (Array.isArray(r?.questions)) {
+        questionsRef.current = r.questions;
+        setRoomQuestions(r.questions);
+      }
     };
     const onGameStarted = (r: any) => {
       roomRef.current = r;
       setRoom(r);
+      const startedMode = r?.mode ?? null;
+      modeRef.current = startedMode;
+      setMode(startedMode);
+      const qs = Array.isArray(r?.questions) ? r.questions : [];
+      questionsRef.current = qs;
+      setRoomQuestions(qs);
       const players = r.players || {};
       const gs = r.globalState || {};
       gameStateRef.current = { players, globalState: gs };
@@ -336,12 +361,12 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
   }
 
   // PLAYING - delegate to mode-specific component
-  const mode = room?.mode;
+  const activeMode = modeRef.current ?? mode ?? room?.mode ?? null;
   const gameProps = {
     roomCode: room?.code || code,
     playerId: playerIdRef.current,
     player,
-    questions: room?.questions || [],
+    questions: questionsRef.current.length ? questionsRef.current : roomQuestions,
     globalState,
     allPlayers,
     startTime: room?.startTime,
@@ -354,12 +379,12 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
 
   return (
     <div className="h-screen w-full overflow-hidden bg-[#070b18]" dir="rtl">
-      {mode === 'zombie' && <ZombieDefenseGame {...gameProps} />}
-      {mode === 'economy' && <EconomyMarathonGame {...gameProps} />}
-      {mode === 'boss' && <BossBattleGame {...gameProps} />}
-      {mode === 'farm' && <AsteroidHuntGame {...gameProps} />}
-      {mode === 'ctf' && <CTFGame {...ctfGameProps} />}
-      {!mode && (
+      {activeMode === 'zombie' && <ZombieDefenseGame {...gameProps} />}
+      {activeMode === 'economy' && <EconomyMarathonGame {...gameProps} />}
+      {activeMode === 'boss' && <BossBattleGame {...gameProps} />}
+      {activeMode === 'farm' && <AsteroidHuntGame {...gameProps} />}
+      {activeMode === 'ctf' && <CTFGame {...ctfGameProps} />}
+      {!activeMode && (
         <div className="flex items-center justify-center h-full bg-[#070b18] text-white">
           <p className="text-slate-400">טוען משחק...</p>
         </div>

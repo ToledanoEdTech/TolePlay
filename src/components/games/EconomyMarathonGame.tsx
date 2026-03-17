@@ -12,6 +12,7 @@ import {
   createDust, drawDust, drawGlow, colorAlpha, roundRect,
   emitBurst,
 } from './renderUtils';
+import { ProceduralPlayer, type FacingDir } from './ProceduralPlayer';
 import type { CameraState } from '../../engine/types';
 
 const WORLD_SIZE = 4000;
@@ -22,8 +23,6 @@ const COLLECTIBLE_ROTATION_SPEED = 0.6;
 const COLLECTIBLE_FLOAT_AMPLITUDE = 10;
 const COLLECTIBLE_FLOAT_SPEED = 2.5;
 const PICKUP_RADIUS = 85; // match server
-
-type FacingDir = 'down' | 'up' | 'left' | 'right';
 
 interface Props {
   roomCode: string;
@@ -76,23 +75,10 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   const goldPulseRef = useRef(0);
   const energyPulseRef = useRef(0);
 
-  // Optional sprite sheet support (future upgrade).
-  // Expected asset format (recommended):
-  // - Sprite sheet contains 4 rows in this order: down, left, right, up.
-  // - Each row contains N frames (idle can be frame 0; walk cycle frames 0..N-1).
-  // - Every frame is exactly FRAME_W x FRAME_H pixels.
-  // - Character's "feet" should be around ANCHOR_Y (0..1) of the frame height.
-  // Place your asset here (example):
-  //   public/images/character/character_sheet.png
-  // Then update the loader below to match your file name.
-  const characterSheetRef = useRef<HTMLImageElement | null>(null);
-  const characterSheetReadyRef = useRef(false);
-
-  const CHAR_FRAME_W = 96;
-  const CHAR_FRAME_H = 96;
-  const CHAR_FRAMES_PER_DIR = 6;
-  const CHAR_ANCHOR_X = 0.5;
-  const CHAR_ANCHOR_Y = 0.86; // feet pivot
+  // Per-player procedural animators (stateful for smooth transitions).
+  const animatorsRef = useRef<Map<string, ProceduralPlayer>>(new Map());
+  // Track previous positions for all players so we can derive velocity (server does not send it).
+  const prevWorldPosRef = useRef<Map<string, { x: number; y: number }>>(new Map());
 
   useEffect(() => {
     const base = import.meta.env.BASE_URL || '/';
@@ -106,16 +92,6 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
     load('treasure-chest.png', 'treasure_chest');
     load('coin-pile.png', 'coin_pile');
     load('money-bills.png', 'money_bills');
-
-    // Replace with your real sheet:
-    // e.g. loadCharacter('character/character_sheet.png')
-    const loadCharacter = (name: string) => {
-      const img = new Image();
-      img.src = `${basePath}/images/${name}`;
-      img.onload = () => { characterSheetRef.current = img; characterSheetReadyRef.current = true; };
-      img.onerror = () => { characterSheetRef.current = null; characterSheetReadyRef.current = false; };
-    };
-    loadCharacter('character/character_sheet.png');
   }, []);
 
   useEffect(() => { gsRef.current = globalState; }, [globalState]);
@@ -303,13 +279,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
 
       drawWorld(ctx, cam, vpW, vpH, t);
       drawCollectiblesWorld(ctx, collectibles, collectibleImgsRef.current, cam, vpW, vpH);
-      drawPlayers(ctx, players, playerId, myPos, t, isMoving, vel, dir, characterSheetRef.current, characterSheetReadyRef.current, {
-        frameW: CHAR_FRAME_W,
-        frameH: CHAR_FRAME_H,
-        framesPerDir: CHAR_FRAMES_PER_DIR,
-        anchorX: CHAR_ANCHOR_X,
-        anchorY: CHAR_ANCHOR_Y,
-      });
+      drawPlayers(ctx, players, playerId, myPos, dt, vel, dir, animatorsRef.current, prevWorldPosRef.current);
 
       particlesRef.current = tickParticles(ctx, particlesRef.current);
       tickDustTrail(ctx, dustTrailRef.current, dt);
@@ -838,237 +808,14 @@ function drawPlayer(
   velocityX: number,
   velocityY: number,
   dir: FacingDir,
-  sheet: HTMLImageElement | null,
-  sheetReady: boolean,
-  sheetSpec: { frameW: number; frameH: number; framesPerDir: number; anchorX: number; anchorY: number }
+  animator: ProceduralPlayer,
+  dt: number
 ) {
-  const now = Date.now();
-  const speed = Math.hypot(velocityX, velocityY);
-  const moving = speed > 8;
-  const runPhase = now / 120;
-  const stride = moving ? Math.sin(runPhase) * 14 : 0;
-  const strideAlt = moving ? Math.sin(runPhase + Math.PI) * 14 : 0;
-  const armSwing = moving ? Math.sin(runPhase) * 22 : 0;
-  const armSwingAlt = moving ? Math.sin(runPhase + Math.PI) * 22 : 0;
-  const bob = moving ? Math.abs(Math.sin(runPhase * 2)) * 3 : 0;
-  const breathScale = moving ? 1 : 1 + Math.sin(now / 500) * 0.02;
-  const lean = moving ? Math.sin(runPhase) * 0.04 : 0;
-
-  // IMPORTANT: Keep label + ground shadow screen-aligned.
-  // Rotating them with the character makes it look like the body "crawls/smears" on the ground.
-  ctx.save();
-  ctx.translate(x, y);
-
-  // label (not rotated)
-  ctx.font = 'bold 17px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillText(name, 1, -92 - bob);
-  ctx.fillStyle = colors.light;
-  ctx.fillText(name, 0, -91 - bob);
-
-  // ground shadow (not rotated)
-  ctx.shadowColor = 'rgba(0,0,0,0.35)';
-  ctx.shadowBlur = 14;
-  ctx.shadowOffsetY = 5;
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(0, 58, 46, 22, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetY = 0;
-
-  // character body
-  ctx.save();
-  ctx.translate(0, -bob);
-
-  // Sprite sheet path (preferred) — supports professional walk cycles.
-  // If no sheet is available, fall back to procedural vector character.
-  if (sheet && sheetReady && sheet.naturalWidth > 0 && sheet.naturalHeight > 0) {
-    drawCharacterSprite(ctx, sheet, sheetSpec, dir, moving, speed, now);
-    if (isMe) {
-      drawGlow(ctx, 0, -52, 70, colors.main, 0.2);
-    }
-    ctx.restore(); // body
-    ctx.restore(); // translate
-    return;
-  }
-
-  const legGrad = ctx.createLinearGradient(0, 0, 0, 52);
-  legGrad.addColorStop(0, colors.light);
-  legGrad.addColorStop(0.5, colors.main);
-  legGrad.addColorStop(0.85, colors.dark);
-  legGrad.addColorStop(1, colorAlpha(colors.dark, 0.95));
-
-  const legShadow = ctx.createLinearGradient(0, 0, 0, 52);
-  legShadow.addColorStop(0, colorAlpha(colors.dark, 0.4));
-  legShadow.addColorStop(0.6, colorAlpha(colors.dark, 0.15));
-  legShadow.addColorStop(1, 'transparent');
-
-  ctx.save();
-  ctx.translate(-12, 26);
-  ctx.translate(0, stride);
-  ctx.fillStyle = legShadow;
-  ctx.fillRect(-8, 2, 16, 50);
-  ctx.fillStyle = legGrad;
-  ctx.beginPath();
-  roundRect(ctx, -8, 0, 16, 52, 4);
-  ctx.fill();
-  ctx.strokeStyle = colorAlpha(colors.dark, 0.85);
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.save();
-  ctx.translate(12, 26);
-  ctx.translate(0, strideAlt);
-  ctx.fillStyle = legShadow;
-  ctx.fillRect(-8, 2, 16, 50);
-  ctx.fillStyle = legGrad;
-  ctx.beginPath();
-  roundRect(ctx, -8, 0, 16, 52, 4);
-  ctx.fill();
-  ctx.strokeStyle = colorAlpha(colors.dark, 0.85);
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.save();
-  ctx.translate(0, -4);
-  ctx.rotate(lean);
-  ctx.scale(1, breathScale);
-  ctx.translate(0, 4);
-  const bodyGrad = ctx.createLinearGradient(-22, -32, 22, 28);
-  bodyGrad.addColorStop(0, colors.light);
-  bodyGrad.addColorStop(0.35, colors.main);
-  bodyGrad.addColorStop(0.7, colors.dark);
-  bodyGrad.addColorStop(1, colorAlpha(colors.dark, 0.95));
-  ctx.fillStyle = bodyGrad;
-  ctx.beginPath();
-  roundRect(ctx, -32, -34, 64, 56, 14);
-  ctx.fill();
-  ctx.strokeStyle = colorAlpha(colors.dark, 0.9);
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.restore();
-
-  const armGrad = ctx.createLinearGradient(0, 0, 0, 40);
-  armGrad.addColorStop(0, colors.light);
-  armGrad.addColorStop(0.6, colors.main);
-  armGrad.addColorStop(1, colors.dark);
-
-  ctx.save();
-  ctx.translate(-28, -14);
-  ctx.rotate(armSwing * (Math.PI / 180));
-  ctx.strokeStyle = armGrad;
-  ctx.lineWidth = 12;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(-18, 24);
-  ctx.stroke();
-  ctx.fillStyle = colorAlpha(colors.dark, 0.5);
-  ctx.beginPath();
-  ctx.arc(0, 0, 6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = colorAlpha(colors.dark, 0.8);
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.save();
-  ctx.translate(28, -14);
-  ctx.rotate(armSwingAlt * (Math.PI / 180));
-  ctx.strokeStyle = armGrad;
-  ctx.lineWidth = 12;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(18, 20);
-  ctx.stroke();
-  ctx.fillStyle = colorAlpha(colors.dark, 0.5);
-  ctx.beginPath();
-  ctx.arc(0, 0, 6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = colorAlpha(colors.dark, 0.8);
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.restore();
-
-  const headY = -50;
-  const skinGrad = ctx.createRadialGradient(-10, -12, 0, 0, 0, 32);
-  skinGrad.addColorStop(0, '#fffef9');
-  skinGrad.addColorStop(0.5, '#fef3c7');
-  skinGrad.addColorStop(0.85, '#f59e0b');
-  skinGrad.addColorStop(1, '#d97706');
-  ctx.fillStyle = skinGrad;
-  ctx.beginPath();
-  ctx.arc(0, headY, 28, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = colorAlpha('#b45309', 0.75);
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.fillStyle = '#1e293b';
-  ctx.beginPath();
-  ctx.ellipse(-9, headY - 2, 5.5, 6.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(9, headY - 2, 5.5, 6.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.globalAlpha = 0.95;
-  ctx.beginPath();
-  ctx.ellipse(-8, headY - 3, 2.2, 2.8, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(9.5, headY - 3, 2.2, 2.8, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalAlpha = 1;
-  ctx.strokeStyle = '#78716c';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(0, headY + 7, 6.5, 0.2 * Math.PI, 0.8 * Math.PI);
-  ctx.stroke();
-
-  if (isMe) {
-    drawGlow(ctx, 0, headY, 60, colors.main, 0.35);
-    ctx.strokeStyle = colorAlpha(colors.main, 0.95);
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(0, headY, 30, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  ctx.restore(); // body rotation
-  ctx.restore(); // translate
-}
-
-function drawCharacterSprite(
-  ctx: CanvasRenderingContext2D,
-  sheet: HTMLImageElement,
-  spec: { frameW: number; frameH: number; framesPerDir: number; anchorX: number; anchorY: number },
-  dir: FacingDir,
-  moving: boolean,
-  speed: number,
-  nowMs: number
-) {
-  const row = dir === 'down' ? 0 : dir === 'left' ? 1 : dir === 'right' ? 2 : 3;
-  const fps = moving ? (8 + Math.min(8, speed / 80)) : 0;
-  const frame = moving ? Math.floor((nowMs / 1000) * fps) % spec.framesPerDir : 0;
-
-  const sx = frame * spec.frameW;
-  const sy = row * spec.frameH;
-  const dx = -spec.frameW * spec.anchorX;
-  const dy = -spec.frameH * spec.anchorY;
-
-  // For left direction, you may prefer a dedicated row OR a flip.
-  // This implementation uses the left row. If your sheet has only right-facing frames,
-  // you can flip when dir === 'left' by scaling(-1,1) and using the right row instead.
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(sheet, sx, sy, spec.frameW, spec.frameH, dx, dy, spec.frameW, spec.frameH);
+  // Procedural premium character (no external assets).
+  // We force animator direction to match game-facing logic and update with velocity.
+  animator.state.dir = dir;
+  animator.update(dt, velocityX, velocityY);
+  animator.draw(ctx, x, y, { isMe, name, colors });
 }
 
 function drawPlayers(
@@ -1076,25 +823,49 @@ function drawPlayers(
   players: Record<string, any>,
   playerId: string,
   myPos: { x: number; y: number },
-  t: number,
-  isMoving: boolean,
+  dt: number,
   vel: { x: number; y: number },
   myDir: FacingDir,
-  sheet: HTMLImageElement | null,
-  sheetReady: boolean,
-  sheetSpec: { frameW: number; frameH: number; framesPerDir: number; anchorX: number; anchorY: number }
+  animators: Map<string, ProceduralPlayer>,
+  prevWorldPos: Map<string, { x: number; y: number }>
 ) {
   const list = Object.values(players || {}).sort((a: any, b: any) => (a.id || '').localeCompare(b.id || ''));
+  const now = performance.now();
+  const maxDt = Math.max(1 / 120, Math.min(1 / 15, dt));
   list.forEach((p: any, idx: number) => {
+    if (!p?.id) return;
     const px = p.id === playerId ? myPos.x : p.x;
     const py = p.id === playerId ? myPos.y : p.y;
     const colors = PLAYER_COLORS[idx % PLAYER_COLORS.length];
-    const vx = p.id === playerId ? vel.x : 0;
-    const vy = p.id === playerId ? vel.y : 0;
-    // Remote players: without velocity from server tick, show them idle facing down for now.
-    // If you later stream velocity/dir from server, pass it here.
-    const dir: FacingDir = p.id === playerId ? myDir : 'down';
-    drawPlayer(ctx, px, py, p.id === playerId, p.name || '?', colors, vx, vy, dir, sheet, sheetReady, sheetSpec);
+
+    // Derive velocity from last known positions for remote players (cheap + good enough).
+    const prev = prevWorldPos.get(p.id);
+    let vx = 0, vy = 0;
+    if (p.id === playerId) {
+      vx = vel.x; vy = vel.y;
+    } else if (prev) {
+      vx = (px - prev.x) / maxDt;
+      vy = (py - prev.y) / maxDt;
+    }
+    prevWorldPos.set(p.id, { x: px, y: py });
+
+    // Determine direction for remote players too (based on derived velocity).
+    let dir: FacingDir = p.id === playerId ? myDir : 'down';
+    if (p.id !== playerId && Math.hypot(vx, vy) > 10) {
+      if (Math.abs(vx) > Math.abs(vy)) dir = vx >= 0 ? 'right' : 'left';
+      else dir = vy >= 0 ? 'down' : 'up';
+    }
+
+    let animator = animators.get(p.id);
+    if (!animator) {
+      animator = new ProceduralPlayer();
+      animators.set(p.id, animator);
+      // Seed phase variation so players don't sync perfectly.
+      animator.state.phase = (now * 0.001 + idx * 0.7) * Math.PI * 2;
+      animator.state.dir = dir;
+    }
+
+    drawPlayer(ctx, px, py, p.id === playerId, p.name || '?', colors, vx, vy, dir, animator, maxDt);
   });
 }
 
