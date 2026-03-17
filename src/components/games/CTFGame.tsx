@@ -33,6 +33,7 @@ import {
   TREE_CANOPY_HALF,
   BASE_CANVAS_HALF,
 } from './ctfRenderCache';
+import { ensureRemoteState, stepRemoteLerp, type RenderLerpState2D } from '../../engine/netLerp';
 
 interface Props {
   roomCode: string;
@@ -231,7 +232,7 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
   const lastShootRef = useRef(0);
   const modalBlockRef = useRef(false);
   const visualPosRef = useRef({ x: posRef.current.x, y: posRef.current.y });
-  const visualPlayersRef = useRef<Record<string, { x: number; y: number }>>({});
+  const remoteRenderRef = useRef<Record<string, RenderLerpState2D>>({});
   const bulletsRef = useRef<CTFBullet[]>([]);
   const joystickRef = useRef({ dx: 0, dy: 0 });
   const joystickBaseRef = useRef<HTMLDivElement>(null);
@@ -300,6 +301,30 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
       socket.off('ctfScored', onScored);
       socket.off('ctfTagged', onTagged);
     };
+  }, []);
+
+  // Universal immediate projectile spawns (do not wait for tick).
+  useEffect(() => {
+    const onSpawn = (msg: any) => {
+      if (!msg || msg.mode !== 'ctf') return;
+      const p = msg.projectile;
+      if (!p || p.kind !== 'ctfBullet') return;
+      const b = bulletsRef.current;
+      if (b.some((x) => x.id === p.id)) return;
+      b.push({
+        id: p.id,
+        x: p.x,
+        y: p.y,
+        vx: p.vx,
+        vy: p.vy,
+        team: p.team,
+        ownerId: p.ownerId,
+        damage: p.damage,
+        color: p.color,
+      });
+    };
+    socket.on('spawnProjectile', onSpawn);
+    return () => { socket.off('spawnProjectile', onSpawn); };
   }, []);
 
   const onCorrect = useCallback(() => {
@@ -544,17 +569,25 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
         visualPosRef.current.x += (posRef.current.x - visualPosRef.current.x) * k;
         visualPosRef.current.y += (posRef.current.y - visualPosRef.current.y) * k;
       }
-      const vp = visualPlayersRef.current;
+      const rr = remoteRenderRef.current;
       Object.keys(players || {}).forEach((id) => {
         if (id === playerId) return;
         const p = players[id];
         if (!p || p.modeState?.dead) return;
         const tx = p.x ?? 0;
         const ty = p.y ?? 0;
-        if (!vp[id]) vp[id] = { x: tx, y: ty };
-        vp[id].x += (tx - vp[id].x) * k;
-        vp[id].y += (ty - vp[id].y) * k;
+        const ta = p.modeState?.angle ?? p.angle ?? 0;
+        const st = ensureRemoteState(rr, id, tx, ty, ta);
+        st.targetX = tx;
+        st.targetY = ty;
+        st.targetAngle = ta;
+        stepRemoteLerp(st, 0.2);
       });
+      // Ghost prevention: remove missing remote players immediately.
+      for (const id of Object.keys(rr)) {
+        if (id === playerId) continue;
+        if (!players?.[id]) delete rr[id];
+      }
 
       const cam = cameraRef.current;
       if (myP && !myP.modeState?.dead) {
@@ -754,9 +787,11 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
       const playersList = Object.values(players || {});
       if (!trailRef.current) trailRef.current = {};
       playersList.forEach((p: any) => {
+        if (!p?.id) return;
         if (p.modeState?.dead) return;
-        const px = p.id === playerId ? visualPosRef.current.x : (vp[p.id]?.x ?? p.x);
-        const py = p.id === playerId ? visualPosRef.current.y : (vp[p.id]?.y ?? p.y);
+        const st = p.id !== playerId ? rr[p.id] : null;
+        const px = p.id === playerId ? visualPosRef.current.x : (st?.renderX ?? p.x);
+        const py = p.id === playerId ? visualPosRef.current.y : (st?.renderY ?? p.y);
         if (!trailRef.current[p.id]) trailRef.current[p.id] = [];
         const trail = trailRef.current[p.id];
         const last = trail[trail.length - 1];
@@ -769,12 +804,14 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
       playersList
         .sort((a: any, b: any) => (a.y ?? 0) - (b.y ?? 0))
         .forEach((p: any) => {
+          if (!p?.id) return;
           if (p.modeState?.dead) return;
-          const px = p.id === playerId ? visualPosRef.current.x : (vp[p.id]?.x ?? p.x);
-          const py = p.id === playerId ? visualPosRef.current.y : (vp[p.id]?.y ?? p.y);
+          const st = p.id !== playerId ? rr[p.id] : null;
+          const px = p.id === playerId ? visualPosRef.current.x : (st?.renderX ?? p.x);
+          const py = p.id === playerId ? visualPosRef.current.y : (st?.renderY ?? p.y);
           if (px < vLeft - 80 || px > vRight + 80 || py < vTop - 80 || py > vBottom + 80) return;
 
-          const angle = p.modeState?.angle ?? 0;
+          const angle = p.id === playerId ? (p.modeState?.angle ?? 0) : (st?.renderAngle ?? (p.modeState?.angle ?? 0));
           const trail = trailRef.current[p.id] || [];
           const vel = trail.length >= 2 ? Math.hypot(trail[trail.length - 1].x - trail[0].x, trail[trail.length - 1].y - trail[0].y) / Math.max(1, trail.length) : 0;
 
@@ -929,8 +966,9 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
       ctx.fill();
       playersList.forEach((p: any) => {
         if (p.modeState?.dead) return;
-        const px = mapX + (p.id === playerId ? visualPosRef.current.x : (vp[p.id]?.x ?? p.x)) / WORLD_W * mapW;
-        const py = mapY + (p.id === playerId ? visualPosRef.current.y : (vp[p.id]?.y ?? p.y)) / WORLD_H * mapH;
+        const st = p.id !== playerId ? rr[p.id] : null;
+        const px = mapX + (p.id === playerId ? visualPosRef.current.x : (st?.renderX ?? p.x)) / WORLD_W * mapW;
+        const py = mapY + (p.id === playerId ? visualPosRef.current.y : (st?.renderY ?? p.y)) / WORLD_H * mapH;
         ctx.fillStyle = p.id === playerId ? '#ffffff' : (p.modeState?.team === 'red' ? '#ef4444' : '#3b82f6');
         ctx.beginPath();
         ctx.arc(px, py, p.id === playerId ? 4 : 2.5, 0, Math.PI * 2);

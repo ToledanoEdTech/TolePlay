@@ -13,6 +13,7 @@ import {
   drawBeam, drawHPBar, drawGlow, colorAlpha, roundRect,
 } from './renderUtils';
 import { playShootSound, playLaserSound, playHitSound, playErrorSound, playSuccessSound } from '../../utils/gameSounds';
+import { ensureRemoteState, stepRemoteLerp, type RenderLerpState2D } from '../../engine/netLerp';
 
 const WORLD_SIZE = 4000;
 const ZOMBIE_BASE_X = 2000;
@@ -94,11 +95,12 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
   const lastServerProjectilesRef = useRef<any>(null);
   const impactParticlesRef = useRef<{ x: number; y: number; vx: number; vy: number; createdAt: number; color: string }[]>([]);
   const lastProcessedHitsRef = useRef<any>(null);
-  const remoteProjectilesRef = useRef<{ x: number; y: number; vx: number; vy: number; weaponType: string; playerId: string; createdAt: number }[]>([]);
+  const remoteProjectilesRef = useRef<{ x: number; y: number; vx: number; vy: number; weaponType: string; projectileData?: any; playerId: string; createdAt: number }[]>([]);
+  const remotePlayersRef = useRef<Record<string, RenderLerpState2D>>({});
 
   useEffect(() => { gsRef.current = globalState; }, [globalState]);
   useEffect(() => {
-    const onRemoteShoot = (data: { x: number; y: number; vx: number; vy: number; weaponType: string; playerId: string }) => {
+    const onRemoteShoot = (data: { x: number; y: number; vx: number; vy: number; weaponType: string; projectileData?: any; playerId: string }) => {
       if (data.playerId === playerId) return;
       remoteProjectilesRef.current.push({
         x: data.x,
@@ -106,12 +108,36 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         vx: data.vx,
         vy: data.vy,
         weaponType: data.weaponType || 'pistol',
+        projectileData: data.projectileData,
         playerId: data.playerId,
         createdAt: Date.now(),
       });
     };
     socket.on('remoteShoot', onRemoteShoot);
     return () => { socket.off('remoteShoot', onRemoteShoot); };
+  }, [playerId]);
+
+  // Universal immediate projectile spawns (do not wait for tick).
+  useEffect(() => {
+    const onSpawn = (msg: any) => {
+      if (!msg || msg.mode !== 'zombie') return;
+      const p = msg.projectile;
+      if (!p || p.kind !== 'zombieProjectile') return;
+      // Only render remote spawns (local player already has immediate feedback).
+      if (p.playerId === playerId) return;
+      if (p.type !== 'pistol') return;
+      remoteProjectilesRef.current.push({
+        x: p.x,
+        y: p.y,
+        vx: p.vx,
+        vy: p.vy,
+        weaponType: p.weaponType || 'pistol',
+        playerId: p.playerId,
+        createdAt: Date.now(),
+      });
+    };
+    socket.on('spawnProjectile', onSpawn);
+    return () => { socket.off('spawnProjectile', onSpawn); };
   }, [playerId]);
   useEffect(() => { playersRef.current = allPlayers; }, [allPlayers]);
   useEffect(() => { playerRef.current = player; }, [player]);
@@ -274,7 +300,8 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         posRef.current.x = Math.max(0, Math.min(WORLD_SIZE, posRef.current.x + dir.x * PLAYER_SPEED * dt));
         posRef.current.y = Math.max(0, Math.min(WORLD_SIZE, posRef.current.y + dir.y * PLAYER_SPEED * dt));
         if (now - lastSyncRef.current > 50) {
-          socket.emit('updatePosition', { code: roomCode, playerId, x: posRef.current.x, y: posRef.current.y });
+          const aimAngle = Math.atan2(mouseRef.current.worldY - posRef.current.y, mouseRef.current.worldX - posRef.current.x);
+          socket.emit('updatePosition', { code: roomCode, playerId, x: posRef.current.x, y: posRef.current.y, angle: aimAngle });
           lastSyncRef.current = now;
         }
       }
@@ -503,18 +530,61 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         const vx = proj.vx;
         const vy = proj.vy;
         const vlen = Math.hypot(vx, vy) || 1;
-        const trailLen = proj.weaponType === 'pistol' ? 70 : 40;
+        const metaColor = typeof proj.projectileData?.color === 'string' ? proj.projectileData.color : null;
+        const color =
+          metaColor ||
+          (proj.weaponType === 'sniper' ? '#38bdf8' : proj.weaponType === 'rifle' ? '#eab308' : proj.weaponType === 'shotgun' ? '#f97316' : '#06b6d4');
+        const size = typeof proj.projectileData?.size === 'number' && isFinite(proj.projectileData.size)
+          ? proj.projectileData.size
+          : (proj.weaponType === 'rocket' ? 10 : proj.weaponType === 'sniper' ? 6 : 5);
+        const trailLen = proj.weaponType === 'pistol' ? 70 : proj.weaponType === 'sniper' ? 55 : proj.weaponType === 'rocket' ? 45 : 40;
         const tailX = px - (vx / vlen) * trailLen;
         const tailY = py - (vy / vlen) * trailLen;
         if (!isVis(px, py, trailLen) && !isVis(tailX, tailY, trailLen)) return;
+
+        const drawTracer = (sx: number, sy: number, ex: number, ey: number, w: number) => {
+          ctx.strokeStyle = colorAlpha(color, 0.65);
+          ctx.lineWidth = w;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(ex, ey);
+          ctx.stroke();
+          ctx.strokeStyle = colorAlpha('#ffffff', 0.55);
+          ctx.lineWidth = Math.max(1, w - 2);
+          ctx.stroke();
+        };
+
         ctx.save();
-        ctx.strokeStyle = proj.weaponType === 'sniper' ? 'rgba(56, 189, 248, 0.7)' : proj.weaponType === 'rifle' ? 'rgba(234, 179, 8, 0.7)' : 'rgba(6, 182, 212, 0.5)';
-        ctx.lineWidth = proj.weaponType === 'pistol' ? 4 : 3;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(tailX, tailY);
-        ctx.lineTo(px, py);
-        ctx.stroke();
+        if (proj.weaponType === 'shotgun') {
+          // Visual spread (server is authoritative; this is purely cosmetic).
+          const baseAng = Math.atan2(vy, vx);
+          [-0.18, 0, 0.18].forEach((off) => {
+            const a = baseAng + off;
+            const svx = Math.cos(a) * vlen;
+            const svy = Math.sin(a) * vlen;
+            const sTailX = px - (svx / vlen) * (trailLen * 0.85);
+            const sTailY = py - (svy / vlen) * (trailLen * 0.85);
+            drawTracer(sTailX, sTailY, px, py, 3);
+          });
+        } else if (proj.weaponType === 'rocket') {
+          drawTracer(tailX, tailY, px, py, 5);
+          drawGlow(ctx, px, py, 18, color, 0.12);
+          ctx.fillStyle = colorAlpha(color, 0.9);
+          ctx.beginPath();
+          ctx.arc(px, py, size, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (proj.weaponType === 'sniper') {
+          drawTracer(tailX, tailY, px, py, 6);
+        } else {
+          drawTracer(tailX, tailY, px, py, proj.weaponType === 'pistol' ? 4 : 3);
+          if (proj.weaponType === 'pistol') {
+            ctx.fillStyle = colorAlpha(color, 0.9);
+            ctx.beginPath();
+            ctx.arc(px, py, Math.max(3, size * 0.6), 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
         ctx.restore();
       });
 
@@ -669,15 +739,40 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       const sortedIds = [...playerList].map((p: any) => p.id).sort();
       const fallbackColors = ['#3b82f6', '#ef4444', '#eab308', '#f97316', '#a855f7'];
       const isLocalMoving = dir.x !== 0 || dir.y !== 0;
+
+      // Remote player interpolation state + ghost cleanup.
+      const rr = remotePlayersRef.current;
+      const present = new Set<string>();
+      playerList.forEach((p: any) => { if (p?.id) present.add(p.id); });
+      Object.keys(rr).forEach((id) => { if (!present.has(id)) delete rr[id]; });
+
       playerList.forEach((p: any) => {
-        const px = p.id === playerId ? posRef.current.x : (p.x ?? ZOMBIE_BASE_X);
-        const py = p.id === playerId ? posRef.current.y : (p.y ?? ZOMBIE_BASE_Y);
+        const isLocal = p.id === playerId;
+        const tx = Number(p.x ?? ZOMBIE_BASE_X);
+        const ty = Number(p.y ?? ZOMBIE_BASE_Y);
+        const ta = Number(p.modeState?.angle ?? p.angle ?? 0);
+        let px = tx;
+        let py = ty;
+        let renderAngle = ta;
+        if (!isLocal) {
+          const st = ensureRemoteState(rr, p.id, tx, ty, ta);
+          st.targetX = tx;
+          st.targetY = ty;
+          st.targetAngle = ta;
+          stepRemoteLerp(st, 0.2);
+          px = st.renderX;
+          py = st.renderY;
+          renderAngle = st.renderAngle;
+        } else {
+          px = posRef.current.x;
+          py = posRef.current.y;
+        }
         const hp = p.modeState?.hp ?? 100;
         const maxHp = p.modeState?.maxHp ?? 100;
         const weapon = p.id === playerId ? (weaponDisplayRef.current || p.modeState?.weapon || 'pistol') : (p.modeState?.weapon ?? 'pistol');
         const angle = p.id === playerId
           ? Math.atan2(mouseRef.current.worldY - py, mouseRef.current.worldX - px)
-          : (Math.atan2(ZOMBIE_BASE_Y - py, ZOMBIE_BASE_X - px));
+          : renderAngle;
         const color = p.modeState?.playerColor ?? fallbackColors[sortedIds.indexOf(p.id) % fallbackColors.length];
         const isMoving = p.id === playerId ? isLocalMoving : false;
         drawPlayerWithWeapon(ctx, px, py, angle, hp, maxHp, weapon, t, p.id === playerId, color, isMoving);
@@ -990,20 +1085,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
         <div className="absolute top-20 right-2 w-24 h-24 min-[480px]:top-24 min-[480px]:left-4 min-[480px]:w-32 min-[480px]:h-32 bg-slate-900/80 border-2 border-slate-700 rounded-lg pointer-events-none overflow-hidden backdrop-blur-md opacity-80" dir="ltr">
           <canvas ref={minimapRef} width={128} height={128} className="w-full h-full" />
         </div>
-        <div className="absolute left-2 top-1/2 -translate-y-1/2 z-10 w-36 max-h-[50vh] overflow-y-auto rounded-lg bg-black/60 backdrop-blur border border-slate-600/50 pointer-events-none py-2 px-2" dir="rtl">
-          <div className="text-[10px] font-bold text-slate-300 mb-1.5 px-1">דירוג הריגות</div>
-          {Object.entries(allPlayers || {})
-            .map(([id, p]) => ({ id, name: p.name || 'שחקן', kills: (p as any).modeState?.kills ?? 0 }))
-            .sort((a, b) => b.kills - a.kills)
-            .slice(0, 12)
-            .map((p, i) => (
-              <div key={p.id} className="flex items-center justify-between gap-1 py-0.5 px-1.5 rounded text-[10px]">
-                <span className="font-mono text-amber-400/90">{p.kills}</span>
-                <span className={`truncate font-bold ${p.id === playerId ? 'text-cyan-300' : 'text-slate-200'}`}>{p.name}</span>
-                <span className="text-slate-500 shrink-0">{i + 1}.</span>
-              </div>
-            ))}
-        </div>
+        {/* Local leaderboard removed — use universal `Leaderboard` overlay in `PlayerView`. */}
         <AnimatePresence>
           {baseHp < maxHp * 0.25 && baseHp > 0 && (
             <motion.div

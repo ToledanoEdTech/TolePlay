@@ -37,15 +37,28 @@ export function getMoveDirection(input: InputState): Vec2 {
 }
 
 export function setupKeyboardListeners(input: InputState): () => void {
+  const codeToKey = (code: string): string | null => {
+    if (code === 'KeyW') return 'w';
+    if (code === 'KeyA') return 'a';
+    if (code === 'KeyS') return 's';
+    if (code === 'KeyD') return 'd';
+    if (code === 'ArrowUp') return 'arrowup';
+    if (code === 'ArrowDown') return 'arrowdown';
+    if (code === 'ArrowLeft') return 'arrowleft';
+    if (code === 'ArrowRight') return 'arrowright';
+    return null;
+  };
+
   const handleDown = (e: KeyboardEvent) => {
-    const key = e.key.toLowerCase();
-    if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+    const mapped = codeToKey(e.code);
+    if (mapped) {
       e.preventDefault();
-      input.keys[key] = true;
+      input.keys[mapped] = true;
     }
   };
   const handleUp = (e: KeyboardEvent) => {
-    input.keys[e.key.toLowerCase()] = false;
+    const mapped = codeToKey(e.code);
+    if (mapped) input.keys[mapped] = false;
   };
   const handleBlur = () => {
     for (const key in input.keys) input.keys[key] = false;

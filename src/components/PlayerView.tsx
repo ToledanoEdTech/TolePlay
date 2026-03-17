@@ -7,6 +7,7 @@ import { EconomyMarathonGame } from './games/EconomyMarathonGame';
 import { BossBattleGame } from './games/BossBattleGame';
 import { AsteroidHuntGame } from './games/AsteroidHuntGame';
 import { CTFGame } from './games/CTFGame';
+import { Leaderboard } from './Leaderboard';
 
 export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
   onBack: () => void; initialCode?: string; initialName?: string; autoJoin?: boolean;
@@ -379,6 +380,11 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
 
   return (
     <div className="h-screen w-full overflow-hidden bg-[#070b18]" dir="rtl">
+      <Leaderboard
+        mode={activeMode}
+        players={allPlayers}
+        localPlayerId={playerIdRef.current}
+      />
       {activeMode === 'zombie' && <ZombieDefenseGame {...gameProps} />}
       {activeMode === 'economy' && <EconomyMarathonGame {...gameProps} />}
       {activeMode === 'boss' && <BossBattleGame {...gameProps} />}

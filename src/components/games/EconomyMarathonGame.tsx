@@ -13,6 +13,7 @@ import {
 } from './renderUtils';
 import { ProceduralPlayer, type FacingDir } from './ProceduralPlayer';
 import type { CameraState } from '../../engine/types';
+import { ensureRemoteState, stepRemoteLerp, type RenderLerpState2D } from '../../engine/netLerp';
 
 const WORLD_SIZE = 4000;
 const PLAYER_SPEED = 280;
@@ -85,6 +86,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   const animatorsRef = useRef<Map<string, ProceduralPlayer>>(new Map());
   // Track previous positions for all players so we can derive velocity (server does not send it).
   const prevWorldPosRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const remotePlayersRef = useRef<Record<string, RenderLerpState2D>>({});
   const envRef = useRef<EnvObj[]>([]);
   const spriteCacheRef = useRef<Map<string, CachedSprite>>(new Map());
 
@@ -310,7 +312,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
 
       drawWorld(ctx, cam, vpW, vpH, t, envRef.current, spriteCacheRef.current);
       drawCollectiblesWorld(ctx, collectibles, collectibleImgsRef.current, cam, vpW, vpH);
-      drawPlayers(ctx, players, playerId, myPos, dt, vel, dir, animatorsRef.current, prevWorldPosRef.current, cam, vpW, vpH);
+      drawPlayers(ctx, players, playerId, myPos, dt, vel, dir, animatorsRef.current, prevWorldPosRef.current, remotePlayersRef.current, cam, vpW, vpH);
 
       tickParticlesInPlace(ctx, particlesRef.current, dt);
       // Return dead particles to pool to keep memory flat.
@@ -356,23 +358,65 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
 
   return (
     <div className="fixed inset-0 bg-[#050a0f] text-white flex flex-col">
+      <style>
+        {`
+          @media (max-width: 768px) {
+            .economy-top-hud {
+              padding: 0.5rem !important;
+            }
+            .economy-top-hud .economy-top-row {
+              gap: 0.4rem !important;
+              flex-wrap: wrap !important;
+            }
+            .economy-top-hud .economy-title {
+              font-size: 0.9rem !important;
+            }
+            .economy-top-hud .economy-subtitle {
+              font-size: 0.65rem !important;
+            }
+            .economy-top-hud .economy-stat {
+              padding: 0.35rem 0.55rem !important;
+              font-size: 0.8rem !important;
+            }
+            .economy-top-hud .economy-energy-bar {
+              margin-top: 0.4rem !important;
+              height: 2.6rem !important;
+            }
+            .economy-top-hud .economy-energy-bar span {
+              font-size: 0.8rem !important;
+              line-height: 1.1 !important;
+            }
+            .economy-alert {
+              max-width: 92vw !important;
+              padding: 0.75rem 0.9rem !important;
+            }
+            .economy-alert p {
+              font-size: 0.95rem !important;
+            }
+            .economy-alert button {
+              padding: 0.7rem 0.9rem !important;
+              font-size: 1rem !important;
+            }
+          }
+        `}
+      </style>
       <div className="absolute inset-0">
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
       </div>
 
-      <div className="absolute top-0 left-0 right-0 z-20 p-3 bg-gradient-to-b from-black/85 to-transparent pointer-events-none">
-        <div className="flex justify-between items-center">
-          <div className="flex items-center gap-3">
-            <div>
-              <span className="text-base font-bold text-amber-400">מרתון כלכלי</span>
-              <p className="text-xs text-amber-300/80 mt-0.5">מי שאוסף הכי הרבה זהב מנצח!</p>
+      <div className="economy-top-hud absolute top-0 left-0 right-0 z-20 p-3 bg-gradient-to-b from-black/85 to-transparent pointer-events-none">
+        <div className="economy-top-row flex justify-between items-center">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="min-w-[8rem]">
+              <span className="economy-title text-base font-bold text-amber-400">מרתון כלכלי</span>
+              <p className="economy-subtitle text-xs text-amber-300/80 mt-0.5">מי שאוסף הכי הרבה זהב מנצח!</p>
             </div>
             <motion.div
               key={`gold-${goldPulseRef.current}`}
               initial={{ scale: 1 }}
               animate={{ scale: [1, 1.12, 1] }}
               transition={{ duration: 0.35 }}
-              className="bg-amber-900/70 px-4 py-1.5 rounded-lg border border-amber-600/50"
+              className="economy-stat bg-amber-900/70 px-4 py-1.5 rounded-lg border border-amber-600/50"
             >
               <span className="text-xl font-black text-amber-300">💰 {gold.toLocaleString()}</span>
             </motion.div>
@@ -381,7 +425,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
               initial={{ scale: 1 }}
               animate={{ scale: [1, 1.08, 1] }}
               transition={{ duration: 0.35 }}
-              className="bg-yellow-900/50 px-3 py-1.5 rounded border border-yellow-600/40"
+              className="economy-stat bg-yellow-900/50 px-3 py-1.5 rounded border border-yellow-600/40"
             >
               <span className="text-base font-bold text-yellow-300">⚡ {energy}</span>
             </motion.div>
@@ -392,7 +436,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
             <span className="text-base font-bold text-cyan-400">⏱️ {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}</span>
           </div>
         </div>
-        <div className="mt-2 h-12 min-h-[48px] bg-slate-800/95 rounded-xl overflow-hidden border-2 border-amber-600/50 relative flex items-center">
+        <div className="economy-energy-bar mt-2 h-12 min-h-[48px] bg-slate-800/95 rounded-xl overflow-hidden border-2 border-amber-600/50 relative flex items-center">
           <motion.div
             className="absolute inset-y-0 left-0 rounded-xl"
             style={{
@@ -416,7 +460,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
             exit={{ opacity: 0 }}
             className="absolute inset-0 z-40 flex items-center justify-center bg-black/60"
           >
-            <div className="bg-amber-900/95 px-8 py-6 rounded-2xl border-2 border-amber-500 shadow-2xl text-center max-w-md pointer-events-auto">
+            <div className="economy-alert bg-amber-900/95 px-8 py-6 rounded-2xl border-2 border-amber-500 shadow-2xl text-center max-w-md pointer-events-auto">
               <p className="text-amber-200 font-black text-2xl mb-2">⚡ נגמרה האנרגיה!</p>
               <p className="text-amber-100 font-bold text-lg mb-4">אתה תקוע. ענה על שאלות כדי למלא אנרגיה ולהמשיך!</p>
               <button
@@ -472,17 +516,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
         <VirtualJoystick onMove={onJoystickMove} onRelease={onJoystickRelease} size={110} teamColor="rgba(245,158,11,0.5)" />
       </div>
 
-      <div className="absolute top-20 right-4 z-20 pointer-events-none">
-        <div className="bg-slate-900/80 backdrop-blur rounded-xl p-2 border border-amber-600/30 max-w-[160px]">
-          <div className="text-[10px] text-amber-400 font-bold mb-1">טבלת מובילים</div>
-          {sorted.slice(0, 5).map((p: any, i: number) => (
-            <div key={p.id} className={`flex justify-between text-xs py-0.5 ${p.id === playerId ? 'text-amber-300 font-bold' : 'text-slate-400'}`}>
-              <span>{i === 0 && '👑 '}{i + 1}. {p.name?.slice(0, 8)}{p.id === playerId ? ' (אתה)' : ''}</span>
-              <span className="text-amber-400 font-mono">${Math.floor(p.resources || 0)}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+      {/* Local leaderboard removed — use universal `Leaderboard` overlay in `PlayerView`. */}
 
       <AnimatePresence>
         {showQuestions && (
@@ -1085,6 +1119,7 @@ function drawPlayers(
   myDir: FacingDir,
   animators: Map<string, ProceduralPlayer>,
   prevWorldPos: Map<string, { x: number; y: number }>,
+  remotePlayers: Record<string, RenderLerpState2D>,
   cam: CameraState,
   vpW: number,
   vpH: number
@@ -1098,10 +1133,23 @@ function drawPlayers(
   const top = cam.y - margin;
   const right = cam.x + vpW / cam.zoom + margin;
   const bottom = cam.y + vpH / cam.zoom + margin;
+  const present = new Set<string>(list.map((p: any) => p?.id).filter(Boolean));
+  Object.keys(remotePlayers).forEach((id) => { if (!present.has(id)) delete remotePlayers[id]; });
   list.forEach((p: any, idx: number) => {
     if (!p?.id) return;
-    const px = p.id === playerId ? myPos.x : p.x;
-    const py = p.id === playerId ? myPos.y : p.y;
+    let px = p.id === playerId ? myPos.x : p.x;
+    let py = p.id === playerId ? myPos.y : p.y;
+    if (p.id !== playerId) {
+      const tx = Number(p.x ?? 0);
+      const ty = Number(p.y ?? 0);
+      const st = ensureRemoteState(remotePlayers, p.id, tx, ty, 0);
+      st.targetX = tx;
+      st.targetY = ty;
+      st.targetAngle = 0;
+      stepRemoteLerp(st, 0.2);
+      px = st.renderX;
+      py = st.renderY;
+    }
     if (px < left || px > right || py < top || py > bottom) return;
     const colors = PLAYER_COLORS[idx % PLAYER_COLORS.length];
 

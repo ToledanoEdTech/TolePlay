@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { QuestionPanel } from '../QuestionPanel';
 import { Shield, ZapOff, Clock, HelpCircle, Crosshair } from 'lucide-react';
 import { socket } from '../../socket';
+import { lerpAngleRad, wrapAngleRad } from '../../engine/netLerp';
 
 type Props = {
   roomCode: string;
@@ -437,6 +438,8 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
   const playerEntitiesRef = useRef<Record<string, PlayerEntity & { targetX: number; targetZ: number; isLocal: boolean }>>({});
   const aiBossRef = useRef<(PlayerEntity & { targetX: number; targetZ: number }) | null>(null);
   const projectilesRef = useRef<Record<string, ProjectileRuntime>>({});
+  const remoteAnglesRef = useRef<Record<string, { renderAngle: number; targetAngle: number }>>({});
+  const pendingSpawnProjectilesRef = useRef<any[]>([]);
 
   const aimDirRef = useRef(new THREE.Vector3(0, 0, 1));
   const lastShootTimeRef = useRef(0);
@@ -446,6 +449,7 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
   const isDisabledRef = useRef(false);
   const isDeadRef = useRef(false);
   const ammoRef = useRef(0);
+  const localPredictedPosRef = useRef<{ x: number; y: number } | null>(null);
 
   const gameStateRef = useRef<{
     worldSize: number;
@@ -675,8 +679,15 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
       const worldSize = snapshot.worldSize || WORLD_FALLBACK_SIZE;
 
       // Local player movement + collision (solid environment)
-      const my = snapshot.players[playerIdRef.current];
-      if (my && !isDisabledRef.current && !isDeadRef.current) {
+      const myId = playerIdRef.current;
+      const myFromServer = snapshot.players[myId];
+      if (!localPredictedPosRef.current) {
+        localPredictedPosRef.current = {
+          x: Number.isFinite(myFromServer?.x) ? myFromServer.x : worldSize / 2,
+          y: Number.isFinite(myFromServer?.y) ? myFromServer.y : worldSize / 2,
+        };
+      }
+      if (myFromServer && !isDisabledRef.current && !isDeadRef.current) {
         const move = new THREE.Vector3(0, 0, 0);
         if (keysRef.current['KeyW']) move.z -= 1;
         if (keysRef.current['KeyS']) move.z += 1;
@@ -687,29 +698,46 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
           const speedWorld = 480;
           const dxWorld = move.x * speedWorld * dt;
           const dzWorld = move.z * speedWorld * dt;
-          const targetXWorld = (my.x ?? worldSize / 2) + dxWorld;
-          const targetYWorld = (my.y ?? worldSize / 2) + dzWorld;
+          const baseXWorld = localPredictedPosRef.current?.x ?? (myFromServer?.x ?? worldSize / 2);
+          const baseYWorld = localPredictedPosRef.current?.y ?? (myFromServer?.y ?? worldSize / 2);
+          const targetXWorld = baseXWorld + dxWorld;
+          const targetYWorld = baseYWorld + dzWorld;
           const targetScene = worldToScene(targetXWorld, targetYWorld, worldSize);
           let allowX = true, allowZ = true;
           if (!canMoveTo(targetScene.sx, targetScene.sz, obstaclesRef.current, PLAYER_COLLISION_RADIUS)) {
-            const curScene = worldToScene(my.x ?? worldSize / 2, my.y ?? worldSize / 2, worldSize);
+            const curScene = worldToScene(baseXWorld, baseYWorld, worldSize);
             allowX = canMoveTo(targetScene.sx, curScene.sz, obstaclesRef.current, PLAYER_COLLISION_RADIUS);
             allowZ = canMoveTo(curScene.sx, targetScene.sz, obstaclesRef.current, PLAYER_COLLISION_RADIUS);
           }
-          const finalX = allowX ? targetXWorld : (my.x ?? worldSize / 2);
-          const finalY = allowZ ? targetYWorld : (my.y ?? worldSize / 2);
+          const finalX = allowX ? targetXWorld : baseXWorld;
+          const finalY = allowZ ? targetYWorld : baseYWorld;
           if (allowX || allowZ) {
+            // Client-side prediction: update local position immediately.
+            localPredictedPosRef.current = {
+              x: Math.max(30, Math.min(worldSize - 30, finalX)),
+              y: Math.max(30, Math.min(worldSize - 30, finalY)),
+            };
             socket.emit('updatePosition', {
               code: roomCodeRef.current,
               playerId: playerIdRef.current,
-              x: Math.max(30, Math.min(worldSize - 30, finalX)),
-              y: Math.max(30, Math.min(worldSize - 30, finalY)),
+              x: localPredictedPosRef.current.x,
+              y: localPredictedPosRef.current.y,
             });
           }
         }
       }
 
       // Players – interpolation with lerp
+      const presentPlayerIds = new Set<string>(Object.keys(snapshot.players || {}));
+      // Ghost prevention: remove missing players immediately
+      Object.keys(playerEntitiesRef.current).forEach((id) => {
+        if (!presentPlayerIds.has(id)) {
+          sceneRef.current!.remove(playerEntitiesRef.current[id].mesh);
+          delete playerEntitiesRef.current[id];
+          delete remoteAnglesRef.current[id];
+        }
+      });
+
       Object.entries(snapshot.players).forEach(([id, p]) => {
         const isBossPlayer = !!p.modeState?.isBoss;
         const hp = p.modeState?.hp ?? 2;
@@ -728,27 +756,37 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
           playerEntitiesRef.current[id] = ent;
         }
 
-        ent.targetX = p.x ?? worldSize / 2;
-        ent.targetZ = p.y ?? worldSize / 2;
+        if (ent.isLocal && localPredictedPosRef.current) {
+          ent.targetX = localPredictedPosRef.current.x;
+          ent.targetZ = localPredictedPosRef.current.y;
+        } else {
+          ent.targetX = p.x ?? worldSize / 2;
+          ent.targetZ = p.y ?? worldSize / 2;
+        }
 
         const current = ent.mesh.position;
         const targetScene = worldToScene(ent.targetX, ent.targetZ, worldSize);
-        const lerpFactor = ent.isLocal ? LOCAL_LERP : REMOTE_LERP;
-
         const dx = targetScene.sx - current.x;
         const dz = targetScene.sz - current.z;
-        const distSq = dx * dx + dz * dz;
         const moveSpeed = Math.hypot(dx, dz) / (dt || 0.001);
         const bobScale = 0.4 + Math.min(1, moveSpeed / 80) * 0.35;
-        if (distSq > SNAP_DIST * SNAP_DIST) {
-          current.set(targetScene.sx, ent.radius, targetScene.sz);
-        } else {
-          current.x = THREE.MathUtils.lerp(current.x, targetScene.sx, lerpFactor);
-          current.z = THREE.MathUtils.lerp(current.z, targetScene.sz, lerpFactor);
-          current.y = ent.radius;
-        }
+        // Universal remote interpolation: never snap, always approach target.
+        const factor = ent.isLocal ? 0.15 : 0.2;
+        current.x += (targetScene.sx - current.x) * factor;
+        current.z += (targetScene.sz - current.z) * factor;
+        current.y = ent.radius;
         const bob = Math.sin(now * 0.005 + (ent.mesh.userData.bobPhase ?? 0)) * bobScale;
         ent.mesh.position.y = current.y + bob;
+
+        // Remote facing interpolation (shortest path). Server may not yet send angle; keep stable.
+        const ang = remoteAnglesRef.current[id] || { renderAngle: 0, targetAngle: 0 };
+        const serverAngle = Number.isFinite(p.modeState?.angle) ? p.modeState.angle : (Number.isFinite(p.angle) ? p.angle : ang.targetAngle);
+        ang.targetAngle = wrapAngleRad(serverAngle);
+        ang.renderAngle = lerpAngleRad(ang.renderAngle, ang.targetAngle, ent.isLocal ? 0.15 : 0.2);
+        remoteAnglesRef.current[id] = ang;
+        if (!ent.isLocal) {
+          ent.mesh.rotation.y = ang.renderAngle;
+        }
       });
 
       // Boss – interpolation with lerp
@@ -793,9 +831,44 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
       // Projectiles Manager – visible, moving, cleaned up
       const runtime = projectilesRef.current;
       const projs = snapshot.projectiles || [];
+      const presentProjIds = new Set<string>(
+        projs
+          .map((p: any) => p?.id ?? (p?.shooterId != null && p?.spawnTime != null ? `${p.shooterId}_${p.spawnTime}` : null))
+          .filter(Boolean) as string[]
+      );
+      Object.keys(runtime).forEach((id) => {
+        if (!presentProjIds.has(id)) {
+          const rt = runtime[id];
+          const cap = rt.mesh.children[0] as THREE.Mesh;
+          rt.trailMeshes.forEach(m => {
+            (m.geometry as THREE.BufferGeometry).dispose();
+            ((m.material as THREE.Material) as THREE.MeshBasicMaterial).dispose?.();
+          });
+          if (cap?.geometry) (cap.geometry as THREE.BufferGeometry).dispose();
+          if (cap?.material) (cap.material as THREE.Material).dispose();
+          sceneRef.current!.remove(rt.mesh);
+          delete runtime[id];
+        }
+      });
 
       const scaleToScene = MAP_SIZE / (worldSize || WORLD_FALLBACK_SIZE);
       const TRAIL_LEN = 5;
+
+      // Apply immediate spawns (socket event) without waiting for tick.
+      // Tick remains authoritative and will cleanup/confirm IDs.
+      if (pendingSpawnProjectilesRef.current.length) {
+        const pending = pendingSpawnProjectilesRef.current.splice(0, pendingSpawnProjectilesRef.current.length);
+        for (const sp of pending) {
+          if (!sp || sp.mode !== 'boss') continue;
+          const proj = sp.projectile;
+          if (!proj || proj.kind !== 'bossProjectile') continue;
+          const id = proj.id ?? `${proj.shooterId}_${proj.spawnTime}`;
+          if (!id || runtime[id]) continue;
+          // Create a runtime projectile immediately by reusing the same fields the tick path expects.
+          projs.push(proj);
+        }
+      }
+
       for (const proj of projs) {
         if (!Number.isFinite(proj.x) || !Number.isFinite(proj.y)) continue;
         const id = proj.id ?? `${proj.shooterId}_${proj.spawnTime}`;
@@ -803,11 +876,13 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
 
         const isBossProj = !!proj.isBoss;
         const isOwn = proj.shooterId === playerIdRef.current;
-        const weaponId = isOwn ? (equippedWeaponRef.current || 'rifle') : 'rifle';
+        const weaponId = (proj.weaponType as string) || (isOwn ? (equippedWeaponRef.current || 'rifle') : 'rifle');
         const wcfg = WEAPON_CONFIG[weaponId] || WEAPON_CONFIG.rifle;
-        const rad = isBossProj ? 0.9 : wcfg.projectileSize * 0.5;
+        const metaColor = typeof proj?.projectileData?.color === 'string' ? proj.projectileData.color : null;
+        const color = metaColor ? parseInt(metaColor.replace('#', ''), 16) : (isBossProj ? 0xff00ff : wcfg.projectileColor);
+        const size = typeof proj?.projectileData?.size === 'number' && isFinite(proj.projectileData.size) ? proj.projectileData.size : (isBossProj ? 1.8 : wcfg.projectileSize);
+        const rad = isBossProj ? 0.9 : size * 0.5;
         const len = isBossProj ? 3 : 1.8;
-        const color = isBossProj ? 0xff00ff : wcfg.projectileColor;
         const capsuleGeo = new THREE.CapsuleGeometry(rad, len - rad * 2, 6, 12);
         const mat = new THREE.MeshStandardMaterial({
           color,
@@ -975,6 +1050,17 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
       sceneRef.current = null;
       cameraRef.current = null;
     };
+  }, []);
+
+  useEffect(() => {
+    const onSpawn = (msg: any) => {
+      if (!msg || msg.mode !== 'boss') return;
+      const p = msg.projectile;
+      if (!p || p.kind !== 'bossProjectile') return;
+      pendingSpawnProjectilesRef.current.push(msg);
+    };
+    socket.on('spawnProjectile', onSpawn);
+    return () => { socket.off('spawnProjectile', onSpawn); };
   }, []);
 
   const onCorrect = () => {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, type MouseEvent as RMouseEvent, type TouchEvent as RTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Clock, HelpCircle, ShoppingCart, X, Trophy } from 'lucide-react';
+import { Clock, HelpCircle, ShoppingCart, X } from 'lucide-react';
 import { socket } from '../../socket';
 import { QuizTerminalModal } from './QuizTerminalModal';
 import { ShopPanel } from './ShopPanel';
@@ -393,19 +393,19 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
-      if (k === 'w' || k === 'arrowup') keysRef.current.up = true;
-      if (k === 's' || k === 'arrowdown') keysRef.current.down = true;
-      if (k === 'a' || k === 'arrowleft') keysRef.current.left = true;
-      if (k === 'd' || k === 'arrowright') keysRef.current.right = true;
+      const c = e.code;
+      if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(c)) e.preventDefault();
+      if (c === 'KeyW' || c === 'ArrowUp') keysRef.current.up = true;
+      if (c === 'KeyS' || c === 'ArrowDown') keysRef.current.down = true;
+      if (c === 'KeyA' || c === 'ArrowLeft') keysRef.current.left = true;
+      if (c === 'KeyD' || c === 'ArrowRight') keysRef.current.right = true;
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (k === 'w' || k === 'arrowup') keysRef.current.up = false;
-      if (k === 's' || k === 'arrowdown') keysRef.current.down = false;
-      if (k === 'a' || k === 'arrowleft') keysRef.current.left = false;
-      if (k === 'd' || k === 'arrowright') keysRef.current.right = false;
+      const c = e.code;
+      if (c === 'KeyW' || c === 'ArrowUp') keysRef.current.up = false;
+      if (c === 'KeyS' || c === 'ArrowDown') keysRef.current.down = false;
+      if (c === 'KeyA' || c === 'ArrowLeft') keysRef.current.left = false;
+      if (c === 'KeyD' || c === 'ArrowRight') keysRef.current.right = false;
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -433,6 +433,31 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     }, 50);
     return () => clearInterval(interval);
   }, [roomCode, playerId, quizOpen, shopOpen]);
+
+  // Universal immediate projectile spawns (do not wait for tick).
+  useEffect(() => {
+    const safeNum = (v: unknown, def: number): number =>
+      typeof v === 'number' && !Number.isNaN(v) ? v : def;
+    const onSpawn = (msg: any) => {
+      if (!msg || msg.mode !== 'farm') return;
+      const p = msg.projectile;
+      if (!p || p.kind !== 'farmProjectile') return;
+      const id = typeof p.id === 'string' ? p.id : null;
+      if (!id) return;
+      // Inject into the same authoritative maps the render loop already consumes.
+      projTargetsRef.current.set(id, {
+        x: safeNum(p.x, NaN),
+        y: safeNum(p.y, NaN),
+        vx: safeNum(p.vx, 0),
+        vy: safeNum(p.vy, 0),
+        type: p.type,
+        radius: p.radius,
+        color: p.color,
+      });
+    };
+    socket.on('spawnProjectile', onSpawn);
+    return () => { socket.off('spawnProjectile', onSpawn); };
+  }, []);
 
   const handleTouchMove = useCallback((e: RTouchEvent<HTMLCanvasElement>) => {
     if (!e.touches[0]) return;
@@ -954,24 +979,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         </div>
       </div>
 
-      <div className="absolute right-4 top-24 z-20 pointer-events-auto min-w-[200px] rounded-xl bg-slate-900/90 backdrop-blur-md border border-white/10 p-3">
-        <h3 className="text-lg font-bold mb-2 flex items-center gap-2 text-amber-400">
-          <Trophy size={18} /> מובילים
-        </h3>
-        <div className="space-y-1 max-h-40 overflow-y-auto">
-          {sorted.slice(0, 8).map((pl: any, i: number) => (
-            <div
-              key={pl.id}
-              className={`flex justify-between text-sm ${pl.id === playerId ? 'text-amber-300 font-bold' : 'text-slate-300'}`}
-            >
-              <span>
-                {i + 1}. {pl.name || pl.id}
-              </span>
-              <span>{pl.score ?? 0}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+      {/* Local leaderboard removed — use universal `Leaderboard` overlay in `PlayerView`. */}
 
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3 z-20 pointer-events-auto">
         <motion.button

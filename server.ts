@@ -30,6 +30,12 @@ interface GameRoom {
   startTime?: number;
 }
 
+type SpawnProjectilePayload = {
+  code: string;
+  mode: string;
+  projectile: any;
+};
+
 const rooms: Record<string, GameRoom> = {};
 
 // Zombie mode: weapon definitions (match client exmpl.html)
@@ -537,6 +543,12 @@ async function startServer() {
         if (room.mode === 'ctf' && typeof angle === 'number') {
           if (p.modeState) p.modeState.angle = angle;
         }
+        // Persist facing angle for clients to smoothly render (used for remote interpolation).
+        if (typeof angle === 'number' && isFinite(angle)) {
+          p.angle = angle;
+          p.modeState = p.modeState || {};
+          p.modeState.angle = angle;
+        }
 
         if (room.mode === 'ctf') {
           if (p.modeState?.dead) return;
@@ -853,7 +865,7 @@ async function startServer() {
           for (let i = 0; i < wpn.pellets; i++) {
             const angleOffset = (Math.random() - 0.5) * wpn.spread;
             const finalAngle = aimAngle + angleOffset;
-            bullets.push({
+            const bullet = {
               id: Math.random().toString(36).slice(2),
               x: player.x + Math.cos(finalAngle) * spawnDist,
               y: player.y + Math.sin(finalAngle) * spawnDist,
@@ -864,7 +876,10 @@ async function startServer() {
               life: CTF_BULLET_LIFETIME,
               damage: wpn.damage,
               color: wpn.color,
-            });
+            };
+            bullets.push(bullet);
+            // Universal immediate projectile spawn for smooth remote rendering (tick remains authoritative)
+            io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'ctfBullet', ...bullet } } satisfies SpawnProjectilePayload);
           }
           room.globalState.bullets = bullets;
           io.to(code).emit("playerUpdated", { playerId, player });
@@ -898,12 +913,27 @@ async function startServer() {
         else angles = [angle];
         const now = Date.now();
         angles.forEach((a, i) => {
-          projs.push({
+          const proj = {
             id: `${playerId}_${now}_${i}`,
             x: player.x, y: player.y,
             vx: Math.cos(a) * PROJECTILE_SPEED, vy: Math.sin(a) * PROJECTILE_SPEED,
-            shooterId: playerId, isBoss: false, spawnTime: now, aimAngle: a
-          });
+            shooterId: playerId,
+            isBoss: false,
+            spawnTime: now,
+            aimAngle: a,
+            weaponType,
+            projectileData: {
+              speed: PROJECTILE_SPEED,
+              color:
+                weaponType === 'shotgun' ? '#fb923c'
+                : weaponType === 'sniper' ? '#22d3ee'
+                : weaponType === 'rocket' ? '#4ade80'
+                : '#60a5fa',
+              size: weaponType === 'rocket' ? 14 : weaponType === 'sniper' ? 6 : 8,
+            },
+          };
+          projs.push(proj);
+          io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'bossProjectile', ...proj } } satisfies SpawnProjectilePayload);
         });
         room.globalState.projectiles = projs;
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
@@ -911,11 +941,24 @@ async function startServer() {
         const angle = typeof clientAimAngle === 'number' ? clientAimAngle : 0;
         player.resources -= 1;
         const projs = room.globalState.projectiles || [];
-        projs.push({
+        const weaponType = player.modeState?.weaponType || 'boss';
+        const proj = {
+          id: `${playerId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           x: player.x, y: player.y,
           vx: Math.cos(angle) * PROJECTILE_SPEED, vy: Math.sin(angle) * PROJECTILE_SPEED,
-          shooterId: playerId, isBoss: true, spawnTime: Date.now()
-        });
+          shooterId: playerId,
+          isBoss: true,
+          spawnTime: Date.now(),
+          aimAngle: angle,
+          weaponType,
+          projectileData: {
+            speed: PROJECTILE_SPEED,
+            color: '#ff00ff',
+            size: 10,
+          },
+        };
+        projs.push(proj);
+        io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'bossProjectile', ...proj } } satisfies SpawnProjectilePayload);
         room.globalState.projectiles = projs;
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
       } else if (room.mode === 'farm' && actionType === 'equipWeapon' && weaponId) {
@@ -974,15 +1017,26 @@ async function startServer() {
         const mkId = (i: number) => `farm_${now}_${seqBase + i}`;
         let created = 0;
         if (tier === 1) {
-          projs.push({ id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 });
+          const proj = { id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 };
+          projs.push(proj);
+          io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'farmProjectile', ...proj } } satisfies SpawnProjectilePayload);
         } else if (tier === 2) {
           const nx = Math.cos(angle + Math.PI / 2) * 12, ny = Math.sin(angle + Math.PI / 2) * 12;
-          projs.push({ id: mkId(created++), x: shipX + nx, y: shipY + ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 });
-          projs.push({ id: mkId(created++), x: shipX - nx, y: shipY - ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 });
+          const p1 = { id: mkId(created++), x: shipX + nx, y: shipY + ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 };
+          const p2 = { id: mkId(created++), x: shipX - nx, y: shipY - ny, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 3 };
+          projs.push(p1, p2);
+          io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'farmProjectile', ...p1 } } satisfies SpawnProjectilePayload);
+          io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'farmProjectile', ...p2 } } satisfies SpawnProjectilePayload);
         } else if (tier === 3) {
-          [-0.25, 0, 0.25].forEach(off => projs.push({ id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle + off) * LASER_SPEED), vy: num(Math.sin(angle + off) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 }));
+          [-0.25, 0, 0.25].forEach(off => {
+            const proj = { id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle + off) * LASER_SPEED), vy: num(Math.sin(angle + off) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 };
+            projs.push(proj);
+            io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'farmProjectile', ...proj } } satisfies SpawnProjectilePayload);
+          });
         } else {
-          projs.push({ id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle) * PLASMA_SPEED), vy: num(Math.sin(angle) * PLASMA_SPEED), damage: dmg * 3, shooterId: playerId, type: 'plasma', radius: 12 });
+          const proj = { id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle) * PLASMA_SPEED), vy: num(Math.sin(angle) * PLASMA_SPEED), damage: dmg * 3, shooterId: playerId, type: 'plasma', radius: 12 };
+          projs.push(proj);
+          io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'farmProjectile', ...proj } } satisfies SpawnProjectilePayload);
         }
         room.globalState.projectileSeq = seqBase + created;
         room.globalState.projectiles = projs;
@@ -1067,14 +1121,17 @@ async function startServer() {
           // Pistol: spawn physical projectile (moved each tick, collision in game loop)
           if (!room.globalState.projectiles) room.globalState.projectiles = [];
           const PISTOL_BULLET_SPEED = 12000;
-          room.globalState.projectiles.push({
+          const proj = {
+            id: `z_${player.id}_${now}_${Math.random().toString(36).slice(2, 6)}`,
             x: gunTipX, y: gunTipY,
             vx: Math.cos(aimAngle) * PISTOL_BULLET_SPEED / 30,
             vy: Math.sin(aimAngle) * PISTOL_BULLET_SPEED / 30,
             damage: wpn.damage,
             playerId: player.id,
             type: 'pistol',
-          });
+          };
+          room.globalState.projectiles.push(proj);
+          io.to(code).emit('spawnProjectile', { code, mode: room.mode, projectile: { kind: 'zombieProjectile', ...proj, weaponType: 'pistol', projectileData: { color: wpn.color, damage: wpn.damage, spriteId: 'pistol' } } } satisfies SpawnProjectilePayload);
           player.modeState.ammo = ammo - 1;
           player.modeState.lastFire = now;
         } else {
@@ -1113,7 +1170,21 @@ async function startServer() {
         }
         const broadcastVx = weapon === 'pistol' ? Math.cos(aimAngle) * 12000 / 30 : Math.cos(aimAngle) * 2000;
         const broadcastVy = weapon === 'pistol' ? Math.sin(aimAngle) * 12000 / 30 : Math.sin(aimAngle) * 2000;
-        socket.to(code).emit('remoteShoot', { x: gunTipX, y: gunTipY, vx: broadcastVx, vy: broadcastVy, weaponType: weapon, playerId: player.id });
+        const meta = ZOMBIE_WEAPONS[weapon] ?? ZOMBIE_WEAPONS.pistol;
+        socket.to(code).emit('remoteShoot', {
+          x: gunTipX,
+          y: gunTipY,
+          vx: broadcastVx,
+          vy: broadcastVy,
+          weaponType: weapon,
+          projectileData: {
+            speed: Math.hypot(broadcastVx, broadcastVy),
+            color: meta.color,
+            damage: meta.damage,
+            spriteId: weapon,
+          },
+          playerId: player.id
+        });
         io.to(code).emit("playerUpdated", { playerId: player.id, player });
         io.to(code).emit("globalStateUpdated", room.globalState);
       }
@@ -1795,6 +1866,7 @@ async function startServer() {
       }
 
       io.to(room.code).emit('tick', {
+        serverTime: now,
         players: Object.fromEntries(Object.entries(room.players).map(([k, v]) => {
           const ms = v.modeState || {};
           return [k, { ...v, modeState: { ...ms, ownedWeapons: [...(ms.ownedWeapons || [])] } }];
