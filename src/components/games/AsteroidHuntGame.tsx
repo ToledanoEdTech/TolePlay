@@ -4,6 +4,7 @@ import { Clock, HelpCircle, ShoppingCart, X } from 'lucide-react';
 import { socket } from '../../socket';
 import { QuizTerminalModal } from './QuizTerminalModal';
 import { ShopPanel } from './ShopPanel';
+import { SoundManager } from '../../utils/SoundManager';
 import {
   type Particle, type Star, type ShakeState,
   tickParticles,
@@ -21,6 +22,7 @@ import {
 
 const WORLD_SIZE = 4000;
 const VIEW_SIZE = 1000;
+const FARM_MOVE_SPEED_PER_SEC = 420; // must match server.ts farm MOVE_SPEED_PER_SEC
 
 interface Props {
   roomCode: string;
@@ -159,6 +161,11 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const prevTimeRef = useRef(0);
   const prevAsteroidsRef = useRef<Map<string, any>>(new Map());
   const prevAstHpRef = useRef<Map<string, number>>(new Map());
+  const localPredRef = useRef<{ x: number; y: number; vx: number; vy: number; angle: number } | null>(null);
+  const localProjectilesRef = useRef<Map<string, { x: number; y: number; px: number; py: number; vx: number; vy: number; type: string; radius: number; color: string; damage: number; createdAt: number }>>(new Map());
+
+  // Avoid double-hit visual effects when we locally predict a hit
+  const localReportedHitRef = useRef<Map<string, { ts: number; projectileId: string }>>(new Map());
 
   // --- Client-side smoothing state (prediction + lerp-to-authority) ---
   // EXACT architecture requested:
@@ -169,8 +176,8 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   type PlayerRender = { x: number; y: number; angle: number };
   type AstTarget = { x: number; y: number; rotation: number; vx: number; vy: number; rotSpeed: number };
   type AstRender = { x: number; y: number; rotation: number };
-  type ProjTarget = { x: number; y: number; vx: number; vy: number; type?: string; radius?: number; color?: string };
-  type ProjRender = { x: number; y: number; px: number; py: number; vx: number; vy: number; lastSeenAt: number; locked: boolean; type?: string; radius?: number; color?: string };
+  type ProjTarget = { x: number; y: number; vx: number; vy: number; shooterId?: string; type?: string; radius?: number; color?: string };
+  type ProjRender = { x: number; y: number; px: number; py: number; vx: number; vy: number; lastSeenAt: number; locked: boolean; shooterId?: string; type?: string; radius?: number; color?: string };
 
   const playerTargetsRef = useRef<Map<string, PlayerTarget>>(new Map());
   const playerRendersRef = useRef<Map<string, PlayerRender>>(new Map());
@@ -178,6 +185,25 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   const astRendersRef = useRef<Map<string, AstRender>>(new Map());
   const projTargetsRef = useRef<Map<string, ProjTarget>>(new Map());
   const projRendersRef = useRef<Map<string, ProjRender>>(new Map());
+
+  // Local-only gameplay juice (gem sparkles + debris particles).
+  type LocalParticle = { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: string; size: number; line?: boolean };
+  const activeParticlesRef = useRef<LocalParticle[]>([]);
+  const localCollectedGemsRef = useRef<Set<string>>(new Set());
+
+  const lastTransformSentRef = useRef<number>(0);
+  const lastLocalShotAtRef = useRef<number>(0);
+
+  // Reset local-only state when we join a different room.
+  useEffect(() => {
+    localCollectedGemsRef.current = new Set();
+    activeParticlesRef.current = [];
+    localProjectilesRef.current.clear();
+    localPredRef.current = null;
+    lastLocalShotAtRef.current = 0;
+    playerTargetsRef.current.clear();
+    playerRendersRef.current.clear();
+  }, [roomCode]);
 
   gsRef.current = globalState;
   playerRef.current = player;
@@ -210,8 +236,17 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     // Clear stuck key states (canvas loses focus, keyup may never fire)
     keysRef.current = { up: false, down: false, left: false, right: false };
 
-    // Emit "stop" movement so server doesn't keep last vx/vy forever
-    socket.emit('move', { code: roomCode, playerId, dx: 0, dy: 0, angle: localAimAngleRef.current });
+    // Send a neutral transform so remote rendering stays stable.
+    const lp = localPredRef.current;
+    socket.emit('playerTransform', {
+      code: roomCode,
+      playerId,
+      x: lp?.x ?? playerRef.current?.x ?? WORLD_SIZE / 2,
+      y: lp?.y ?? playerRef.current?.y ?? WORLD_SIZE / 2,
+      a: localAimAngleRef.current,
+      vx: 0,
+      vy: 0,
+    });
   }, [quizOpen, roomCode, playerId]);
 
   // While quiz is open, block keyboard events from triggering button activation (Space/Enter repeats).
@@ -244,7 +279,16 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   useEffect(() => {
     const clearInputs = () => {
       keysRef.current = { up: false, down: false, left: false, right: false };
-      socket.emit('move', { code: roomCode, playerId, dx: 0, dy: 0, angle: localAimAngleRef.current });
+      const lp = localPredRef.current;
+      socket.emit('playerTransform', {
+        code: roomCode,
+        playerId,
+        x: lp?.x ?? playerRef.current?.x ?? WORLD_SIZE / 2,
+        y: lp?.y ?? playerRef.current?.y ?? WORLD_SIZE / 2,
+        a: localAimAngleRef.current,
+        vx: 0,
+        vy: 0,
+      });
     };
     const onWindowBlur = () => clearInputs();
     const onVisibility = () => { if (document.hidden) clearInputs(); };
@@ -270,14 +314,25 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       const x = safeNum((pl as any)?.x, WORLD_SIZE / 2);
       const y = safeNum((pl as any)?.y, WORLD_SIZE / 2);
       const angle = safeNum((pl as any)?.angle, safeNum((pl as any)?.modeState?.angle, 0));
-      const prev = playerTargetsRef.current.get(id);
-      const dt = prev ? Math.max(0.001, 0.05) : 0.05;
-      const vx = prev ? (x - prev.x) / dt : 0;
-      const vy = prev ? (y - prev.y) / dt : 0;
-      playerTargetsRef.current.set(id, { x, y, angle, vx, vy });
+      if (id === playerIdRef.current) {
+        // STRICT client-authoritative:
+        // - On the very first tick, initialize the local predicted state from server coordinates.
+        // - Afterwards, ALWAYS ignore incoming server x/y/vx/vy/angle for the local ship.
+        if (!localPredRef.current) {
+          localPredRef.current = { x, y, vx: 0, vy: 0, angle };
+        }
+        // Intentionally do NOT update `playerTargetsRef` for the local player.
+      } else {
+        const prev = playerTargetsRef.current.get(id);
+        const dt = prev ? Math.max(0.001, 0.05) : 0.05;
+        const vx = prev ? (x - prev.x) / dt : 0;
+        const vy = prev ? (y - prev.y) / dt : 0;
+        playerTargetsRef.current.set(id, { x, y, angle, vx, vy });
+      }
     }
     // strict cleanup for players that vanished
-    for (const id of Array.from(playerTargetsRef.current.keys())) {
+    for (const id0 of Array.from(playerTargetsRef.current.keys())) {
+      const id = String(id0);
       if (!alivePlayers.has(id)) {
         playerTargetsRef.current.delete(id);
         playerRendersRef.current.delete(id);
@@ -305,7 +360,8 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       nextHp.set(id, hp);
     }
     // strict cleanup for asteroids that vanished (prevents glitch lerp)
-    for (const id of Array.from(astTargetsRef.current.keys())) {
+    for (const id0 of Array.from(astTargetsRef.current.keys())) {
+      const id = String(id0);
       if (!aliveAst.has(id)) {
         astTargetsRef.current.delete(id);
         astRendersRef.current.delete(id);
@@ -313,7 +369,8 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       }
     }
     // prune missing asteroids from hp tracking
-    for (const id of Array.from(prevAstHpRef.current.keys())) {
+    for (const id0 of Array.from(prevAstHpRef.current.keys())) {
+      const id = String(id0);
       if (!nextHp.has(id)) prevAstHpRef.current.delete(id);
     }
 
@@ -330,11 +387,21 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         : `${String(pr?.shooterId ?? 'u')}_${String(pr?.spawnTime ?? pr?.createdAt ?? now)}_${String(pr?.type ?? 'p')}`;
       const vx = safeNum(pr?.vx, 0);
       const vy = safeNum(pr?.vy, 0);
-      nextProj.set(id, { x, y, vx, vy, type: pr?.type, radius: pr?.radius, color: pr?.color });
+      nextProj.set(id, {
+        x,
+        y,
+        vx,
+        vy,
+        shooterId: typeof pr?.shooterId === 'string' ? pr.shooterId : undefined,
+        type: pr?.type,
+        radius: pr?.radius,
+        color: pr?.color,
+      });
     }
     projTargetsRef.current = nextProj;
     // strict cleanup for dead projectiles (prevents phantom shots)
-    for (const id of Array.from(projRendersRef.current.keys())) {
+    for (const id0 of Array.from(projRendersRef.current.keys())) {
+      const id = String(id0);
       if (!nextProj.has(id)) projRendersRef.current.delete(id);
     }
   }, [allPlayers, globalState]);
@@ -418,18 +485,18 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
   useEffect(() => {
     if (quizOpen || shopOpen) return;
     const interval = setInterval(() => {
-      const k = keysRef.current;
-      // Top-down shooter controls:
-      // - Mouse controls facing (angle)
-      // - Keyboard controls thrust/strafe in ship-space, converted to world-space
-      const forward = (k.up ? 1 : 0) - (k.down ? 1 : 0);
-      const strafe = (k.right ? 1 : 0) - (k.left ? 1 : 0);
-      const a = localAimAngleRef.current;
-      let dx = forward * Math.cos(a) + strafe * Math.cos(a + Math.PI / 2);
-      let dy = forward * Math.sin(a) + strafe * Math.sin(a + Math.PI / 2);
-      const len = Math.hypot(dx, dy);
-      if (len > 1) { dx /= len; dy /= len; }
-      socket.emit('move', { code: roomCode, playerId, dx, dy, angle: a });
+      // Rapid client-authoritative sync for FARM.
+      const lp = localPredRef.current;
+      if (!lp) return;
+      socket.emit('playerTransform', {
+        code: roomCode,
+        playerId,
+        x: lp.x,
+        y: lp.y,
+        a: lp.angle,
+        vx: lp.vx,
+        vy: lp.vy,
+      });
     }, 50);
     return () => clearInterval(interval);
   }, [roomCode, playerId, quizOpen, shopOpen]);
@@ -450,6 +517,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         y: safeNum(p.y, NaN),
         vx: safeNum(p.vx, 0),
         vy: safeNum(p.vy, 0),
+          shooterId: typeof p.shooterId === 'string' ? p.shooterId : undefined,
         type: p.type,
         radius: p.radius,
         color: p.color,
@@ -457,6 +525,20 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     };
     socket.on('spawnProjectile', onSpawn);
     return () => { socket.off('spawnProjectile', onSpawn); };
+  }, []);
+
+  // Server authority: when a local (client-id) projectile hits, remove the predicted visual immediately.
+  useEffect(() => {
+    const onFarmProjectileHit = (msg: any) => {
+      const projectileId = msg?.projectileId;
+      if (typeof projectileId === 'string') {
+        localProjectilesRef.current.delete(projectileId);
+      }
+    };
+    socket.on('farmProjectileHit', onFarmProjectileHit);
+    return () => {
+      socket.off('farmProjectileHit', onFarmProjectileHit);
+    };
   }, []);
 
   const handleTouchMove = useCallback((e: RTouchEvent<HTMLCanvasElement>) => {
@@ -483,9 +565,115 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
     updateMouseWorld(clientX, clientY);
     const angle = localAimAngleRef.current;
 
+    // Client-side prediction for local shooting: spawn visual projectile(s) instantly.
+    // Server will also broadcast the authoritative projectile shortly after.
+    const nowMs = performance.now();
+    const myId = playerIdRef.current;
+    const myR = playerRendersRef.current.get(myId);
+    const p = playerRef.current;
+    const shipX = typeof myR?.x === 'number' && !Number.isNaN(myR.x) ? myR.x : (typeof p?.x === 'number' && !Number.isNaN(p.x) ? p.x : WORLD_SIZE / 2);
+    const shipY = typeof myR?.y === 'number' && !Number.isNaN(myR.y) ? myR.y : (typeof p?.y === 'number' && !Number.isNaN(p.y) ? p.y : WORLD_SIZE / 2);
+    const tier =
+      equippedWeapon === 'weapon_tier_4' ? 4 :
+      equippedWeapon === 'weapon_tier_3' ? 3 :
+      equippedWeapon === 'weapon_tier_2' ? 2 : 1;
+    const isPlasma = tier === 4;
+
+    // Local fire-rate gate (prevents spawning predicted shots that the server rejects).
+    const baseFireRateMs = isPlasma ? 320 : 170;
+    const tierBonus = tier >= 3 ? -20 : tier >= 2 ? -10 : 0;
+    const localFireRateMs = Math.max(80, baseFireRateMs + tierBonus);
+    if (nowMs - lastLocalShotAtRef.current < localFireRateMs) return;
+    lastLocalShotAtRef.current = nowMs;
+
+    // Shooting juice.
+    SoundManager.playShootSound();
     muzzleFlashRef.current = { active: true, angle, intensity: 1 };
-    socket.emit('action', { code: roomCode, playerId, actionType: 'shoot', aimAngle: angle });
-  }, [roomCode, playerId, player?.resources, equippedWeapon, quizOpen, shopOpen, px, py, updateMouseWorld]);
+
+    const speed = isPlasma ? 520 : 900; // must match server.ts farm LASER_SPEED/PLASMA_SPEED
+    const color = isPlasma ? '#a855f7' : '#60a5fa';
+    const radius = isPlasma ? 12 : (tier === 2 ? 3 : 4);
+    const expectedDamage = isPlasma ? laserDmg * 3 : laserDmg;
+    const shotId = `${Math.floor(nowMs)}_${Math.random().toString(36).slice(2, 7)}`;
+    const projectileCount = tier === 1 ? 1 : tier === 2 ? 2 : tier === 3 ? 3 : 1;
+    const clientProjectileIds = Array.from({ length: projectileCount }, (_, i) => `farmClient_${myId}_${shotId}_${i}`);
+
+    const addLocalProj = (a: number, idx: number) => {
+      const vx = Math.cos(a) * speed;
+      const vy = Math.sin(a) * speed;
+      const id = clientProjectileIds[idx] || `farmClient_${myId}_${shotId}_${idx}`;
+      localProjectilesRef.current.set(id, {
+        x: shipX,
+        y: shipY,
+        px: shipX,
+        py: shipY,
+        vx,
+        vy,
+        type: isPlasma ? 'plasma' : 'laser',
+        radius,
+        color,
+        damage: expectedDamage,
+        createdAt: nowMs,
+      });
+    };
+    if (tier === 1 || tier === 4) addLocalProj(angle, 0);
+    else if (tier === 2) {
+      const nx = Math.cos(angle + Math.PI / 2) * 12;
+      const ny = Math.sin(angle + Math.PI / 2) * 12;
+      // dual: two parallel streams
+      localProjectilesRef.current.set(clientProjectileIds[0], {
+        x: shipX + nx,
+        y: shipY + ny,
+        px: shipX + nx,
+        py: shipY + ny,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        type: 'laser',
+        radius,
+        color,
+        damage: expectedDamage,
+        createdAt: nowMs,
+      });
+      localProjectilesRef.current.set(clientProjectileIds[1], {
+        x: shipX - nx,
+        y: shipY - ny,
+        px: shipX - nx,
+        py: shipY - ny,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        type: 'laser',
+        radius,
+        color,
+        damage: expectedDamage,
+        createdAt: nowMs,
+      });
+    } else if (tier === 3) {
+      [-0.25, 0, 0.25].forEach((off, i) => addLocalProj(angle + off, i));
+    }
+
+    // Important: sync latest local ship transform to server right before shooting.
+    // This prevents small projectile spawn offsets when shooting happens between transform ticks.
+    const lp = localPredRef.current;
+    if (lp) {
+      socket.emit('playerTransform', {
+        code: roomCode,
+        playerId,
+        x: lp.x,
+        y: lp.y,
+        a: angle,
+        vx: lp.vx,
+        vy: lp.vy,
+      });
+    }
+
+    socket.emit('action', {
+      code: roomCode,
+      playerId,
+      actionType: 'shoot',
+      aimAngle: angle,
+      clientProjectileIds,
+    });
+  }, [roomCode, playerId, player?.resources, equippedWeapon, quizOpen, shopOpen, px, py, updateMouseWorld, laserDmg]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -542,26 +730,54 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
 
       const cam = cameraRef.current;
 
-      // Use smoothed local render position for camera to eliminate "world stutter"
-      const myTarget = playerTargetsRef.current.get(myId);
-      if (myTarget) {
-        const cur = playerRendersRef.current.get(myId) ?? { x: myTarget.x, y: myTarget.y, angle: myTarget.angle };
-        cur.x += (myTarget.vx || 0) * dt;
-        cur.y += (myTarget.vy || 0) * dt;
-        cur.x += (myTarget.x - cur.x) * POS_LERP;
-        cur.y += (myTarget.y - cur.y) * POS_LERP;
-        const targetAngle = localAimAngleRef.current;
-        const da = Math.atan2(Math.sin(targetAngle - cur.angle), Math.cos(targetAngle - cur.angle));
-        cur.angle = cur.angle + da * POS_LERP;
-        playerRendersRef.current.set(myId, cur);
-        cam.x = cur.x - viewW / 2;
-        cam.y = cur.y - viewH / 2;
-      } else {
-        const plX = safeNum(p?.x, WORLD_SIZE / 2);
-        const plY = safeNum(p?.y, WORLD_SIZE / 2);
-        cam.x = plX - viewW / 2;
-        cam.y = plY - viewH / 2;
+      // ── LOCAL CLIENT-SIDE PREDICTION (do NOT wait for server tick) ──
+      // Local player: integrate instantly from inputs; reconcile gently to server authority.
+      if (!localPredRef.current) {
+        localPredRef.current = {
+          x: safeNum(p?.x, WORLD_SIZE / 2),
+          y: safeNum(p?.y, WORLD_SIZE / 2),
+          vx: 0,
+          vy: 0,
+          angle: safeNum(localAimAngleRef.current, safeNum(p?.angle, 0)),
+        };
       }
+      const lp = localPredRef.current;
+      if (!modalOpenRef.current) {
+        const k = keysRef.current;
+        const forward = (k.up ? 1 : 0) - (k.down ? 1 : 0);
+        const strafe = (k.right ? 1 : 0) - (k.left ? 1 : 0);
+        const a = localAimAngleRef.current;
+        let dx = forward * Math.cos(a) + strafe * Math.cos(a + Math.PI / 2);
+        let dy = forward * Math.sin(a) + strafe * Math.sin(a + Math.PI / 2);
+        const len = Math.hypot(dx, dy);
+        if (len > 1e-6) {
+          if (len > 1) { dx /= len; dy /= len; }
+          lp.vx = dx * FARM_MOVE_SPEED_PER_SEC;
+          lp.vy = dy * FARM_MOVE_SPEED_PER_SEC;
+        } else {
+          // Apply gentle local drag to feel responsive but not "sticky".
+          const drag = 1 - Math.min(0.35, dt * 3.5);
+          lp.vx *= drag;
+          lp.vy *= drag;
+          if (Math.abs(lp.vx) < 0.01) lp.vx = 0;
+          if (Math.abs(lp.vy) < 0.01) lp.vy = 0;
+        }
+
+        // Client-authoritative screen wrapping.
+        const wrapCoord = (v: number) => {
+          const m = WORLD_SIZE;
+          const mod = v % m;
+          return mod < 0 ? mod + m : mod;
+        };
+        lp.x = wrapCoord(lp.x + lp.vx * dt);
+        lp.y = wrapCoord(lp.y + lp.vy * dt);
+        lp.angle = a;
+      }
+
+      // Local render state is authoritative for the *local* ship rendering.
+      playerRendersRef.current.set(myId, { x: lp.x, y: lp.y, angle: lp.angle });
+      cam.x = lp.x - viewW / 2;
+      cam.y = lp.y - viewH / 2;
       cam.x = Math.max(0, Math.min(WORLD_SIZE - viewW, cam.x));
       cam.y = Math.max(0, Math.min(WORLD_SIZE - viewH, cam.y));
 
@@ -639,7 +855,10 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
           ty > -300 && ty < WORLD_SIZE + 300;
         const jumpDist = Math.hypot(tx - cur.x, ty - cur.y);
         const MAX_AST_SNAP_DIST = 700; // ~< view size; tuned to stop extreme "flybys"
-        if (!isInWorld || jumpDist > MAX_AST_SNAP_DIST) {
+        const MAX_AST_AXIS_DELTA = 150; // screen-wrap may teleport across edges; snap per-axis
+        const dxAbs = Math.abs(tx - cur.x);
+        const dyAbs = Math.abs(ty - cur.y);
+        if (!isInWorld || dxAbs > MAX_AST_AXIS_DELTA || dyAbs > MAX_AST_AXIS_DELTA || jumpDist > MAX_AST_SNAP_DIST) {
           cur.x = tx;
           cur.y = ty;
           cur.rotation = target.rotation;
@@ -669,10 +888,17 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         // Hit effect: when asteroid HP drops, spawn a small impact burst once.
         const prevHp = prevAstHpRef.current.get(id);
         if (typeof prevHp === 'number' && hp < prevHp - 0.001) {
-          particlesRef.current = particlesRef.current.concat(
-            emitAsteroidExplosion(cur.x, cur.y, type.body, type.glow, 10)
-          );
-          triggerShake(shakeRef.current, 1.4);
+          const pending = localReportedHitRef.current.get(id);
+          const shouldSkip = !!pending && (now - pending.ts) < 900;
+          if (!shouldSkip) {
+            particlesRef.current = particlesRef.current.concat(
+              emitAsteroidExplosion(cur.x, cur.y, type.body, type.glow, 10)
+            );
+            triggerShake(shakeRef.current, 1.4);
+          } else {
+            // We already rendered the local hit explosion; avoid double burst.
+            localReportedHitRef.current.delete(id);
+          }
         }
         prevAstHpRef.current.set(id, hp);
 
@@ -692,11 +918,49 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         }
       });
 
+      const lpForGems = localPredRef.current;
+      const collectRadius = safeNum(p?.modeState?.magnetRange, 50) + 15; // generous local pickup
+      const collectedGems = localCollectedGemsRef.current;
+
       (gs.collectibles || []).forEach((c: any) => {
+        const gemId = typeof c?.id === 'string' ? c.id : null;
         const cx = safeNum(c.x, 0);
         const cy = safeNum(c.y, 0);
         if (Number.isNaN(cx) || Number.isNaN(cy)) return;
+        if (gemId && collectedGems.has(gemId)) return;
         if (cx < cam.x - 40 || cx > cam.x + viewW + 40 || cy < cam.y - 40 || cy > cam.y + viewH + 40) return;
+
+        // Client-authoritative gem collection.
+        if (!modalOpenRef.current && lpForGems && gemId) {
+          const d = Math.hypot(lpForGems.x - cx, lpForGems.y - cy);
+          if (d < collectRadius) {
+            collectedGems.add(gemId);
+            socket.emit('collectGem', { code: roomCode, playerId, gemId });
+            SoundManager.playCollectSound();
+
+            // Sparkly upward lines (yellow/cyan).
+            const sparkCount = 6 + Math.floor(Math.random() * 5);
+            const colors = ['#fbbf24', '#22d3ee'];
+            for (let i = 0; i < sparkCount; i++) {
+              const col = colors[i % colors.length];
+              activeParticlesRef.current.push({
+                x: cx,
+                y: cy,
+                vx: (Math.random() - 0.5) * 70,
+                vy: -(120 + Math.random() * 160),
+                life: 0.18 + Math.random() * 0.22,
+                maxLife: 0.18 + Math.random() * 0.22,
+                color: col,
+                size: 1 + Math.random() * 2,
+                line: true,
+              });
+            }
+
+            // Hide gem immediately locally.
+            return;
+          }
+        }
+
         const gemColor = c.color || (safeNum(c.value, 50) >= 100 ? '#c084fc' : safeNum(c.value, 50) >= 70 ? '#67e8f9' : '#9ca3af');
         drawOreGem(ctx, cx, cy, safeNum(c.value, 50), gemColor, t, viewW / VIEW_SIZE);
       });
@@ -710,8 +974,27 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         if (!targets.has(id)) renders.delete(id);
       }
       for (const [id, tgt] of targets.entries()) {
+        // Projectile deduplication: local predicted bullets are rendered from `localProjectilesRef` only.
+        // Ignore authoritative projectiles fired by the local player to prevent double visuals.
+        if (tgt.shooterId && tgt.shooterId === myId) {
+          renders.delete(id);
+          continue;
+        }
         const existing = renders.get(id);
-        const r = existing ?? { x: tgt.x, y: tgt.y, px: tgt.x, py: tgt.y, vx: tgt.vx, vy: tgt.vy, lastSeenAt: nowMs, locked: true, type: tgt.type, radius: tgt.radius, color: tgt.color };
+        const r = existing ?? {
+          x: tgt.x,
+          y: tgt.y,
+          px: tgt.x,
+          py: tgt.y,
+          vx: tgt.vx,
+          vy: tgt.vy,
+          lastSeenAt: nowMs,
+          locked: true,
+          shooterId: tgt.shooterId,
+          type: tgt.type,
+          radius: tgt.radius,
+          color: tgt.color,
+        };
         if (!existing) {
           // first sight: lock initial state
           r.x = tgt.x;
@@ -721,6 +1004,7 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
           r.vx = tgt.vx;
           r.vy = tgt.vy;
           r.locked = true;
+          r.shooterId = tgt.shooterId;
         }
         // integrate forward only (straight line)
         r.px = r.x;
@@ -752,6 +1036,108 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         }
       }
 
+      // Local predicted projectiles (visual-only) — ensures instant feedback for shooting.
+      // Use keys() to avoid TS tuple/unknown typing issues around `entries()`.
+      for (const id of Array.from(localProjectilesRef.current.keys())) {
+        const r = localProjectilesRef.current.get(id);
+        if (!r) continue;
+        const age = nowMs - r.createdAt;
+        // Reconcile lifetime with server authority:
+        // - If the authoritative projectile disappeared, remove the predicted visual.
+        // - Keep a large max-age as a safety net.
+        if ((!targets.has(id) && age > 200) || age > 4500) {
+          localProjectilesRef.current.delete(id);
+          continue;
+        }
+        r.px = r.x;
+        r.py = r.y;
+        r.x += (r.vx || 0) * dt;
+        r.y += (r.vy || 0) * dt;
+
+        // Shooter-favored: detect LOCAL projectile hits against current rendered asteroid positions.
+        // On hit, spawn immediate visuals, remove the predicted projectile, and report to the server.
+        let didHit = false;
+        const hitRadius = r.radius || 4;
+        for (const a of asteroids) {
+          const asteroidId = typeof a?.id === 'string' ? a.id : null;
+          if (!asteroidId) continue;
+
+          const ra = astRendersRef.current.get(asteroidId);
+          const ax = safeNum(ra?.x, safeNum(a?.x, NaN));
+          const ay = safeNum(ra?.y, safeNum(a?.y, NaN));
+          if (Number.isNaN(ax) || Number.isNaN(ay)) continue;
+
+            const astR = safeNum(a?.radius, 20 + safeNum(a?.value, 50) / 20);
+            // Segment-circle check for reliability at high projectile speed.
+            const x1 = r.px, y1 = r.py, x2 = r.x, y2 = r.y;
+            const segDx = x2 - x1;
+            const segDy = y2 - y1;
+            const segLen2 = segDx * segDx + segDy * segDy || 1;
+            const t = Math.max(0, Math.min(1, ((ax - x1) * segDx + (ay - y1) * segDy) / segLen2));
+            const qx = x1 + segDx * t;
+            const qy = y1 + segDy * t;
+            const d = Math.hypot(ax - qx, ay - qy);
+            if (d < astR + hitRadius) {
+              const val = safeNum(a?.value, 50);
+              const type = getAsteroidType(val);
+
+              // Local debris particles + sound (client authoritative feel).
+              const debrisCount = 10 + Math.floor(Math.random() * 6); // 10-15
+              const debrisColor = r.type === 'plasma' ? '#a855f7' : type.glow;
+              for (let i = 0; i < debrisCount; i++) {
+                const sp = (90 + Math.random() * 160) * (r.type === 'plasma' ? 1.15 : 1);
+                activeParticlesRef.current.push({
+                  x: ax,
+                  y: ay,
+                  vx: (Math.random() - 0.5) * sp,
+                  vy: (Math.random() - 0.5) * sp - 20,
+                  life: 0.35 + Math.random() * 0.45,
+                  maxLife: 0.35 + Math.random() * 0.45,
+                  color: debrisColor,
+                  size: 0.9 + Math.random() * 1.8,
+                });
+              }
+              if (r.type === 'plasma') SoundManager.playExplosionSound();
+              else SoundManager.playHitSound();
+
+              localReportedHitRef.current.set(asteroidId, { ts: nowMs, projectileId: id });
+              particlesRef.current = particlesRef.current.concat(
+                emitAsteroidExplosion(ax, ay, type.body, type.glow, 10)
+              );
+              triggerShake(shakeRef.current, 1.8);
+
+            localProjectilesRef.current.delete(id);
+
+            socket.emit('clientHitAsteroid', {
+              code: roomCode,
+              playerId,
+              projectileId: id,
+              asteroidId,
+              damage: r.damage ?? 10,
+            });
+            didHit = true;
+            break;
+          }
+        }
+        if (didHit) continue;
+
+        if (r.x < cam.x - 200 || r.x > cam.x + viewW + 200 || r.y < cam.y - 200 || r.y > cam.y + viewH + 200) continue;
+        if (r.type === 'plasma') {
+          drawGlow(ctx, r.x, r.y, 25 * (viewW / VIEW_SIZE), r.color, 0.35);
+          ctx.fillStyle = colorAlpha(r.color, 0.85);
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = r.color;
+          ctx.beginPath();
+          ctx.arc(r.x, r.y, 12 * (viewW / VIEW_SIZE), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        } else {
+          const uiScale = viewW / VIEW_SIZE;
+          drawBeam(ctx, r.px, r.py, r.x, r.y, r.color, 4.2 * uiScale, 0.95);
+          drawGlow(ctx, r.x, r.y, 16 * uiScale, r.color, 0.18);
+        }
+      }
+
       // Players: build list from ref (prevents stale closure / invisible remotes)
       const playersList: Array<{ id: string; x?: number; y?: number; angle?: number; name?: string; modeState?: any; color?: string }> =
         Object.entries(ap).map(([id, pl]) => ({ ...(pl as any), id }));
@@ -759,8 +1145,8 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       if (!playersList.some((pl: any) => pl.id === myId)) {
         playersList.push({
           id: myId,
-          x: plX,
-          y: plY,
+          x: localPredRef.current?.x ?? safeNum(p?.x, WORLD_SIZE / 2),
+          y: localPredRef.current?.y ?? safeNum(p?.y, WORLD_SIZE / 2),
           angle: localAimAngleRef.current,
           name: p?.name,
           modeState: p?.modeState,
@@ -769,23 +1155,38 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       playersList.forEach((pl: any) => {
         const id = String(pl.id);
         const target = playerTargetsRef.current.get(id);
-        if (!target) return;
+        // Strict: bypass network smoothing for the LOCAL player (pure client-side prediction).
+        // IMPORTANT: do not early-return for the local player when `target` is missing,
+        // otherwise the ship disappears (targets may be intentionally ignored for local physics).
+        const cur = id === myId
+          ? (playerRendersRef.current.get(myId) ?? localPredRef.current ?? { x: safeNum(p?.x, WORLD_SIZE / 2), y: safeNum(p?.y, WORLD_SIZE / 2), angle: localAimAngleRef.current })
+          : (() => {
+              if (!target) return null;
+              return playerRendersRef.current.get(id) ?? { x: target.x, y: target.y, angle: target.angle };
+            })();
+        if (!cur) return;
 
-        const cur = playerRendersRef.current.get(id) ?? { x: target.x, y: target.y, angle: target.angle };
-
-        // optional prediction
-        cur.x += (target.vx || 0) * dt;
-        cur.y += (target.vy || 0) * dt;
-
-        // EXACT LERP requested
-        cur.x += (target.x - cur.x) * POS_LERP;
-        cur.y += (target.y - cur.y) * POS_LERP;
-
-        const targetAngle = id === myId ? localAimAngleRef.current : target.angle;
-        const da = Math.atan2(Math.sin(targetAngle - cur.angle), Math.cos(targetAngle - cur.angle));
-        cur.angle = cur.angle + da * POS_LERP;
-
-        playerRendersRef.current.set(id, cur);
+        if (id !== myId) {
+          // Screen-wrap safety: if target teleports across edges, snapping prevents "fly-through lerp".
+          const MAX_PLAYER_AXIS_SNAP = 150;
+          const dxAbs = Math.abs(target.x - cur.x);
+          const dyAbs = Math.abs(target.y - cur.y);
+          if (dxAbs > MAX_PLAYER_AXIS_SNAP || dyAbs > MAX_PLAYER_AXIS_SNAP) {
+            cur.x = target.x;
+            cur.y = target.y;
+            cur.angle = target.angle;
+          } else {
+            // optional prediction (remote only)
+            cur.x += (target.vx || 0) * dt;
+            cur.y += (target.vy || 0) * dt;
+            // LERP (remote only)
+            cur.x += (target.x - cur.x) * POS_LERP;
+            cur.y += (target.y - cur.y) * POS_LERP;
+            const da = Math.atan2(Math.sin(target.angle - cur.angle), Math.cos(target.angle - cur.angle));
+            cur.angle = cur.angle + da * POS_LERP;
+          }
+          playerRendersRef.current.set(id, cur);
+        }
 
         const plx = cur.x;
         const ply = cur.y;
@@ -797,10 +1198,11 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
         const radius = Math.max(12, 26 * scale);
         const isLocal = pl.id === myId;
 
-        // Thrusters for everyone (based on server movement intent)
-        const mvx = safeNum(pl.modeState?.vx, 0);
-        const mvy = safeNum(pl.modeState?.vy, 0);
-        const moveLen = Math.hypot(mvx, mvy);
+        // Thrusters for everyone (based on latest client-sim velocity).
+        // `modeState.vx/vy` are velocities in px/sec in the new client-authoritative model.
+        const mvx = isLocal ? (localPredRef.current?.vx ?? 0) : safeNum(pl.modeState?.vx, 0);
+        const mvy = isLocal ? (localPredRef.current?.vy ?? 0) : safeNum(pl.modeState?.vy, 0);
+        const moveLen = Math.hypot(mvx, mvy) / FARM_MOVE_SPEED_PER_SEC;
         if (moveLen > 0.05 && Math.random() < 0.7) {
           // rear of ship based on its current rotation (not movement vector)
           const thrusterAngle = angle + Math.PI;
@@ -850,6 +1252,38 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
       });
 
       particlesRef.current = tickParticles(ctx, particlesRef.current);
+
+      // Local-only particles: simple fading circles/lines.
+      if (activeParticlesRef.current.length) {
+        activeParticlesRef.current.forEach((pt) => {
+          pt.x += (pt.vx || 0) * dt;
+          pt.y += (pt.vy || 0) * dt;
+          // Mild damping so debris doesn't look like it moves forever.
+          pt.vx *= 1 - Math.min(0.6, dt * 2.2);
+          pt.vy *= 1 - Math.min(0.6, dt * 2.2);
+          pt.life -= dt;
+
+          const alpha = Math.max(0, pt.life / pt.maxLife);
+          if (alpha <= 0) return;
+
+          ctx.globalAlpha = alpha;
+          ctx.strokeStyle = pt.color;
+          ctx.fillStyle = pt.color;
+          ctx.lineWidth = pt.size;
+          if (pt.line) {
+            ctx.beginPath();
+            ctx.moveTo(pt.x, pt.y);
+            ctx.lineTo(pt.x - (pt.vx || 0) * dt * 6, pt.y - (pt.vy || 0) * dt * 6);
+            ctx.stroke();
+          } else {
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        });
+        activeParticlesRef.current = activeParticlesRef.current.filter((pt) => pt.life > 0);
+        ctx.globalAlpha = 1;
+      }
 
       ctx.restore();
 
@@ -994,7 +1428,16 @@ export function AsteroidHuntGame({ roomCode, playerId, player, questions, global
             if (now - quizOpenedAtRef.current < 500) return;
             // Clear inputs immediately so we don't get "stuck moving" if keyup never fires.
             keysRef.current = { up: false, down: false, left: false, right: false };
-            socket.emit('move', { code: roomCode, playerId, dx: 0, dy: 0, angle: localAimAngleRef.current });
+            const lp = localPredRef.current;
+            socket.emit('playerTransform', {
+              code: roomCode,
+              playerId,
+              x: lp?.x ?? playerRef.current?.x ?? WORLD_SIZE / 2,
+              y: lp?.y ?? playerRef.current?.y ?? WORLD_SIZE / 2,
+              a: localAimAngleRef.current,
+              vx: 0,
+              vy: 0,
+            });
             quizOpenedAtRef.current = now;
             quizOpenRef.current = true; // set immediately (before React state flush)
             setQuizSessionId((s) => s + 1);

@@ -38,6 +38,18 @@ type SpawnProjectilePayload = {
 
 const rooms: Record<string, GameRoom> = {};
 
+function buildPlayersSummary(room: GameRoom) {
+  return Object.entries(room.players).map(([id, p]: [string, any]) => ({
+    id,
+    name: p.name,
+    score: p.score ?? 0,
+    resources: p.resources ?? 0,
+    kills: p.modeState?.kills ?? 0,
+    correctAnswers: p.modeState?.correctAnswers ?? 0,
+    team: p.modeState?.team ?? null,
+  }));
+}
+
 // Zombie mode: weapon definitions (match client exmpl.html)
 const ZOMBIE_WEAPONS: Record<string, { damage: number; fireRate: number; cost: number; color: string }> = {
   pistol: { damage: 25, fireRate: 400, cost: 0, color: '#06b6d4' },
@@ -145,16 +157,7 @@ function checkWinCondition(io: Server, code: string) {
   }
   if (winner) {
     room.state = 'ended';
-    const payload: any = { winner };
-    if (room.mode === 'boss') {
-      payload.mode = 'boss';
-      payload.players = Object.entries(room.players).map(([id, p]: [string, any]) => ({
-        id,
-        name: p.name,
-        score: p.score ?? 0,
-        correctAnswers: p.modeState?.correctAnswers ?? 0
-      }));
-    }
+    const payload: any = { winner, mode: room.mode, players: buildPlayersSummary(room) };
     io.to(code).emit("gameOver", payload);
     persistGameResult(room, winner);
   }
@@ -696,6 +699,78 @@ async function startServer() {
       checkWinCondition(io, code);
     });
 
+    // Shooter-favored asteroid hits: shooter reports projectile-vs-asteroid hits,
+    // server validates and applies damage. This removes fragile geometry collision from the fast game loop.
+    socket.on("clientHitAsteroid", ({ code, playerId, projectileId, asteroidId, damage }) => {
+      const room = rooms[code];
+      if (!room || room.state !== 'playing' || room.mode !== 'farm') return;
+      const shooter = room.players[playerId];
+      if (!shooter) return;
+
+      const state = room.globalState;
+      const projectiles: any[] = Array.isArray(state.projectiles) ? state.projectiles : [];
+      const asteroids: any[] = Array.isArray(state.asteroids) ? state.asteroids : [];
+      if (!projectiles.length || !asteroids.length) return;
+
+      const proj = projectiles.find((p) => p && p.id === projectileId);
+      if (!proj) return;
+      if (typeof proj.shooterId === 'string' && proj.shooterId !== playerId) return;
+
+      const ast = asteroids.find((a) => a && a.id === asteroidId);
+      if (!ast) return;
+
+      const dmgNum = Number(damage);
+      if (!Number.isFinite(dmgNum) || dmgNum <= 0) return;
+      const safeDmg = Math.max(0, Math.min(dmgNum, 100000));
+
+      const destroyedId = String(asteroidId);
+
+      // Apply primary damage.
+      ast.hp = Number.isFinite(Number(ast.hp)) ? Number(ast.hp) - safeDmg : 0 - safeDmg;
+
+      // Plasma splash: match existing server logic (od < 150) with 0.5 multiplier.
+      if (proj.type === 'plasma') {
+        const splash = safeDmg * 0.5;
+        asteroids.forEach((other: any) => {
+          if (!other || other === ast) return;
+          const od = Math.hypot(ast.x - other.x, ast.y - other.y);
+          if (od < 150) {
+            other.hp = Number.isFinite(Number(other.hp)) ? Number(other.hp) - splash : 0 - splash;
+          }
+        });
+      }
+
+      // Resolve destroyed asteroids and spawn collectibles.
+      const destroyed = asteroids.filter((a: any) => (a?.hp ?? 0) <= 0);
+      const shooterForScoring = proj.shooterId ? room.players[proj.shooterId] : shooter;
+      state.collectibles = state.collectibles || [];
+      destroyed.forEach((a: any) => {
+        const ship = shooterForScoring;
+        if (ship) ship.score = (ship.score || 0) + (a.value || 0);
+        state.collectibles.push({
+          id: Math.random().toString(36).slice(2),
+          x: a.x,
+          y: a.y,
+          value: a.value || 0,
+          vx: (Math.random() - 0.5) * 3,
+          vy: (Math.random() - 0.5) * 3,
+          color: a.color || '#9ca3af',
+        });
+      });
+
+      state.asteroids = asteroids.filter((a: any) => (a?.hp ?? 0) > 0);
+      // Remove projectile after a confirmed hit.
+      state.projectiles = projectiles.filter((p) => p && p.id !== proj.id);
+
+      io.to(code).emit('farmProjectileHit', {
+        projectileId: proj.id,
+        shooterId: proj.shooterId,
+        asteroidId: destroyedId,
+        destroyed: destroyed.some((a: any) => String(a.id) === destroyedId),
+      });
+      io.to(code).emit('globalStateUpdated', room.globalState);
+    });
+
     socket.on("buyUpgrade", ({ code, playerId, upgradeId, cost, targetId }) => {
       const room = rooms[code];
       if (!room || room.state !== 'playing') return;
@@ -835,7 +910,7 @@ async function startServer() {
       io.to(code).emit("globalStateUpdated", room.globalState);
     });
 
-    socket.on("action", ({ code, playerId, actionType, targetId, aimAngle: clientAimAngle, weaponId, burst }) => {
+    socket.on("action", ({ code, playerId, actionType, targetId, aimAngle: clientAimAngle, weaponId, burst, clientProjectileIds }) => {
       const room = rooms[code];
       if (!room || room.state !== 'playing') return;
       const player = room.players[playerId];
@@ -1014,7 +1089,12 @@ async function startServer() {
         const num = (v: number) => (typeof v === 'number' && !Number.isNaN(v) ? v : 0);
         // Stable projectile IDs (prevents phantom/interpolation collisions client-side)
         const seqBase = Number(room.globalState.projectileSeq) || 0;
-        const mkId = (i: number) => `farm_${now}_${seqBase + i}`;
+        const clientIds: string[] | null = Array.isArray(clientProjectileIds) ? clientProjectileIds : null;
+        const mkId = (i: number) => {
+          const maybe = clientIds?.[i];
+          if (typeof maybe === 'string' && maybe.length > 0) return maybe;
+          return `farm_${now}_${seqBase + i}`;
+        };
         let created = 0;
         if (tier === 1) {
           const proj = { id: mkId(created++), x: shipX, y: shipY, vx: num(Math.cos(angle) * LASER_SPEED), vy: num(Math.sin(angle) * LASER_SPEED), damage: dmg, shooterId: playerId, type: 'laser', radius: 4 };
@@ -1204,6 +1284,56 @@ async function startServer() {
       }
     });
 
+    // Client-authoritative transform for FARM.
+    // Clients simulate movement and push precise transforms; server does not integrate farm player movement.
+    socket.on("playerTransform", ({ code, playerId, x, y, a, vx, vy }) => {
+      const room = rooms[code];
+      if (!room || room.state !== 'playing' || room.mode !== 'farm') return;
+      const player = room.players[playerId];
+      if (!player) return;
+
+      const nx = Number(x);
+      const ny = Number(y);
+      if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
+
+      player.x = nx;
+      player.y = ny;
+      player.modeState = player.modeState || {};
+      player.modeState.vx = Number.isFinite(Number(vx)) ? Number(vx) : (player.modeState.vx || 0);
+      player.modeState.vy = Number.isFinite(Number(vy)) ? Number(vy) : (player.modeState.vy || 0);
+
+      const na = Number(a);
+      if (Number.isFinite(na)) {
+        player.angle = na;
+        player.modeState.angle = na;
+      }
+    });
+
+    // Client-authoritative gem collection (server trusts existence only).
+    socket.on("collectGem", ({ code, playerId, gemId }) => {
+      const room = rooms[code];
+      if (!room || room.state !== 'playing' || room.mode !== 'farm') return;
+      const player = room.players[playerId];
+      if (!player) return;
+      if (typeof gemId !== 'string' || !gemId) return;
+
+      const state = room.globalState;
+      const collectibles: any[] = Array.isArray(state.collectibles) ? state.collectibles : [];
+      const idx = collectibles.findIndex((c: any) => c && c.id === gemId);
+      if (idx === -1) return; // already collected / stale event
+
+      const gem = collectibles[idx];
+      const value = Number(gem?.value ?? gem?.val ?? 0);
+
+      // Remove gem and award points.
+      collectibles.splice(idx, 1);
+      state.collectibles = collectibles;
+      player.score = (player.score || 0) + (Number.isFinite(value) ? value : 0);
+
+      io.to(code).emit("playerUpdated", { playerId, player });
+      io.to(code).emit("globalStateUpdated", room.globalState);
+    });
+
     socket.on("disconnect", () => {
       console.log("User disconnected:", socket.id);
       for (const [code, room] of Object.entries(rooms)) {
@@ -1241,8 +1371,7 @@ async function startServer() {
         // 6-minute timer: if time's up and base alive, players win
         if (room.startTime && now - room.startTime >= gameDurationMs) {
           room.state = 'ended';
-          const summary = Object.entries(room.players).map(([id, p]: [string, any]) => ({ id, name: p.name, kills: p.modeState?.kills ?? 0, score: p.score ?? 0, correctAnswers: p.modeState?.correctAnswers ?? 0 }));
-          io.to(room.code).emit("gameOver", { winner: "השחקנים!", mode: 'zombie', players: summary });
+          io.to(room.code).emit("gameOver", { winner: "השחקנים!", mode: 'zombie', players: buildPlayersSummary(room) });
           persistGameResult(room, "השחקנים!");
           return;
         }
@@ -1367,8 +1496,7 @@ async function startServer() {
 
         if (state.baseHealth <= 0) {
           room.state = 'ended';
-          const summary = Object.entries(room.players).map(([id, p]: [string, any]) => ({ id, name: p.name, kills: p.modeState?.kills ?? 0, score: p.score ?? 0, correctAnswers: p.modeState?.correctAnswers ?? 0 }));
-          io.to(room.code).emit("gameOver", { winner: "הזומבים", mode: 'zombie', players: summary });
+          io.to(room.code).emit("gameOver", { winner: "הזומבים", mode: 'zombie', players: buildPlayersSummary(room) });
           persistGameResult(room, "הזומבים");
         }
       }
@@ -1505,13 +1633,7 @@ async function startServer() {
           if (state.timeLeft <= 0) {
             room.state = 'ended';
             const bossWinner = state.useAiBoss ? "המפלצת הענקית" : (bossIds.length ? room.players[bossIds[0]]?.name || "הבוס" : "הבוס");
-            const players = Object.entries(room.players).map(([id, p]: [string, any]) => ({
-              id,
-              name: p.name,
-              score: p.score ?? 0,
-              correctAnswers: p.modeState?.correctAnswers ?? 0
-            }));
-            io.to(room.code).emit("gameOver", { winner: bossWinner, mode: 'boss', players });
+            io.to(room.code).emit("gameOver", { winner: bossWinner, mode: 'boss', players: buildPlayersSummary(room) });
             persistGameResult(room, bossWinner);
           }
         }
@@ -1652,7 +1774,7 @@ async function startServer() {
           state.gameOver = (state.redScore || 0) >= CTF_WIN_SCORE ? 'red' : 'blue';
           room.state = 'ended';
           const ctfWinner = (state.redScore || 0) >= CTF_WIN_SCORE ? "קבוצה אדומה" : "קבוצה כחולה";
-          io.to(room.code).emit("gameOver", { winner: ctfWinner });
+          io.to(room.code).emit("gameOver", { winner: ctfWinner, mode: 'ctf', players: buildPlayersSummary(room) });
           persistGameResult(room, ctfWinner);
         }
       }
@@ -1704,7 +1826,7 @@ async function startServer() {
               p.resources += c.value * (p.modeState.multiplier || 1);
               if (p.resources >= 5000) {
                 room.state = 'ended';
-                io.to(room.code).emit("gameOver", { winner: p.name });
+                io.to(room.code).emit("gameOver", { winner: p.name, mode: 'economy', players: buildPlayersSummary(room) });
                 persistGameResult(room, p.name);
               }
               return false;
@@ -1720,7 +1842,7 @@ async function startServer() {
             const sorted = Object.values(room.players).sort((a: any, b: any) => (b.resources || 0) - (a.resources || 0));
             const winner = sorted[0]?.name || 'אף אחד';
             room.state = 'ended';
-            io.to(room.code).emit("gameOver", { winner });
+            io.to(room.code).emit("gameOver", { winner, mode: 'economy', players: buildPlayersSummary(room) });
             persistGameResult(room, winner);
           }
         }
@@ -1779,13 +1901,6 @@ async function startServer() {
           if (a.y > FARM_WORLD + 100) a.y = -100;
         });
 
-        Object.values(room.players).forEach((pl: any) => {
-          const vx = (pl.modeState?.vx || 0);
-          const vy = (pl.modeState?.vy || 0);
-          pl.x = Math.max(PLAYER_RADIUS, Math.min(FARM_WORLD - PLAYER_RADIUS, (pl.x ?? 2000) + vx * MOVE_SPEED_PER_SEC * dt));
-          pl.y = Math.max(PLAYER_RADIUS, Math.min(FARM_WORLD - PLAYER_RADIUS, (pl.y ?? 2000) + vy * MOVE_SPEED_PER_SEC * dt));
-        });
-
         const projs = (state.projectiles || []).filter((p: any) =>
           typeof p.x === 'number' && !Number.isNaN(p.x) &&
           typeof p.y === 'number' && !Number.isNaN(p.y) &&
@@ -1796,43 +1911,15 @@ async function startServer() {
           p.x = (Number(p.x) || 0) + (Number(p.vx) || 0) * dt;
           p.y = (Number(p.y) || 0) + (Number(p.vy) || 0) * dt;
         });
+        // Shooter-favored netcode:
+        // We intentionally REMOVE strict server-side projectile-vs-asteroid collision here.
+        // Hits are reported by the shooter via `clientHitAsteroid` and validated/applied here.
         state.projectiles = projs.filter((p: any) => {
           const px = Number(p.x);
           const py = Number(p.y);
           if (Number.isNaN(px) || Number.isNaN(py)) return false;
           if (px < -50 || px > FARM_WORLD + 50 || py < -50 || py > FARM_WORLD + 50) return false;
-          const hitRadius = p.radius || 4;
-          let primaryHit: any = null;
-          for (const ast of state.asteroids) {
-            const d = Math.hypot(ast.x - p.x, ast.y - p.y);
-            const astR = ast.radius ?? (20 + (ast.value || 50) / 20);
-            if (d < astR + hitRadius) { primaryHit = ast; break; }
-          }
-          if (!primaryHit) return true;
-          primaryHit.hp -= p.damage;
-          if (p.type === 'plasma') {
-            state.asteroids.forEach((other: any) => {
-              if (other === primaryHit) return;
-              const od = Math.hypot(primaryHit.x - other.x, primaryHit.y - other.y);
-              if (od < 150) other.hp -= p.damage * 0.5;
-            });
-          }
-          state.asteroids = state.asteroids.filter((a: any) => {
-            if (a.hp > 0) return true;
-            const shooter = room.players[p.shooterId];
-            if (shooter) shooter.score = (shooter.score || 0) + (a.value || 0);
-            (state.collectibles || []).push({
-              id: Math.random().toString(36).slice(2),
-              x: a.x,
-              y: a.y,
-              value: a.value || 0,
-              vx: (Math.random() - 0.5) * 3,
-              vy: (Math.random() - 0.5) * 3,
-              color: a.color || '#9ca3af'
-            });
-            return false;
-          });
-          return false;
+          return true;
         });
 
         const coll = state.collectibles || [];
@@ -1842,25 +1929,19 @@ async function startServer() {
           c.x += c.vx || 0;
           c.y += c.vy || 0;
         });
-        Object.values(room.players).forEach((pl: any) => {
-          const mag = pl.modeState?.magnetRange || 50;
-          const shipX = pl.x ?? 2000, shipY = pl.y ?? 2000;
-          state.collectibles = (state.collectibles || []).filter((c: any) => {
-            const d = Math.hypot(c.x - shipX, c.y - shipY);
-            if (d < mag) {
-              pl.score = (pl.score || 0) + (c.value || 0);
-              return false;
-            }
-            if (c.x < -100 || c.x > FARM_WORLD + 100 || c.y < -100 || c.y > FARM_WORLD + 100) return false;
-            return true;
-          });
+        // Do NOT do server-side gem magnet collision.
+        // Gem pickup is handled client-authoritatively via `collectGem`.
+        state.collectibles = (state.collectibles || []).filter((c: any) => {
+          if (!c) return false;
+          if (c.x < -100 || c.x > FARM_WORLD + 100 || c.y < -100 || c.y > FARM_WORLD + 100) return false;
+          return true;
         });
 
         if (room.startTime && now - room.startTime >= 7 * 60 * 1000) {
           const winner = Object.values(room.players).sort((a: any, b: any) => (b.score || 0) - (a.score || 0))[0];
           room.state = 'ended';
           const farmWinner = winner?.name || "unknown";
-          io.to(room.code).emit("gameOver", { winner: farmWinner });
+          io.to(room.code).emit("gameOver", { winner: farmWinner, mode: 'farm', players: buildPlayersSummary(room) });
           persistGameResult(room, farmWinner);
         }
       }

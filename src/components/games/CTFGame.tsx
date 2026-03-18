@@ -1026,13 +1026,20 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
     const cy = rect.top + rect.height / 2;
     const t = e.touches[0];
     if (!t) return;
+    // Joystick scalar fix:
+    // - Past a small deadzone, normalize to full magnitude (1.0) so mobile matches WASD max speed.
+    // - Keeps direction, removes "slow walk" feel from short thumb drags.
     let dx = (t.clientX - cx) / (rect.width / 2);
     let dy = (t.clientY - cy) / (rect.height / 2);
     const len = Math.hypot(dx, dy);
-    if (len > 1) {
-      dx /= len;
-      dy /= len;
+    const DEADZONE = 0.18;
+    if (len <= DEADZONE) {
+      joystickRef.current = { dx: 0, dy: 0 };
+      return;
     }
+    // Normalize to 1.0 (full speed) once outside deadzone.
+    dx /= len;
+    dy /= len;
     joystickRef.current = { dx, dy };
   };
   const handleJoystickEnd = () => {

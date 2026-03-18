@@ -1,12 +1,12 @@
 // Centralized procedural SFX (no external audio files).
 // Uses Web Audio API and works across all games + quiz.
 
-type SfxKind = 'shoot' | 'collect' | 'correct' | 'wrong';
+type SfxKind = 'shoot' | 'collect' | 'correct' | 'wrong' | 'hit' | 'explosion';
 
 class SoundManagerImpl {
   private ctx: AudioContext | null = null;
   private enabled = true;
-  private lastPlayedAt: Record<SfxKind, number> = { shoot: 0, collect: 0, correct: 0, wrong: 0 };
+  private lastPlayedAt: Record<SfxKind, number> = { shoot: 0, collect: 0, correct: 0, wrong: 0, hit: 0, explosion: 0 };
 
   private getContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
@@ -84,6 +84,19 @@ class SoundManagerImpl {
   playWrongSound() {
     if (!this.shouldPlay('wrong', 120)) return;
     this.tone({ type: 'sawtooth', f0: 240, f1: 110, dur: 0.18, gain: 0.11, sweep: 'exp' });
+  }
+
+  playHitSound() {
+    if (!this.shouldPlay('hit', 60)) return;
+    // quick "impact" ping
+    this.tone({ type: 'square', f0: 320, f1: 80, dur: 0.08, gain: 0.08, sweep: 'exp' });
+  }
+
+  playExplosionSound() {
+    if (!this.shouldPlay('explosion', 120)) return;
+    // short bassy boom using two tones
+    this.tone({ type: 'sawtooth', f0: 110, f1: 40, dur: 0.22, gain: 0.12, sweep: 'exp' });
+    setTimeout(() => this.tone({ type: 'triangle', f0: 220, f1: 70, dur: 0.16, gain: 0.09, sweep: 'exp' }), 55);
   }
 }
 

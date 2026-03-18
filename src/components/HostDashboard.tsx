@@ -5,7 +5,7 @@ import { Users, Play, Trophy, Shield, Rocket, Target, DollarSign, Upload, FileTe
 import { CTF_MAP } from '../engine/maps/ctfMap';
 import { useAuth } from '../contexts/AuthContext';
 import { AuthModal } from './AuthModal';
-import { saveQuiz, loadQuizzes, type SavedQuiz, type QuizQuestion } from '../utils/quizStorage';
+import { saveQuiz, loadQuizzes, updateQuiz, deleteQuiz, addQuizRun, loadQuizRuns, type QuizRun, type SavedQuiz, type QuizQuestion } from '../utils/quizStorage';
 
 const MODES = [
   { id: 'zombie', name: 'הגנת זומבים', icon: Shield, desc: 'הגנו על הבסיס מגלי זומבים. ענו על שאלות כדי לקנות נשקים וצריחים.', color: 'from-slate-800 to-slate-900', accent: 'text-blue-400' },
@@ -55,6 +55,11 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [saveQuizTitle, setSaveQuizTitle] = useState('');
   const [savingQuiz, setSavingQuiz] = useState(false);
+  const [activeQuizId, setActiveQuizId] = useState<string | null>(null);
+  const [activeQuizTitle, setActiveQuizTitle] = useState<string>('');
+  const [selectedSavedQuizId, setSelectedSavedQuizId] = useState<string | null>(null);
+  const [selectedSavedQuizRuns, setSelectedSavedQuizRuns] = useState<QuizRun[]>([]);
+  const [loadingRuns, setLoadingRuns] = useState(false);
   const showTestPlayer = false; // Legacy - kept to prevent ReferenceError from cached builds
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -79,20 +84,17 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
     };
     const onGlobalState = (state: any) => setGlobalState(state);
     const onTick = (data: any) => { latestTick.current = data; };
-    const onGameOver = (data: any) => { setGameState('ended'); setWinner(data?.winner ?? null); setGameOverPayload(data ?? null); };
 
     socket.on('roomUpdated', onRoomUpdated);
     socket.on('playerUpdated', onPlayerUpdated);
     socket.on('globalStateUpdated', onGlobalState);
     socket.on('tick', onTick);
-    socket.on('gameOver', onGameOver);
 
     return () => {
       socket.off('roomUpdated', onRoomUpdated);
       socket.off('playerUpdated', onPlayerUpdated);
       socket.off('globalStateUpdated', onGlobalState);
       socket.off('tick', onTick);
-      socket.off('gameOver', onGameOver);
     };
   }, []);
 
@@ -417,6 +419,17 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
     }
   }, [user, isAuthAvailable]);
 
+  useEffect(() => {
+    if (!user || !selectedSavedQuizId) {
+      setSelectedSavedQuizRuns([]);
+      return;
+    }
+    setLoadingRuns(true);
+    loadQuizRuns(user.uid, selectedSavedQuizId)
+      .then(setSelectedSavedQuizRuns)
+      .finally(() => setLoadingRuns(false));
+  }, [user, selectedSavedQuizId]);
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -448,6 +461,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
       if (parsed.length > 0) {
         setCustomQuestions(parsed);
         setQuizSourceTab('upload');
+        setActiveQuizId(null);
       }
     };
     reader.readAsText(file);
@@ -456,6 +470,7 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   const addQuestion = () => {
     setCustomQuestions(prev => [...prev, { q: '', opts: ['', '', '', ''], a: 0 }]);
     setQuizSourceTab('edit');
+    setActiveQuizId(null);
   };
 
   const updateQuestion = (idx: number, field: 'q' | 'opts' | 'a', value: any) => {
@@ -475,6 +490,9 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
   const loadSavedQuiz = (quiz: SavedQuiz) => {
     setCustomQuestions(quiz.questions);
     setSaveQuizTitle(quiz.title);
+    setActiveQuizId(quiz.id ?? null);
+    setActiveQuizTitle(quiz.title);
+    setSelectedSavedQuizId(quiz.id ?? null);
   };
 
   const handleSaveQuiz = async () => {
@@ -482,13 +500,43 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
     const title = saveQuizTitle.trim() || `חידון ${new Date().toLocaleDateString('he-IL')}`;
     setSavingQuiz(true);
     try {
-      await saveQuiz(user.uid, { title, questions: customQuestions });
+      if (activeQuizId) {
+        await updateQuiz(user.uid, activeQuizId, { title, questions: customQuestions });
+      } else {
+        const newId = await saveQuiz(user.uid, { title, questions: customQuestions });
+        if (newId) {
+          setActiveQuizId(newId);
+          setSelectedSavedQuizId(newId);
+        }
+      }
+      setActiveQuizTitle(title);
       // Refresh from source-of-truth so ids/timestamps are correct.
       const refreshed = await loadQuizzes(user.uid);
       setSavedQuizzes(refreshed);
     } finally {
       setSavingQuiz(false);
     }
+  };
+
+  const handleDeleteSavedQuiz = async (quiz: SavedQuiz) => {
+    if (!user || !quiz.id) return;
+    await deleteQuiz(user.uid, quiz.id);
+    const refreshed = await loadQuizzes(user.uid);
+    setSavedQuizzes(refreshed);
+    if (selectedSavedQuizId === quiz.id) {
+      setSelectedSavedQuizId(null);
+      setSelectedSavedQuizRuns([]);
+    }
+    if (activeQuizId === quiz.id) {
+      setActiveQuizId(null);
+      setActiveQuizTitle('');
+    }
+  };
+
+  const startWithSavedQuiz = (quiz: SavedQuiz) => {
+    loadSavedQuiz(quiz);
+    // Stay on setup; host can immediately create room.
+    setQuizSourceTab('saved');
   };
 
   const createRoom = () => {
@@ -502,6 +550,59 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
       }
     });
   };
+
+  useEffect(() => {
+    const onGameOver = async (data: any) => {
+      setGameState('ended');
+      setWinner(data?.winner ?? null);
+      setGameOverPayload(data ?? null);
+
+      if (!user || !activeQuizId) return;
+      const playersFromPayload = Array.isArray(data?.players) ? data.players : null;
+      const playersFallback = players.map((p: any) => ({
+        id: p.id,
+        name: p.name,
+        score: p.score ?? 0,
+        resources: p.resources ?? 0,
+        correctAnswers: p.modeState?.correctAnswers ?? 0,
+        kills: p.modeState?.kills ?? 0,
+        team: p.modeState?.team ?? null,
+      }));
+
+      const run = {
+        quizId: activeQuizId,
+        quizTitle: activeQuizTitle || saveQuizTitle || 'חידון ללא שם',
+        mode: data?.mode || mode || 'unknown',
+        winner: data?.winner ?? 'unknown',
+        createdAt: Date.now(),
+        questionCount: customQuestions.length || (activeQuizId ? (savedQuizzes.find(q => q.id === activeQuizId)?.questions.length || 0) : 0),
+        players: (playersFromPayload || playersFallback).map((p: any) => ({
+          id: String(p.id ?? ''),
+          name: String(p.name ?? ''),
+          score: Number(p.score ?? 0),
+          resources: Number(p.resources ?? 0),
+          correctAnswers: Number(p.correctAnswers ?? 0),
+          kills: Number(p.kills ?? 0),
+          team: p.team ?? null,
+        })),
+      };
+
+      try {
+        await addQuizRun(user.uid, run);
+        if (selectedSavedQuizId === activeQuizId) {
+          const refreshedRuns = await loadQuizRuns(user.uid, activeQuizId);
+          setSelectedSavedQuizRuns(refreshedRuns);
+        }
+      } catch {
+        // ignore stats persistence errors; UI still shows end-screen.
+      }
+    };
+
+    socket.on('gameOver', onGameOver);
+    return () => {
+      socket.off('gameOver', onGameOver);
+    };
+  }, [user, activeQuizId, activeQuizTitle, saveQuizTitle, mode, customQuestions.length, players, savedQuizzes, selectedSavedQuizId]);
 
   const startGame = () => {
     socket.emit('startGame', { code: roomCode });
@@ -714,16 +815,105 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                     {savedQuizzes.length === 0 ? (
                       <p className="text-slate-500 text-center py-8">אין לך חידונים שמורים. צור חידון ולחץ "שמור חידון"</p>
                     ) : (
-                      savedQuizzes.map((quiz) => (
-                        <button
-                          key={quiz.id || quiz.title}
-                          onClick={() => loadSavedQuiz(quiz)}
-                          className="w-full text-right bg-slate-800 hover:bg-slate-700 p-4 rounded-xl border border-slate-700 flex justify-between items-center"
-                        >
-                          <span className="font-bold">{quiz.title}</span>
-                          <span className="text-slate-400 text-sm">{quiz.questions.length} שאלות</span>
-                        </button>
-                      ))
+                      savedQuizzes.map((quiz) => {
+                        const isSelected = !!quiz.id && quiz.id === selectedSavedQuizId;
+                        return (
+                          <div
+                            key={quiz.id || quiz.title}
+                            className={`w-full text-right bg-slate-800 p-4 rounded-xl border transition-colors ${
+                              isSelected ? 'border-indigo-500/60 bg-slate-800/80' : 'border-slate-700 hover:bg-slate-700'
+                            }`}
+                          >
+                            <div className="flex justify-between items-center gap-4">
+                              <button
+                                onClick={() => loadSavedQuiz(quiz)}
+                                className="flex-1 text-right"
+                              >
+                                <div className="font-bold">{quiz.title}</div>
+                                <div className="text-slate-400 text-sm">{quiz.questions.length} שאלות</div>
+                              </button>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => { startWithSavedQuiz(quiz); setQuizSourceTab('edit'); }}
+                                  className="px-3 py-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 border border-slate-700 text-slate-200 text-sm font-bold"
+                                  title="ערוך חידון"
+                                >
+                                  <Edit3 size={16} />
+                                </button>
+                                <button
+                                  onClick={() => startWithSavedQuiz(quiz)}
+                                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 text-sm font-black"
+                                  title="בחר והפעל חידון"
+                                >
+                                  בחר
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteSavedQuiz(quiz)}
+                                  className="px-3 py-2 rounded-lg bg-red-600/80 hover:bg-red-600 border border-red-500/40 text-white text-sm font-bold"
+                                  title="מחק חידון"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
+                            </div>
+
+                            {isSelected && (
+                              <div className="mt-4 bg-slate-950/40 border border-slate-800 rounded-xl p-4">
+                                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+                                  <div className="text-slate-300 font-bold">
+                                    החידון נטען ({quiz.questions.length} שאלות). אפשר ליצור חדר ולהתחיל.
+                                  </div>
+                                  <button
+                                    onClick={createRoom}
+                                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 font-black text-white"
+                                  >
+                                    צור חדר עם החידון
+                                  </button>
+                                </div>
+                                <div className="flex items-center justify-between mb-3">
+                                  <div className="font-black text-slate-200">סטטיסטיקות (ריצות אחרונות)</div>
+                                  <div className="text-slate-400 text-xs">
+                                    {loadingRuns ? 'טוען…' : `${selectedSavedQuizRuns.length} ריצות`}
+                                  </div>
+                                </div>
+                                {loadingRuns ? (
+                                  <div className="text-slate-500 text-sm">טוען סטטיסטיקות…</div>
+                                ) : selectedSavedQuizRuns.length === 0 ? (
+                                  <div className="text-slate-500 text-sm">עדיין אין סטטיסטיקות לחידון הזה. הפעל חידון כדי שיישמרו ריצות.</div>
+                                ) : (
+                                  <div className="space-y-3 max-h-56 overflow-y-auto custom-scrollbar pr-1">
+                                    {selectedSavedQuizRuns.slice(0, 10).map((run) => (
+                                      <div key={run.id || run.createdAt} className="bg-slate-900/60 border border-slate-800 rounded-xl p-3">
+                                        <div className="flex justify-between items-center">
+                                          <div className="font-bold text-slate-200">
+                                            {new Date(run.createdAt).toLocaleString('he-IL')}
+                                          </div>
+                                          <div className="text-slate-400 text-xs">
+                                            מצב: {run.mode} • מנצח: {run.winner}
+                                          </div>
+                                        </div>
+                                        <div className="mt-2 grid grid-cols-1 gap-2">
+                                          {[...run.players]
+                                            .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+                                            .slice(0, 6)
+                                            .map((p) => (
+                                              <div key={p.id || p.name} className="flex justify-between text-sm">
+                                                <div className="text-slate-200 font-bold">{p.name}</div>
+                                                <div className="text-slate-300 font-mono">
+                                                  נק׳ {p.score} • נכון {p.correctAnswers} • משאבים {p.resources}
+                                                </div>
+                                              </div>
+                                            ))}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
                     )}
                   </div>
                 )}
@@ -1094,6 +1284,36 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                             <td className="py-3 px-4 font-bold text-white">{p.name}</td>
                             <td className="py-3 px-4 font-mono text-emerald-300">{p.score}</td>
                             <td className="py-3 px-4 font-mono text-violet-300">{p.correctAnswers}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {mode !== 'zombie' && mode !== 'boss' && gameOverPayload?.players && gameOverPayload.players.length > 0 && (
+                <div className="max-w-5xl mx-auto mb-16 overflow-x-auto rounded-2xl border-2 border-slate-600 bg-slate-900/90">
+                  <table className="w-full text-right" dir="rtl">
+                    <thead>
+                      <tr className="border-b border-slate-600 bg-slate-800/80">
+                        <th className="py-4 px-4 text-amber-400 font-black text-lg">דירוג</th>
+                        <th className="py-4 px-4 text-cyan-300 font-black text-lg">שם שחקן</th>
+                        <th className="py-4 px-4 text-emerald-400 font-black text-lg">נקודות</th>
+                        <th className="py-4 px-4 text-indigo-300 font-black text-lg">משאבים</th>
+                        <th className="py-4 px-4 text-violet-400 font-black text-lg">תשובות נכונות</th>
+                        <th className="py-4 px-4 text-red-300 font-black text-lg">הריגות</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...gameOverPayload.players]
+                        .sort((a: any, b: any) => (Number(b.score ?? 0) - Number(a.score ?? 0)) || (Number(b.resources ?? 0) - Number(a.resources ?? 0)))
+                        .map((p: any, i: number) => (
+                          <tr key={p.id || p.name || i} className="border-b border-slate-700/50 hover:bg-slate-800/50">
+                            <td className="py-3 px-4 font-bold text-slate-200">{i + 1}</td>
+                            <td className="py-3 px-4 font-bold text-white">{p.name}</td>
+                            <td className="py-3 px-4 font-mono text-emerald-300">{p.score ?? 0}</td>
+                            <td className="py-3 px-4 font-mono text-indigo-200">{p.resources ?? 0}</td>
+                            <td className="py-3 px-4 font-mono text-violet-300">{p.correctAnswers ?? 0}</td>
+                            <td className="py-3 px-4 font-mono text-red-200">{p.kills ?? 0}</td>
                           </tr>
                         ))}
                     </tbody>
