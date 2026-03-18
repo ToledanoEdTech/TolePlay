@@ -111,46 +111,93 @@ export function Leaderboard({ mode, players, localPlayerId, className }: Props) 
         maxHeight: '36vh',
         pointerEvents: 'none',
         userSelect: 'none',
-        zIndex: 80,
+        zIndex: 200,
       }}
     >
       <style>
         {`
           @media (max-width: 768px) {
             .tp-leaderboard {
-              top: max(220px, 18vh) !important;
-              right: calc(env(safe-area-inset-right, 0px) + 0.5rem) !important;
-              width: min(12.5rem, 46vw) !important;
-              max-height: 28vh !important;
+              top: calc(env(safe-area-inset-top, 0px) + 0.35rem) !important;
+              right: calc(env(safe-area-inset-right, 0px) + 0.35rem) !important;
+              width: min(10.25rem, 44vw) !important;
+              max-height: 22vh !important;
+              transform: scale(0.75) !important;
+              transform-origin: top right !important;
+            }
+            .tp-leaderboard-header {
+              padding: 0.35rem 0.45rem !important;
+            }
+            .tp-leaderboard-body {
+              padding: 0.35rem !important;
+              gap: 0.25rem !important;
+              max-height: calc(22vh - 1.75rem) !important;
+            }
+            .tp-leaderboard-row {
+              padding: 0.28rem 0.35rem !important;
+              grid-template-columns: 18px 1fr auto !important;
+              gap: 0.3rem !important;
+              border-radius: 0.75rem !important;
+            }
+            .tp-leaderboard-mini-btn {
+              position: fixed !important;
+              top: calc(env(safe-area-inset-top, 0px) + 0.4rem) !important;
+              right: calc(env(safe-area-inset-right, 0px) + 0.4rem) !important;
+              width: 2.15rem !important;
+              height: 2.15rem !important;
+              border-radius: 999px !important;
+              display: grid !important;
+              place-items: center !important;
+              pointer-events: auto !important;
+              user-select: none !important;
+              z-index: 220 !important;
+              background: rgba(2,6,23,0.55) !important;
+              border: 1px solid rgba(148,163,184,0.22) !important;
+              box-shadow: 0 10px 26px rgba(0,0,0,0.55), inset 0 0 20px rgba(34,211,238,0.08) !important;
+              backdrop-filter: blur(14px) !important;
+              -webkit-backdrop-filter: blur(14px) !important;
             }
           }
         `}
       </style>
-      <div
-        className="tp-leaderboard"
-        style={{
-          background: 'rgba(8, 12, 20, 0.55)',
-          backdropFilter: 'blur(14px)',
-          WebkitBackdropFilter: 'blur(14px)',
-          borderRadius: '1rem',
-          border: '1px solid rgba(99, 102, 241, 0.35)',
-          boxShadow:
-            '0 0 0 1px rgba(56, 189, 248, 0.10), 0 18px 60px rgba(0,0,0,0.55), inset 0 0 24px rgba(99,102,241,0.12)',
-          overflow: 'hidden',
-        }}
-      >
+      {isMobile && collapsed && (
+        <button
+          type="button"
+          className="tp-leaderboard-mini-btn"
+          aria-label="open-leaderboard"
+          onClick={() => setCollapsed(false)}
+        >
+          <span style={{ fontSize: 14, fontWeight: 950, color: 'rgba(226,232,240,0.95)', lineHeight: 1 }}>🏆</span>
+        </button>
+      )}
+
+      {(!isMobile || !collapsed) && (
         <div
+          className="tp-leaderboard"
           style={{
-            padding: '0.55rem 0.6rem',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            borderBottom: '1px solid rgba(148, 163, 184, 0.18)',
-            background:
-              'linear-gradient(90deg, rgba(99,102,241,0.18), rgba(34,211,238,0.10), rgba(2,6,23,0.0))',
+            background: 'rgba(8, 12, 20, 0.55)',
+            backdropFilter: 'blur(14px)',
+            WebkitBackdropFilter: 'blur(14px)',
+            borderRadius: '1rem',
+            border: '1px solid rgba(99, 102, 241, 0.35)',
+            boxShadow:
+              '0 0 0 1px rgba(56, 189, 248, 0.10), 0 18px 60px rgba(0,0,0,0.55), inset 0 0 24px rgba(99,102,241,0.12)',
+            overflow: 'hidden',
             pointerEvents: 'auto',
           }}
         >
+          <div
+            className="tp-leaderboard-header"
+            style={{
+              padding: '0.55rem 0.6rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              borderBottom: '1px solid rgba(148, 163, 184, 0.18)',
+              background:
+                'linear-gradient(90deg, rgba(99,102,241,0.18), rgba(34,211,238,0.10), rgba(2,6,23,0.0))',
+            }}
+          >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div
               style={{
@@ -192,7 +239,7 @@ export function Leaderboard({ mode, players, localPlayerId, className }: Props) 
         </div>
 
         {!collapsed && (
-          <div style={{ padding: '0.5rem', display: 'grid', gap: '0.35rem', overflowY: 'auto', maxHeight: 'calc(36vh - 2.1rem)' }}>
+          <div className="tp-leaderboard-body" style={{ padding: '0.5rem', display: 'grid', gap: '0.35rem', overflowY: 'auto', maxHeight: 'calc(36vh - 2.1rem)' }}>
           {top.map((r, i) => {
             const rank = i + 1;
             const isMe = r.id === localPlayerId;
@@ -200,6 +247,7 @@ export function Leaderboard({ mode, players, localPlayerId, className }: Props) 
             return (
               <div
                 key={r.id}
+                className="tp-leaderboard-row"
                 style={{
                   display: 'grid',
                   gridTemplateColumns: '22px 1fr auto',
@@ -285,6 +333,7 @@ export function Leaderboard({ mode, players, localPlayerId, className }: Props) 
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

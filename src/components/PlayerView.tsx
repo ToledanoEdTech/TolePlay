@@ -8,6 +8,7 @@ import { BossBattleGame } from './games/BossBattleGame';
 import { AsteroidHuntGame } from './games/AsteroidHuntGame';
 import { CTFGame } from './games/CTFGame';
 import { Leaderboard } from './Leaderboard';
+import { SoundManager } from '../utils/SoundManager';
 
 export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
   onBack: () => void; initialCode?: string; initialName?: string; autoJoin?: boolean;
@@ -26,6 +27,8 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
   const [error, setError] = useState('');
   const [lobbyCount, setLobbyCount] = useState(0);
   const [ctfHudSnapshot, setCtfHudSnapshot] = useState<{ redScore: number; blueScore: number; gameOver: any; myPlayer: any } | null>(null);
+  const [showRotateOverlay, setShowRotateOverlay] = useState(false);
+  const [dismissRotateOverlay, setDismissRotateOverlay] = useState(false);
 
   const playerIdRef = useRef<string>('');
   const roomRef = useRef<any>(null);
@@ -33,6 +36,17 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
   const questionsRef = useRef<any[]>([]);
   const gameStateRef = useRef<{ players: Record<string, any>; globalState: any }>({ players: {}, globalState: {} });
   const lastCtfHudUpdate = useRef(0);
+
+  const attemptLandscapeLock = async () => {
+    try {
+      // Must be called from a user gesture in most browsers.
+      const scr: any = (window as any).screen;
+      const ori = scr?.orientation;
+      if (ori?.lock) await ori.lock('landscape');
+    } catch {
+      // ignore; we'll show an overlay prompt instead
+    }
+  };
 
   useEffect(() => {
     if (autoJoin && initialCode && initialName && gameState === 'join') {
@@ -64,6 +78,28 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
       }
     });
   };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (gameState !== 'playing') {
+      setShowRotateOverlay(false);
+      setDismissRotateOverlay(false);
+      return;
+    }
+
+    const update = () => {
+      const mobile = (window.matchMedia?.('(max-width: 768px)')?.matches ?? false) || ('ontouchstart' in window);
+      const portrait = window.innerHeight > window.innerWidth;
+      setShowRotateOverlay(mobile && portrait && !dismissRotateOverlay);
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', update as any);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update as any);
+    };
+  }, [gameState, dismissRotateOverlay]);
 
   useEffect(() => {
     const onRoomUpdated = (r: any) => {
@@ -192,7 +228,15 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
         <motion.form
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
-          onSubmit={(e) => { e.preventDefault(); if (code.length === 6 && name.trim()) doJoin(code, name.trim()); }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (code.length === 6 && name.trim()) {
+              // Mobile polish: user gesture moment — enable audio + try lock landscape.
+              SoundManager.resumeFromUserGesture();
+              attemptLandscapeLock();
+              doJoin(code, name.trim());
+            }
+          }}
           className="bg-slate-900/60 backdrop-blur-xl p-7 rounded-3xl w-full max-w-sm shadow-2xl border border-slate-700/50"
         >
           <h2 className="text-3xl font-black mb-2 text-center brand-text-sm">
@@ -385,6 +429,32 @@ export function PlayerView({ onBack, initialCode, initialName, autoJoin }: {
         players={allPlayers}
         localPlayerId={playerIdRef.current}
       />
+      {showRotateOverlay && (
+        <div className="fixed inset-0 z-[500] flex items-center justify-center p-5 bg-black/75 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-950/90 p-6 text-center shadow-2xl">
+            <div className="text-2xl font-black text-white mb-2">סובבו את הטלפון לרוחב</div>
+            <div className="text-slate-300 text-sm leading-relaxed mb-5">
+              החוויה במובייל טובה משמעותית במצב לרוחב. אם אפשר, נא לסובב את המכשיר.
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => { SoundManager.resumeFromUserGesture(); attemptLandscapeLock(); }}
+                className="flex-1 py-3 rounded-2xl bg-indigo-500 hover:bg-indigo-400 text-white font-black"
+              >
+                נסה לנעול לרוחב
+              </button>
+              <button
+                type="button"
+                onClick={() => { setDismissRotateOverlay(true); setShowRotateOverlay(false); }}
+                className="flex-1 py-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black"
+              >
+                המשך בכל זאת
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {activeMode === 'zombie' && <ZombieDefenseGame {...gameProps} />}
       {activeMode === 'economy' && <EconomyMarathonGame {...gameProps} />}
       {activeMode === 'boss' && <BossBattleGame {...gameProps} />}

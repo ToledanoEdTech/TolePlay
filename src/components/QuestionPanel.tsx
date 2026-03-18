@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { SoundManager } from '../utils/SoundManager';
 
 export interface Question {
   q: string;
@@ -58,6 +59,7 @@ export function QuestionPanel({
   const setCountRef = useRef(0);
   const [debugSetInfo, setDebugSetInfo] = useState<{ count: number; reason: string } | null>(null);
   const autoNextTimeoutRef = useRef<number | null>(null);
+  const [questionKey, setQuestionKey] = useState(0);
 
   const cloneQuestion = useCallback((q: Question | null): Question | null => {
     if (!q) return null;
@@ -85,6 +87,7 @@ export function QuestionPanel({
   const setQuestion = useCallback((reason: string) => {
     const q = pickRandom();
     setCurrentQ(q);
+    setQuestionKey((k) => k + 1);
     setCountRef.current += 1;
     setDebugSetInfo({ count: setCountRef.current, reason });
   }, [pickRandom]);
@@ -200,9 +203,11 @@ export function QuestionPanel({
       setFeedback('correct');
       setShowFloat(true);
       spawnConfetti();
+      SoundManager.playCorrectSound();
       onCorrect();
     } else {
       setFeedback('wrong');
+      SoundManager.playWrongSound();
       onWrong?.();
       setLocked(true);
       setLockTime(penaltySeconds);
@@ -304,7 +309,7 @@ export function QuestionPanel({
 
             return (
               <motion.button
-                key={`question-${sessionId}-answer-${i}`}
+                key={`question-${questionKey}-answer-${i}`}
                 whileTap={!feedback && !locked && !disabled ? { scale: 0.93 } : {}}
                 whileHover={!feedback && !locked && !disabled ? { scale: 1.02 } : {}}
                 disabled={!!feedback || locked || disabled}

@@ -3,6 +3,7 @@ import { Trophy, Heart, ShieldAlert, BookOpen, CheckCircle, XCircle, ShoppingCar
 import { QuestionPanel } from '../QuestionPanel';
 import { socket } from '../../socket';
 import { VirtualJoystick } from '../../engine/VirtualJoystick';
+import { SoundManager } from '../../utils/SoundManager';
 import {
   WORLD_W,
   WORLD_H,
@@ -330,11 +331,11 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
 
   const onCorrect = useCallback(() => {
     socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: true });
-    ctfSounds.playCorrect();
+    SoundManager.playCorrectSound();
   }, [roomCode, playerId]);
   const onWrong = useCallback(() => {
     socket.emit('submitAnswer', { code: roomCode, playerId, isCorrect: false });
-    ctfSounds.playWrong();
+    SoundManager.playWrongSound();
   }, [roomCode, playerId]);
 
   const toggleShop = useCallback(() => {
@@ -559,11 +560,11 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
             socket.emit('action', { code: roomCode, playerId, actionType: 'shoot', aimAngle: i.angle });
             lastShootRef.current = now;
             const wId = weaponId;
-            ctfSounds.playShoot(wId);
-            if (myP.modeState.ammo === 1) ctfSounds.playEmpty();
+            SoundManager.playShootSound();
+            if (myP.modeState.ammo === 1) SoundManager.playWrongSound();
           } else if (i.shoot && (myP?.modeState?.ammo ?? 0) <= 0 && now - lastShootRef.current > 500) {
             lastShootRef.current = now;
-            ctfSounds.playEmpty();
+            SoundManager.playWrongSound();
           }
         }
       }
@@ -608,7 +609,9 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
       }
 
       const isMobileView = typeof window !== 'undefined' && window.innerWidth < 768;
-      const viewScale = isMobileView ? 0.72 : 1;
+      const isLandscape = typeof window !== 'undefined' && window.innerWidth > window.innerHeight;
+      // Mobile FOV: zoom out further in landscape to free up central gameplay space.
+      const viewScale = isMobileView ? (isLandscape ? 0.65 : 0.72) : 1;
       const viewW = canvas.width / viewScale;
       const viewH = canvas.height / viewScale;
 

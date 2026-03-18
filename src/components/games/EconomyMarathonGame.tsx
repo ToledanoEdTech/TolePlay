@@ -11,6 +11,7 @@ import {
   tickParticlesInPlace, tickShake, triggerShake,
   createDust, drawDust, drawGlow, colorAlpha, roundRect,
 } from './renderUtils';
+import { SoundManager } from '../../utils/SoundManager';
 import { ProceduralPlayer, type FacingDir } from './ProceduralPlayer';
 import type { CameraState } from '../../engine/types';
 import { ensureRemoteState, stepRemoteLerp, type RenderLerpState2D } from '../../engine/netLerp';
@@ -134,6 +135,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
     const newGold = player?.resources || 0;
     if (newGold > prevGoldRef.current) {
       triggerShake(shakeRef.current, Math.min(4, (newGold - prevGoldRef.current) * 0.01));
+      SoundManager.playCollectSound();
       goldPulseRef.current = (goldPulseRef.current + 1) | 0;
     }
     prevGoldRef.current = newGold;
