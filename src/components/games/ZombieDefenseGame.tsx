@@ -1082,7 +1082,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
           onPointerLeave={handlePointerUp}
           onPointerCancel={handlePointerUp}
         />
-        <div className="absolute top-20 right-2 w-24 h-24 min-[480px]:top-24 min-[480px]:left-4 min-[480px]:w-32 min-[480px]:h-32 bg-slate-900/80 border-2 border-slate-700 rounded-lg pointer-events-none overflow-hidden backdrop-blur-md opacity-80" dir="ltr">
+        <div className="zombie-minimap absolute top-20 right-2 w-24 h-24 min-[480px]:top-24 min-[480px]:left-4 min-[480px]:w-32 min-[480px]:h-32 bg-slate-900/80 border-2 border-slate-700 rounded-lg pointer-events-none overflow-hidden backdrop-blur-md opacity-80" dir="ltr">
           <canvas ref={minimapRef} width={128} height={128} className="w-full h-full" />
         </div>
         {/* Local leaderboard removed — use universal `Leaderboard` overlay in `PlayerView`. */}
@@ -1100,7 +1100,7 @@ export function ZombieDefenseGame({ roomCode, playerId, player, questions, globa
       </div>
 
       {/* HUD – responsive for mobile: wrap, no overlap */}
-      <div className="absolute top-0 left-0 right-0 z-20 px-2 pt-1.5 pb-2 min-[480px]:p-2 bg-gradient-to-b from-black/85 to-transparent pointer-events-none">
+      <div className="zombie-top-hud absolute top-0 left-0 right-0 z-20 px-2 pt-1.5 pb-2 min-[480px]:p-2 bg-gradient-to-b from-black/85 to-transparent pointer-events-none">
         <div className="flex flex-wrap gap-1.5 items-center justify-between">
           <div className="flex flex-wrap gap-1.5 items-center min-w-0">
             <span className="text-[10px] min-[480px]:text-xs font-bold text-blue-300 shrink-0">הגנת זומבים</span>

@@ -263,6 +263,142 @@ input:focus {
   }
 }
 
+/* ============================================================
+   GLOBAL: Mobile Landscape HUD Shrink (all games)
+   Target: very low vertical height in landscape phones.
+   ============================================================ */
+@media (max-height: 500px) and (orientation: landscape) {
+  /* Generic helper (opt-in via className) */
+  .tp-landscape-hud {
+    top: 0 !important;
+    padding: 0.2rem 0.35rem !important;
+    margin: 0 !important;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.35), rgba(0,0,0,0)) !important;
+    backdrop-filter: blur(8px) !important;
+    -webkit-backdrop-filter: blur(8px) !important;
+    transform: scale(0.65) !important;
+    transform-origin: top center !important;
+  }
+  .tp-landscape-hud * {
+    line-height: 1.05 !important;
+  }
+
+  /* CTF */
+  .ctf-hud-root {
+    top: 0 !important;
+    padding: 0.15rem 0.25rem !important;
+    gap: 0.25rem !important;
+  }
+  .ctf-hud-bar {
+    padding: 0.2rem 0.35rem !important;
+    background: rgba(0,0,0,0.32) !important;
+    border-radius: 0 0 0.75rem 0.75rem !important;
+    transform: scale(0.65) !important;
+    transform-origin: top left !important;
+  }
+  .ctf-hud-player-panel {
+    transform: scale(0.65) !important;
+    transform-origin: top right !important;
+    background: rgba(0,0,0,0.28) !important;
+  }
+  .ctf-hud-root button {
+    transform: none !important;
+  }
+  .ctf-hud-root .bg-slate-900\/90,
+  .ctf-hud-root .bg-slate-900\/95,
+  .ctf-hud-root .bg-slate-900\/80 {
+    background: rgba(0,0,0,0.32) !important;
+  }
+  .ctf-hud-root .ctf-score-label,
+  .ctf-hud-root .ctf-player-name,
+  .ctf-hud-root .ctf-ammo-label,
+  .ctf-hud-root .ctf-weapon-label {
+    font-size: 12px !important;
+  }
+  .ctf-hud-root .ctf-score-value,
+  .ctf-hud-root .ctf-ammo-value {
+    font-size: 14px !important;
+  }
+  .ctf-game-container .ctf-messages {
+    top: 2.35rem !important;
+    transform: translateX(-50%) scale(0.75) !important;
+    transform-origin: top center !important;
+  }
+
+  /* Zombie */
+  .zombie-game-root .zombie-top-hud {
+    top: 0 !important;
+    padding: 0.2rem 0.35rem !important;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.35), rgba(0,0,0,0)) !important;
+    transform: scale(0.65) !important;
+    transform-origin: top left !important;
+  }
+  .zombie-game-root .zombie-out-of-ammo-banner {
+    top: 1.85rem !important;
+    transform: translateX(-50%) scale(0.7) !important;
+    transform-origin: top center !important;
+    background: rgba(120, 53, 15, 0.55) !important;
+  }
+  .zombie-game-root .zombie-minimap {
+    transform: scale(0.75) !important;
+    transform-origin: top right !important;
+    opacity: 0.75 !important;
+  }
+
+  /* Economy */
+  .economy-top-hud {
+    top: 0 !important;
+    padding: 0.2rem 0.35rem !important;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.35), rgba(0,0,0,0)) !important;
+    transform: scale(0.65) !important;
+    transform-origin: top left !important;
+  }
+  .economy-top-hud .economy-energy-bar {
+    margin-top: 0.25rem !important;
+    height: 2rem !important;
+    min-height: 32px !important;
+    background: rgba(0,0,0,0.28) !important;
+  }
+  .economy-top-hud .economy-stat {
+    padding: 0.2rem 0.35rem !important;
+  }
+  .economy-game-root .economy-alert-inline {
+    top: 2.15rem !important;
+    transform: translateX(-50%) scale(0.75) !important;
+    transform-origin: top center !important;
+    background: rgba(120, 53, 15, 0.55) !important;
+  }
+
+  /* Boss */
+  .boss-game-root .boss-top-hud {
+    top: 0 !important;
+    padding: 0.2rem 0.35rem !important;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.32), rgba(0,0,0,0)) !important;
+    transform: scale(0.65) !important;
+    transform-origin: top left !important;
+  }
+  .boss-game-root .boss-health-panel {
+    top: 0.1rem !important;
+    transform: translateX(-50%) scale(0.62) !important;
+    transform-origin: top center !important;
+    background: rgba(0,0,0,0.28) !important;
+  }
+
+  /* Asteroid (Farm) */
+  .asteroid-game-root .asteroid-top-hud {
+    top: 0 !important;
+    padding: 0.2rem 0.35rem !important;
+    transform: scale(0.65) !important;
+    transform-origin: top left !important;
+    background: rgba(0,0,0,0.30) !important;
+  }
+  .asteroid-game-root .asteroid-ammo-hud {
+    transform: scale(0.65) !important;
+    transform-origin: bottom right !important;
+    opacity: 0.85 !important;
+  }
+}
+
 /* CTF game: mobile viewport and touch controls */
 @media (max-width: 768px) {
   .ctf-game-container {

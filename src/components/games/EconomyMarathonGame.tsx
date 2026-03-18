@@ -359,7 +359,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
   const myRank = sorted.findIndex((p: any) => p.id === playerId) + 1;
 
   return (
-    <div className="fixed inset-0 bg-[#050a0f] text-white flex flex-col">
+    <div className="economy-game-root fixed inset-0 bg-[#050a0f] text-white flex flex-col">
       <style>
         {`
           @media (max-width: 768px) {
@@ -479,7 +479,7 @@ export function EconomyMarathonGame({ roomCode, playerId, player, questions, glo
             initial={{ y: -30, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: -30, opacity: 0 }}
-            className="absolute top-20 left-1/2 -translate-x-1/2 z-30 bg-amber-900/95 px-6 py-3 rounded-xl border-2 border-amber-500/60 pointer-events-none"
+            className="economy-alert-inline absolute top-20 left-1/2 -translate-x-1/2 z-30 bg-amber-900/95 px-6 py-3 rounded-xl border-2 border-amber-500/60 pointer-events-none"
           >
             <p className="text-amber-200 font-bold text-lg">⚡ אנרגיה נמוכה! לחץ על &quot;שאלות&quot; וענה נכון למלא אנרגיה</p>
           </motion.div>

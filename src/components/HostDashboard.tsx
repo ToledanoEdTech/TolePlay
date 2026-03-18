@@ -483,7 +483,9 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
     setSavingQuiz(true);
     try {
       await saveQuiz(user.uid, { title, questions: customQuestions });
-      setSavedQuizzes(prev => [...prev, { title, questions: customQuestions, createdAt: Date.now(), updatedAt: Date.now() }]);
+      // Refresh from source-of-truth so ids/timestamps are correct.
+      const refreshed = await loadQuizzes(user.uid);
+      setSavedQuizzes(refreshed);
     } finally {
       setSavingQuiz(false);
     }
@@ -605,6 +607,30 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                   )}
                 </div>
 
+                {user && customQuestions.length > 0 && quizSourceTab !== 'saved' && (
+                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6 bg-slate-950/40 p-4 rounded-2xl border border-slate-800">
+                    <div className="text-slate-300 font-bold">
+                      יש לך {customQuestions.length} שאלות מוכנות — אפשר לשמור כחידון
+                    </div>
+                    <div className="flex items-center gap-3 justify-end">
+                      <input
+                        type="text"
+                        value={saveQuizTitle}
+                        onChange={(e) => setSaveQuizTitle(e.target.value)}
+                        placeholder="שם החידון (לשמירה)"
+                        className="bg-slate-800 border border-slate-600 rounded-xl px-4 py-2 w-56"
+                      />
+                      <button
+                        onClick={handleSaveQuiz}
+                        disabled={savingQuiz}
+                        className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-xl font-bold disabled:opacity-50"
+                      >
+                        <Save size={18} /> שמור חידון
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {quizSourceTab === 'upload' && (
                   <div className="flex flex-col md:flex-row items-center justify-between gap-8">
                     <div>
@@ -638,20 +664,6 @@ export function HostDashboard({ onBack }: { onBack: () => void }) {
                       <button onClick={addQuestion} className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-xl font-bold">
                         <Plus size={20} /> הוסף שאלה
                       </button>
-                      {user && customQuestions.length > 0 && (
-                        <div className="flex items-center gap-3">
-                          <input
-                            type="text"
-                            value={saveQuizTitle}
-                            onChange={(e) => setSaveQuizTitle(e.target.value)}
-                            placeholder="שם החידון (לשמירה)"
-                            className="bg-slate-800 border border-slate-600 rounded-xl px-4 py-2 w-48"
-                          />
-                          <button onClick={handleSaveQuiz} disabled={savingQuiz} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-xl font-bold disabled:opacity-50">
-                            <Save size={18} /> שמור חידון
-                          </button>
-                        </div>
-                      )}
                     </div>
                     <div className="max-h-80 overflow-y-auto space-y-4 custom-scrollbar">
                       {customQuestions.length === 0 ? (

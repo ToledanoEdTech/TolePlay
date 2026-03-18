@@ -1134,7 +1134,7 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
         )}
       </AnimatePresence>
 
-      <div className="absolute top-0 left-0 right-0 z-20 p-3 bg-gradient-to-b from-black/70 to-transparent pointer-events-none">
+      <div className="boss-top-hud absolute top-0 left-0 right-0 z-20 p-3 bg-gradient-to-b from-black/70 to-transparent pointer-events-none">
         <div className="flex justify-between items-center flex-wrap gap-2">
           <div className="flex items-center gap-3">
             <Clock size={18} className="text-yellow-400" />
@@ -1161,7 +1161,7 @@ export function BossBattleGame({ roomCode, playerId, player, questions, globalSt
           </div>
         </div>
         {(aliveBosses.length > 0 || hasAiBoss) && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 w-full max-w-[520px] px-4">
+          <div className="boss-health-panel absolute top-4 left-1/2 -translate-x-1/2 z-30 w-full max-w-[520px] px-4">
             {hasAiBoss ? (
               <div className="bg-black/60 backdrop-blur-sm px-6 py-3 rounded-2xl border-2 border-[#9b59b6] shadow-xl text-center">
                 <h2 className="text-lg font-black text-[#e056fd] mb-2 drop-shadow-[0_0_10px_rgba(224,86,253,0.8)]">

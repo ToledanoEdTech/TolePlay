@@ -1172,7 +1172,7 @@ export function CTFGame({ roomCode, playerId, player, questions, globalState, al
       </div>
 
       {/* Messages */}
-      <div className="absolute top-40 left-1/2 -translate-x-1/2 flex flex-col items-center gap-3 z-20 pointer-events-none w-full max-w-lg">
+      <div className="ctf-messages absolute top-40 left-1/2 -translate-x-1/2 flex flex-col items-center gap-3 z-20 pointer-events-none w-full max-w-lg">
         {messages.map((msg) => (
           <div key={msg.id} className="bg-slate-800/95 text-white px-8 py-3 rounded-full shadow-2xl border border-slate-600/50 font-bold text-lg animate-in fade-in duration-300">
             {msg.text}
